@@ -16,43 +16,31 @@ from google.genai import types
 
 # 1. Setup & Configuration
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-st.set_page_config(page_title="Gatekeeper - Stock Ideas & Screener", layout="wide")
+st.set_page_config(page_title="Gatekeeper - Institutional Terminal & Screener", layout="wide")
 
-# API Keys from Secrets
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "WjBiiHX1")
 
-# 2. HELPER CALCULATIONS
-
+# 2. TECHNICAL CALCULATIONS
 def calculate_rsi(df, window=14):
-    """Calculates 14-day Relative Strength Index (RSI)."""
     if len(df) < window:
         return "N/A"
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    
-    # Avoid division by zero
     loss = loss.replace(0, 1e-10)
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
     return round(rsi.iloc[-1], 2)
 
 # 3. CORE LOGIC FUNCTIONS
-
 def resolve_name_to_ticker(stock_input):
-    """Uses Yahoo's native search API, strictly filtering for Indian Stocks."""
     stock_str = str(stock_input).strip()
-    
     if stock_str.isdigit():
         return stock_str + '.BO'
-        
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={stock_str}"
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-            'Accept': 'application/json'
-        }
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', 'Accept': 'application/json'}
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
@@ -63,7 +51,6 @@ def resolve_name_to_ticker(stock_input):
                         return sym
     except Exception:
         pass
-        
     upper_input = stock_str.upper().replace(" ", "")
     if not upper_input.endswith(('.NS', '.BO')):
          return upper_input + '.NS'
@@ -71,73 +58,69 @@ def resolve_name_to_ticker(stock_input):
 
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    """Fetches full stock profile, price history, ratios, and news."""
     stock = yf.Ticker(resolved_ticker)
-    
-    # Fetch 1 year historical data for RSI and price checks
     hist = stock.history(period="1y")
     if hist.empty:
-        raise ValueError(f"Could not find '{raw_input}' on the NSE or BSE. Please check the spelling.")
+        raise ValueError(f"Could not find '{raw_input}' on NSE or BSE.")
         
     info = stock.info
-    price = info.get("currentPrice")
-    if price is None:
-        price = round(hist['Close'].iloc[-1], 2)
-        
-    # Valuation & Technical Indicators
+    price = info.get("currentPrice", round(hist['Close'].iloc[-1], 2))
+    
     rsi_val = calculate_rsi(hist, 14)
     peg_ratio = info.get("pegRatio", "N/A")
     roe = info.get("returnOnEquity", "N/A")
-    if roe != "N/A": roe = f"{round(roe * 100, 2)}%"
-    
+    if roe != "N/A": roe = round(roe * 100, 2)
     roa = info.get("returnOnAssets", "N/A")
-    if roa != "N/A": roa = f"{round(roa * 100, 2)}%"
+    if roa != "N/A": roa = round(roa * 100, 2)
     
-    # Quarterly PAT (Net Income) Growth: QoQ & YoY
+    dividend_yield = info.get("dividendYield", "N/A")
+    if dividend_yield != "N/A" and dividend_yield is not None:
+        dividend_yield = round(dividend_yield * 100, 2)
+
     pat_qoq, pat_yoy = "N/A", "N/A"
     try:
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             net_inc = q_fin.loc['Net Income'].dropna()
             if len(net_inc) >= 2 and net_inc.iloc[1] != 0:
-                pat_qoq = f"{round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)}%"
-            if len(net_inc) >= 4 and net_inc.iloc[3] != 0:
-                pat_yoy = f"{round(((net_inc.iloc[0] - net_inc.iloc[3]) / abs(net_inc.iloc[3])) * 100, 2)}%"
+                pat_qoq = round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)
+            if len(net_inc) >= 5 and net_inc.iloc[4] != 0:
+                pat_yoy = round(((net_inc.iloc[0] - net_inc.iloc[4]) / abs(net_inc.iloc[4])) * 100, 2)
     except Exception:
         pass
 
-    # Shareholding Breakdown
     insider_h = (info.get("heldPercentInsiders") or 0) * 100
     inst_h = (info.get("heldPercentInstitutions") or 0) * 100
     public_h = max(0, 100 - (insider_h + inst_h))
     
     shareholding = {
-        "Promoters/Insiders": round(insider_h, 2),
+        "Promoters / Insiders": round(insider_h, 2),
         "Institutions (FII/DII)": round(inst_h, 2),
-        "Public": round(public_h, 2)
+        "General Public": round(public_h, 2)
     }
 
-    # Core Metrics Dictionary
     metrics = {
         "name": info.get("longName", resolved_ticker),
         "price": price,
         "pe_ratio": info.get("trailingPE", "N/A"),
         "peg_ratio": peg_ratio,
-        "roe": roe,
-        "roce_roa": roa,
-        "pat_qoq": pat_qoq,
-        "pat_yoy": pat_yoy,
+        "roe": f"{roe}%" if roe != "N/A" else "N/A",
+        "roce_roa": f"{roa}%" if roa != "N/A" else "N/A",
+        "dividend_yield": f"{dividend_yield}%" if dividend_yield != "N/A" else "N/A",
+        "pat_qoq": f"{pat_qoq}%" if pat_qoq != "N/A" else "N/A",
+        "pat_yoy": f"{pat_yoy}%" if pat_yoy != "N/A" else "N/A",
         "rsi": rsi_val,
         "debt_to_equity": info.get("debtToEquity", "N/A"),
         "net_margin": info.get("profitMargins", "N/A"),
         "market_cap": info.get("marketCap", "N/A"),
         "industry": info.get("industry", "N/A"),
+        "sector": info.get("sector", "N/A"),
+        "shares_outstanding": info.get("sharesOutstanding", "N/A"),
         "shareholding": shareholding,
         "recent_news": "",
         "working_ticker": resolved_ticker
     }
     
-    # News Headlines
     try:
         news_items = stock.news
         if news_items:
@@ -146,116 +129,76 @@ def fetch_stock_data(resolved_ticker, raw_input):
         else:
             metrics["recent_news"] = "No recent major headlines."
     except Exception:
-        metrics["recent_news"] = "News fetching unavailable."
+        metrics["recent_news"] = "News unavailable."
     
-    # Format Debt and Margin
     if metrics["debt_to_equity"] != "N/A": 
         try: metrics["debt_to_equity"] = round(metrics["debt_to_equity"] / 100, 2)
-        except: metrics["debt_to_equity"] = "N/A"
-        
+        except: pass
     if metrics["net_margin"] != "N/A": 
         try: metrics["net_margin"] = f"{round(metrics['net_margin'] * 100, 2)}%"
-        except: metrics["net_margin"] = "N/A"
-        
-    # Net Income and Debt Trends
-    try:
-        fin = stock.financials
-        if fin is not None and not fin.empty and 'Net Income' in fin.index:
-            ni_data = fin.loc['Net Income'].dropna()
-            if len(ni_data) >= 2: metrics['net_income_trend'] = f"Net income moved from INR {ni_data.iloc[-1]:,.0f} to INR {ni_data.iloc[0]:,.0f}."
-            else: metrics['net_income_trend'] = "Insufficient historical net income data."
-        else: metrics['net_income_trend'] = "No historical net income available."
-        
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty and 'Total Debt' in bs.index:
-            td_data = bs.loc['Total Debt'].dropna()
-            if len(td_data) >= 2: metrics['debt_trend'] = f"Total Debt moved from INR {td_data.iloc[-1]:,.0f} to INR {td_data.iloc[0]:,.0f}."
-            else: metrics['debt_trend'] = "Insufficient historical debt data."
-        else: metrics['debt_trend'] = "No historical debt available."
-    except Exception: 
-        metrics['net_income_trend'] = "Could not fetch history."
-        metrics['debt_trend'] = "Could not fetch history."
+        except: pass
         
     return metrics
 
-def generate_report_content(stock_name, metrics, ticker):
-    """Generates institutional qualitative AI analysis using Gemini."""
+def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
     
     system_instruction = """
-    Act as an automated, professional-grade equity research assistant built in the style of an institutional advisory report. You are a ruthless analyst evaluating 360-degree risk.
-    Do not use any markdown tags, asterisks, or hash symbols in your response. Output raw text separated by clean line breaks.
+    You are an elite institutional equity analyst building a rigorous, multi-module stock intelligence dossier styled after professional SimplyWallSt terminal reports.
+    Do not use markdown hash symbols or asterisks. Output clean raw text with clear section headers.
     
-    CRITICAL STRUCTURE INSTRUCTION:
-    Your response MUST begin exactly with these three variables for the engine parser, substituting the brackets with values:
-    DYNAMIC_SECTOR: [Insert brief industry category]
-    DYNAMIC_RATING: [Insert exactly one of these: STRONG BUY, BUY, HOLD, DON'T BUY, SELL]
-    DYNAMIC_DURATION: [STRICT RULE: If Rating is DON'T BUY or SELL, this MUST be "N/A". If Swing Trade/Momentum, use "1-3 Months". If Long-Term Compounder, use "3-5 Years".]
+    MANDATORY PRE-AMBLE VARIABLES (Exact format on first 3 lines):
+    DYNAMIC_SECTOR: [Insert Industry]
+    DYNAMIC_RATING: [STRONG BUY, BUY, HOLD, DON'T BUY, or SELL]
+    DYNAMIC_DURATION: [1-3 Months, 3-5 Years, or N/A]
     
-    Following those lines, proceed immediately to the standard report using these exact headers:
-    COMPANY OVERVIEW
-    FUNDAMENTAL & MOMENTUM ANALYSIS
-    MACRO AND SECTOR CATALYSTS
-    KEY RISKS
-    ACTIONABLE VERDICT
+    Structure your deep-dive analysis using EXACTLY these 8 numbered headers:
+    1. VALUATION & FAIR VALUE
+    2. FUTURE GROWTH & OUTLOOK
+    3. PAST PERFORMANCE & EARNINGS QUALITY
+    4. FINANCIAL HEALTH & BALANCE SHEET
+    5. DIVIDEND & CAPITAL ALLOCATION
+    6. MANAGEMENT & COMPENSATION
+    7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
+    8. SUMMARY VERDICT & KEY RISKS
     
-    ANALYST RULES (MACRO & RISKS):
-    1. Read the provided parameters including PEG ratio, RSI, and Recent Headlines. Evaluate technical entry points and financial valuations against macro headwinds.
-    2. OVERRIDE RULE: If severe external threats exist in headlines or margins are razor-thin, downgrade the rating (e.g., to HOLD, DON'T BUY, or SELL), even if historical momentum looks good.
-    
-    VERDICT FORMATTING RULE:
-    Under the ACTIONABLE VERDICT header, output exactly two things:
-    Line 1: The DYNAMIC_RATING itself in all caps (e.g., HOLD).
-    Line 2: The detailed explanation of the verdict, explicitly weighing quantitative numbers against recent news.
+    Provide comprehensive, professional commentary covering DCF context, P/E multiples, balance sheet integrity, and management efficiency for each section.
     """
     
     user_prompt = f"""
-    Analyze this stock:
-    Company Name: {metrics['name']}
-    Ticker: {ticker}
-    Current Price: INR {metrics['price']}
-    TTM P/E Ratio: {metrics['pe_ratio']}
-    PEG Ratio: {metrics['peg_ratio']}
+    Target Company Data:
+    Company Name: {metrics['name']} ({ticker})
+    Current Market Price: INR {metrics['price']}
+    Market Cap: INR {metrics['market_cap']}
+    P/E Ratio: {metrics['pe_ratio']} | PEG Ratio: {metrics['peg_ratio']}
     ROE: {metrics['roe']} | ROA/ROCE Proxy: {metrics['roce_roa']}
+    Dividend Yield: {metrics['dividend_yield']}
     14-Day RSI: {metrics['rsi']}
     PAT Growth YoY: {metrics['pat_yoy']} | QoQ: {metrics['pat_qoq']}
-    Debt-to-Equity Ratio: {metrics['debt_to_equity']}
-    Net Profit Margin: {metrics['net_margin']}
-    Market Cap: INR {metrics['market_cap']}
-    
-    HISTORICAL TRENDS:
-    Net Income Trend: {metrics['net_income_trend']}
-    Debt Trend: {metrics['debt_trend']}
-    
-    RECENT HEADLINES (For Macro Risk Assessment):
-    {metrics['recent_news']}
+    Debt to Equity: {metrics['debt_to_equity']}
+    Net Margin: {metrics['net_margin']}
+    Industry: {metrics['industry']} | Sector: {metrics['sector']}
+    Recent News Headwinds/Catalysts: {metrics['recent_news']}
     """
     
     response = client.models.generate_content(
-        model='gemini-3.5-flash-lite', 
-        contents=user_prompt, 
-        config=types.GenerateContentConfig(
-            system_instruction=system_instruction, 
-            temperature=0.15
-        )
+        model='gemini-3.5-flash-lite',
+        contents=user_prompt,
+        config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
     )
     return response.text
 
-def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
-    """Builds formal institutional PDF using ReportLab."""
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=45, leftMargin=45, topMargin=45, bottomMargin=45)
-    styles = getSampleStyleSheet()
+def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
     
-    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=24, leading=28, textColor=colors.HexColor('#1A365D'))
-    subtitle_style = ParagraphStyle('DocSub', fontName='Helvetica-Bold', fontSize=12, leading=16, textColor=colors.HexColor('#718096'))
-    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=14, leading=18, textColor=colors.HexColor('#2B6CB0'), spaceBefore=15, spaceAfter=8)
-    body_style = ParagraphStyle('BodyTextCustom', fontName='Helvetica', fontSize=10, leading=15, textColor=colors.HexColor('#2D3748'))
-    table_text = ParagraphStyle('TableText', fontName='Helvetica', fontSize=9, leading=12, textColor=colors.white)
-    table_val = ParagraphStyle('TableVal', fontName='Helvetica-Bold', fontSize=9, leading=12, textColor=colors.white)
+    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
+    subtitle_style = ParagraphStyle('DocSub', fontName='Helvetica-Bold', fontSize=8.5, leading=11, textColor=colors.HexColor('#718096'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#2B6CB0'), spaceBefore=8, spaceAfter=3)
+    body_style = ParagraphStyle('BodyTextCustom', fontName='Helvetica', fontSize=8, leading=11, textColor=colors.HexColor('#2D3748'))
+    table_text = ParagraphStyle('TableText', fontName='Helvetica', fontSize=7, leading=9, textColor=colors.white)
+    table_val = ParagraphStyle('TableVal', fontName='Helvetica-Bold', fontSize=7, leading=9, textColor=colors.white)
     
-    rating_colors = {
-        "STRONG BUY": "#15803D", "DON'T BUY": "#DC2626", "BUY": "#172554", "HOLD": "#D97706", "SELL": "#1E3A8A"
-    }
+    rating_colors = {"STRONG BUY": "#15803D", "DON'T BUY": "#DC2626", "BUY": "#172554", "HOLD": "#D97706", "SELL": "#1E3A8A"}
     
     sector_val, duration_val, rating_val = "Growth / Cyclical", "N/A", "EVALUATED"
     clean_lines = []
@@ -268,38 +211,38 @@ def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
         elif line_str: clean_lines.append(line_str)
                 
     story = [
-        Paragraph("Gatekeeper Research", title_style), 
-        Paragraph("Automated Equity & Quantitative Report — Institutional Series", subtitle_style),
-        Spacer(1, 15)
+        Paragraph("Gatekeeper Institutional Research", title_style), 
+        Paragraph(f"Comprehensive Terminal Dossier — {metrics['name']} ({ticker})", subtitle_style),
+        Spacer(1, 6)
     ]
     
     current_rating = rating_val.upper().strip()
     target_hex = rating_colors.get(current_rating, "#FFFFFF")
     grid_rating_display = f"<font color='{target_hex}'><b>{current_rating}</b></font>"
     
-    data = [
-        [Paragraph("<b>Company:</b>", table_text), Paragraph(str(metrics['name']), table_val), Paragraph("<b>Category:</b>", table_text), Paragraph(sector_val, table_val)],
-        [Paragraph("<b>Price:</b>", table_text), Paragraph(f"INR {metrics['price']}", table_val), Paragraph("<b>Time Horizon:</b>", table_text), Paragraph(duration_val, table_val)],
-        [Paragraph("<b>P/E | PEG:</b>", table_text), Paragraph(f"{metrics['pe_ratio']}x | {metrics['peg_ratio']}", table_val), Paragraph("<b>ROE | ROA:</b>", table_text), Paragraph(f"{metrics['roe']} | {metrics['roce_roa']}", table_val)],
-        [Paragraph("<b>PAT YoY Growth:</b>", table_text), Paragraph(str(metrics['pat_yoy']), table_val), Paragraph("<b>Verdict Rating:</b>", table_text), Paragraph(grid_rating_display, table_val)]
+    table_data = [
+        [Paragraph("<b>Company:</b>", table_text), Paragraph(str(metrics['name']), table_val), Paragraph("<b>Sector:</b>", table_text), Paragraph(sector_val, table_val)],
+        [Paragraph("<b>Price / Cap:</b>", table_text), Paragraph(f"INR {metrics['price']}", table_val), Paragraph("<b>Horizon:</b>", table_text), Paragraph(duration_val, table_val)],
+        [Paragraph("<b>P/E | PEG:</b>", table_text), Paragraph(f"{metrics['pe_ratio']}x | {metrics['peg_ratio']}", table_val), Paragraph("<b>ROE | Div:</b>", table_text), Paragraph(f"{metrics['roe']} | {metrics['dividend_yield']}", table_val)],
+        [Paragraph("<b>PAT YoY Growth:</b>", table_text), Paragraph(str(metrics['pat_yoy']), table_val), Paragraph("<b>Terminal Rating:</b>", table_text), Paragraph(grid_rating_display, table_val)]
     ]
     
-    t = Table(data, colWidths=[100, 160, 100, 160])
+    t = Table(table_data, colWidths=[105, 165, 100, 170])
     t.setStyle(TableStyle([
         ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#2B6CB0')),
         ('ALIGN', (0,0), (-1,-1), 'LEFT'),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('TOPPADDING', (0,0), (-1,-1), 8),
-        ('BOTTOMPADDING', (0,0), (-1,-1), 8),
-        ('LEFTPADDING', (0,0), (-1,-1), 10),
-        ('RIGHTPADDING', (0,0), (-1,-1), 10),
+        ('TOPPADDING', (0,0), (-1,-1), 4),
+        ('BOTTOMPADDING', (0,0), (-1,-1), 4),
+        ('LEFTPADDING', (0,0), (-1,-1), 6),
+        ('RIGHTPADDING', (0,0), (-1,-1), 6),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#4299E1')),
     ]))
     story.append(t)
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 6))
     
     for line in clean_lines:
-        if any(h in line for h in ["COMPANY OVERVIEW", "FUNDAMENTAL & MOMENTUM ANALYSIS", "MACRO AND SECTOR CATALYSTS", "KEY RISKS", "ACTIONABLE VERDICT"]):
+        if any(h in line for h in ["1. VALUATION", "2. FUTURE GROWTH", "3. PAST PERFORMANCE", "4. FINANCIAL HEALTH", "5. DIVIDEND", "6. MANAGEMENT", "7. OWNERSHIP", "8. SUMMARY VERDICT"]):
             story.append(Paragraph(line, h1_style))
         else:
             processed_line = line
@@ -308,31 +251,30 @@ def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
                     pattern = r'(?i)(?<![a-zA-Z])' + re.escape(r_text) + r'(?![a-zA-Z])'
                     processed_line = re.sub(pattern, f'<font color="{rating_colors[r_text]}"><b>{r_text}</b></font>', processed_line)
             story.append(Paragraph(processed_line, body_style))
-            story.append(Spacer(1, 4))
+            story.append(Spacer(1, 2))
             
     doc.build(story)
 
-# 4. STREAMLIT INTERFACE
-
+# 4. STREAMLIT USER INTERFACE
 if 'report_data' not in st.session_state:
     st.session_state.report_data = None
 
-st.title("🛡️ Gatekeeper - Stock Screener & Research")
-st.caption("Quantitative Dashboard & Institutional AI Intelligence for NSE/BSE Stocks")
+st.title("🛡️ Gatekeeper - Institutional Terminal & Screener")
+st.caption("SimplyWallSt Modular Multi-Angle Financial Intelligence Dashboard")
 
-stock_input = st.text_input("Enter Stock Name or Ticker (e.g., Reliance, Tata Motors, 505685):")
+stock_input = st.text_input("Enter Stock Name or Ticker (e.g., Reliance, Tata Motors, HBL):")
 
-if st.button("Analyze Stock", type="primary"):
+if st.button("Generate Terminal Dossier", type="primary"):
     if not stock_input.strip():
-        st.warning("Please enter a valid stock name.")
+        st.warning("Please enter a valid stock identifier.")
     else:
-        with st.spinner('Fetching quantitative metrics & analyzing live headlines...'):
+        with st.spinner('Compiling comprehensive quantitative metrics & qualitative modules...'):
             try:
                 resolved_ticker = resolve_name_to_ticker(stock_input)
                 metrics = fetch_stock_data(resolved_ticker, stock_input)
                 final_ticker = metrics.pop('working_ticker')
                 
-                ai_text = generate_report_content(stock_input, metrics, final_ticker)
+                ai_text = generate_comprehensive_report(metrics, final_ticker)
                 st.session_state.report_data = {
                     "metrics": metrics, 
                     "ai_text": ai_text, 
@@ -340,19 +282,15 @@ if st.button("Analyze Stock", type="primary"):
                     "ticker": final_ticker
                 }
             except Exception as e:
-                st.error(f"Error analyzing stock: {e}")
-
-# 5. DASHBOARD & DISPLAY
+                st.error(f"Error building report: {e}")
 
 if st.session_state.report_data:
     data = st.session_state.report_data
     m = data['metrics']
     
-    st.success(f"Analysis Complete for: **{m['name']} ({data['ticker']})**")
+    st.success(f"Terminal Report Ready: **{m['name']} ({data['ticker']})**")
     
-    # --- QUANTITATIVE METRICS CARDS ---
-    st.subheader("📊 Quantitative Financial Dashboard")
-    
+    # --- TOP METRICS ROW ---
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Current Price", f"₹{m['price']}")
     c1.metric("P/E Ratio", f"{m['pe_ratio']}x")
@@ -361,64 +299,88 @@ if st.session_state.report_data:
     c2.metric("14-Day RSI", f"{m['rsi']}")
     
     c3.metric("ROE", f"{m['roe']}")
-    c3.metric("ROA / ROCE Proxy", f"{m['roce_roa']}")
+    c3.metric("Dividend Yield", f"{m['dividend_yield']}")
     
     c4.metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
     c4.metric("PAT Growth (QoQ)", f"{m['pat_qoq']}")
 
     st.markdown("---")
     
-    # --- CHARTS SECTION (SimplyWallSt / Finology Style) ---
-    col_chart1, col_chart2 = st.columns(2)
+    # --- SNOWFLAKE SUMMARY COMPONENT ---
+    st.markdown("### ❄️ Gatekeeper Health & Check Summary")
+    col_r, col_risk = st.columns(2)
+    with col_r:
+        st.markdown("**🟢 Key Rewards / Strengths**")
+        if m['pe_ratio'] != "N/A" and float(m['pe_ratio']) < 30:
+            st.markdown("- Attractive P/E ratio relative to historical earnings baseline.")
+        if m['roe'] != "N/A" and float(m['roe'].replace('%','')) > 15:
+            st.markdown(f"- Strong Return on Equity ({m['roe']}).")
+        if m['pat_yoy'] != "N/A" and float(m['pat_yoy'].replace('%','')) > 20:
+            st.markdown(f"- High YoY Earnings Growth ({m['pat_yoy']}).")
+        else:
+            st.markdown("- Stable operating fundamentals verified.")
+            
+    with col_risk:
+        st.markdown("**⚠️ Potential Risk Flags**")
+        if m['dividend_yield'] == "N/A" or float(m['dividend_yield'].replace('%','')) < 1:
+            st.markdown("- Low dividend yield or inconsistent payout history.")
+        if m['debt_to_equity'] != "N/A" and float(m['debt_to_equity']) > 1.0:
+            st.markdown("- Elevated balance sheet leverage profile.")
+        else:
+            st.markdown("- Standard market volatility and macroeconomic execution risks.")
+
+    st.markdown("---")
     
-    with col_chart1:
-        st.markdown("### 🍰 Shareholding Pattern Split")
+    # --- MODULAR VISUALS ---
+    col_v1, col_v2 = st.columns(2)
+    with col_v1:
+        st.markdown("### 🍰 Ownership Distribution")
         sh_data = m['shareholding']
         if sum(sh_data.values()) > 0:
-            fig_pie = px.pie(
-                names=list(sh_data.keys()), 
-                values=list(sh_data.values()), 
-                hole=0.45,
-                color_discrete_sequence=px.colors.qualitative.Bold
-            )
-            fig_pie.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+            fig_pie = px.pie(names=list(sh_data.keys()), values=list(sh_data.values()), hole=0.45, color_discrete_sequence=px.colors.qualitative.Bold)
+            fig_pie.update_layout(margin=dict(t=10, b=10, l=10, r=10))
             st.plotly_chart(fig_pie, use_container_width=True)
         else:
-            st.info("Detailed shareholding breakdown unavailable for this stock.")
+            st.info("Shareholding breakdown unavailable.")
 
-    with col_chart2:
-        st.markdown(f"### 📈 Sector Valuation Benchmark ({m['industry']})")
+    with col_v2:
+        st.markdown(f"### 📈 Valuation Multiples ({m['industry']})")
         pe_num = float(m['pe_ratio']) if m['pe_ratio'] != "N/A" else 0
         peg_num = float(m['peg_ratio']) if m['peg_ratio'] != "N/A" else 0
-        
         fig_bar = go.Figure(data=[
-            go.Bar(name='P/E Ratio', x=['Valuation Metrics'], y=[pe_num], marker_color='#2B6CB0'),
-            go.Bar(name='PEG Ratio (x10)', x=['Valuation Metrics'], y=[peg_num * 10], marker_color='#4299E1')
+            go.Bar(name='P/E Ratio', x=['Multiples'], y=[pe_num], marker_color='#2B6CB0'),
+            go.Bar(name='PEG Ratio (x10)', x=['Multiples'], y=[peg_num * 10], marker_color='#4299E1')
         ])
-        fig_bar.update_layout(barmode='group', margin=dict(t=20, b=20, l=20, r=20))
+        fig_bar.update_layout(barmode='group', margin=dict(t=10, b=10, l=10, r=10))
         st.plotly_chart(fig_bar, use_container_width=True)
 
     st.markdown("---")
     
-    # --- QUALITATIVE AI REPORT ---
-    st.subheader("📑 Institutional Advisory Analysis")
+    # --- ORGANIZED AI REPORT SECTIONS ---
+    st.subheader("📑 Modular Dossier & Deep-Dive Sections")
     
     display_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
-    for h in ["COMPANY OVERVIEW", "FUNDAMENTAL & MOMENTUM ANALYSIS", "MACRO AND SECTOR CATALYSTS", "KEY RISKS", "ACTIONABLE VERDICT"]:
+    sections = [
+        "1. VALUATION & FAIR VALUE", "2. FUTURE GROWTH & OUTLOOK", 
+        "3. PAST PERFORMANCE & EARNINGS QUALITY", "4. FINANCIAL HEALTH & BALANCE SHEET", 
+        "5. DIVIDEND & CAPITAL ALLOCATION", "6. MANAGEMENT & COMPENSATION", 
+        "7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT", "8. SUMMARY VERDICT & KEY RISKS"
+    ]
+    for h in sections:
         display_text = display_text.replace(h, f"\n### {h}")
         
     st.markdown(display_text)
     st.markdown("---")
     
-    # --- PDF GENERATION & DOWNLOAD ---
+    # --- PDF EXPORT ---
     pdf_buffer = io.BytesIO()
-    build_pdf_report(pdf_buffer, data['stock'], m, data['ai_text'], data['ticker'])
+    build_pdf_report(pdf_buffer, m, data['ai_text'], data['ticker'])
     pdf_buffer.seek(0)
     
     st.download_button(
-        label="📥 Download Official Institutional PDF Report", 
+        label="📥 Download Official PDF Dossier (Exact Match)", 
         data=pdf_buffer, 
-        file_name=f"{data['ticker']}_Gatekeeper_Report.pdf", 
+        file_name=f"{data['ticker']}_Gatekeeper_Dossier.pdf", 
         mime="application/pdf",
         type="primary"
     )
