@@ -34,10 +34,15 @@ MUTED = "#8B949E"
 BLUE = "#38BDF8"
 
 # ============================================================
-# 2. THEME (SimplyWallSt-inspired dark UI)
+# 2. THEME (Uniform Fonts & Dark UI)
 # ============================================================
 st.markdown(f"""
 <style>
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    
+    html, body, [class*="st-"], .stApp {{ 
+        font-family: 'Inter', sans-serif !important;
+    }}
     .stApp {{ background-color: {BG}; color: #E6E6E6; }}
     section[data-testid="stSidebar"] {{ background-color: {BG}; border-right: 1px solid {BORDER}; }}
     section[data-testid="stSidebar"] .stRadio > label {{ display:none; }}
@@ -48,12 +53,12 @@ st.markdown(f"""
     .swf-topbar {{
         background: linear-gradient(90deg, #12151c, #171b24); border-bottom: 1px solid {BORDER};
         padding: 10px 18px; border-radius: 8px; margin-bottom: 14px; display:flex; align-items:center;
-        justify-content:space-between; color:{MUTED}; font-size:0.85em;
+        justify-content:space-between; color:{MUTED}; font-size:0.85em; font-family: 'Inter', sans-serif;
     }}
     .swf-topbar b {{ color:{GOLD}; font-size:1.05em; }}
     .swf-card {{
         background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px;
-        padding: 18px 20px; margin-bottom: 16px;
+        padding: 18px 20px; margin-bottom: 16px; font-family: 'Inter', sans-serif;
     }}
     .swf-badge {{
         background:{GOLD}; color:#111; padding:4px 12px; border-radius:6px; font-weight:700; font-size:0.85em;
@@ -108,13 +113,14 @@ def resolve_name_to_ticker(stock_input):
 def compute_fair_value(price, pe, growth_pct):
     if price is None or pe is None or pe <= 0: return None
     eps = price / pe
-    fair_pe = min(max(growth_pct, 8), 40) if growth_pct and growth_pct > 0 else 15
+    # If growth_pct is missing, fallback to 10% market average so we still generate a fair value
+    used_growth = growth_pct if (growth_pct and growth_pct > 0) else 10.0
+    fair_pe = min(max(used_growth, 8), 40)
     return round(eps * fair_pe, 2)
 
 # --- Cascade Scrapers ---
 def fetch_angel_one(ticker):
     """Placeholder for Angel One SmartAPI."""
-    # Active SmartAPI implementation requires JWT tokens
     return {}
 
 def fetch_screener(ticker):
@@ -168,6 +174,17 @@ def resolve_metric(key, angel, screener, yahoo, google, default="N/A"):
             return val
     return default
 
+def g(d, key, default="N/A"):
+    if not isinstance(d, dict): return default
+    val = d.get(key, default)
+    return default if val is None else val
+
+def fmt_num(val, prefix=""):
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        try: return f"{prefix}{val:,.0f}" if abs(val) >= 1 else f"{prefix}{val}"
+        except Exception: return f"{prefix}{val}"
+    return f"{prefix}{val}" if val not in (None, "N/A") else "N/A"
+
 # ============================================================
 # 4. DATA FETCH (Main Execution)
 # ============================================================
@@ -179,7 +196,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     info = stock.info
     
-    # 1. Gather Data Sources
+    # Gather Data Sources
     angel_data = fetch_angel_one(resolved_ticker)
     screener_data = fetch_screener(resolved_ticker)
     google_data = fetch_google_finance(resolved_ticker)
@@ -192,14 +209,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "market_cap": info.get("marketCap")
     }
     
-    # 2. Apply Cascade
+    # Apply Cascade
     pe_raw = resolve_metric('pe_ratio', angel_data, screener_data, yahoo_data, google_data)
     dy_raw = resolve_metric('dividend_yield', angel_data, screener_data, yahoo_data, google_data)
     roe_raw = resolve_metric('roe', angel_data, screener_data, yahoo_data, google_data)
     roa_raw = resolve_metric('roce_roa', angel_data, screener_data, yahoo_data, google_data)
     mcap_raw = resolve_metric('market_cap', angel_data, screener_data, yahoo_data, google_data)
 
-    # Format percentages from Yahoo decimals
     if dy_raw != "N/A" and isinstance(dy_raw, float): dy_raw = round(dy_raw * 100, 2)
     if roe_raw != "N/A" and isinstance(roe_raw, float): roe_raw = round(roe_raw * 100, 2)
     if roa_raw != "N/A" and isinstance(roa_raw, float): roa_raw = round(roa_raw * 100, 2)
@@ -344,7 +360,7 @@ def render_checks(checks):
         if status is True: icon, cls = "&#9989;", "swf-check-pass"
         elif status is False: icon, cls = "&#10060;", "swf-check-fail"
         else: icon, cls = "&#8213;", "swf-check-na"
-        html += f'<div style="padding:5px 0;"><span class="{cls}">{icon} <b>{label}</b></span><div class="swf-sub">{desc}</div></div>'
+        html += f'<div style="padding:5px 0; font-family: Inter, sans-serif;"><span class="{cls}">{icon} <b>{label}</b></span><div class="swf-sub">{desc}</div></div>'
     return html
 
 def card(title, body_html):
@@ -370,8 +386,8 @@ def price_history_chart(hist_df, fair_value, currency):
 
 def fair_value_bar(price, fv, currency):
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=f"{currency} {price}", textposition='inside'))
-    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=f"{currency} {fv}", textposition='inside'))
+    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
+    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
     diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=170, margin=dict(t=10, b=10, l=10, r=10), showlegend=False, xaxis=dict(showgrid=False, title=currency))
     return fig, diff_pct
@@ -380,7 +396,7 @@ def ownership_bar(shareholding):
     fig = go.Figure()
     colors_list = [BLUE, '#a855f7', GOLD]
     for (k, v), c in zip(shareholding.items(), colors_list):
-        fig.add_trace(go.Bar(y=['Ownership'], x=[v], name=f"{k} ({v}%)", orientation='h', marker_color=c, text=f"{v}%", textposition='inside'))
+        fig.add_trace(go.Bar(y=['Ownership'], x=[v], name=f"{k} ({v}%)", orientation='h', marker_color=c, text=[f"{v}%"], textposition='auto'))
     fig.update_layout(barmode='stack', template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=150, margin=dict(t=10, b=40, l=10, r=10), xaxis=dict(visible=False), yaxis=dict(visible=False), legend=dict(orientation='h', y=-0.3))
     return fig
 
@@ -451,7 +467,7 @@ def generate_comprehensive_report(metrics, ticker):
     """
 
     response = client.models.generate_content(
-        model='gemini-3.5-flash-lite',
+        model='gemini-2.5-flash',
         contents=user_prompt,
         config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
     )
@@ -584,11 +600,11 @@ with st.sidebar:
             <div style="display:flex; align-items:center; gap:10px;">
                 <div class="swf-avatar">{str(m0.get('name','?'))[0]}</div>
                 <div>
-                    <div style="font-weight:700;">{m0.get('name')}</div>
-                    <div style="color:{MUTED}; font-size:0.8em;">{t0} Stock Report</div>
+                    <div style="font-weight:700; font-family: 'Inter', sans-serif;">{m0.get('name')}</div>
+                    <div style="color:{MUTED}; font-size:0.8em; font-family: 'Inter', sans-serif;">{t0} Stock Report</div>
                 </div>
             </div>
-            <div style="color:{MUTED}; font-size:0.85em; margin-top:6px;">
+            <div style="color:{MUTED}; font-size:0.85em; margin-top:6px; font-family: 'Inter', sans-serif;">
                 Market Cap: {m0.get('currency','INR')} {m0.get('market_cap','N/A')}
             </div>
         </div>
@@ -601,7 +617,7 @@ with st.sidebar:
         )
         st.session_state.active_section = st.session_state.nav_radio
     else:
-        st.markdown(f'<div style="color:{MUTED}; padding:10px;">Generate a report to unlock section navigation.</div>', unsafe_allow_html=True)
+        st.markdown(f'<div style="color:{MUTED}; padding:10px; font-family: Inter, sans-serif;">Generate a report to unlock section navigation.</div>', unsafe_allow_html=True)
 
 # ============================================================
 # 11. MAIN CONTENT
@@ -651,7 +667,7 @@ if st.session_state.report_data:
         if hist_df is not None and not hist_df.empty:
             st.plotly_chart(price_history_chart(hist_df, m.get('fair_value'), m.get('currency','INR')), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
-        st.markdown('<div class="swf-card"><div class="swf-h">Snowflake Analysis</div>', unsafe_allow_html=True)
+        st.markdown('<div class="swf-card"><div class="swf-h">Analysis Summary</div>', unsafe_allow_html=True)
         st.plotly_chart(snowflake_chart(scores), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
@@ -674,8 +690,7 @@ if st.session_state.report_data:
         st.markdown("### About the Company")
         summary = m.get('business_summary') or "Business summary not available for this ticker."
         card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>"
-                          f"<div class='swf-sub'>Founded info not always available via this data source. "
-                          f"Employees: {m.get('employees', 'N/A')} | Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
+                          f"<div class='swf-sub'>Employees: {m.get('employees', 'N/A')} | Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
 
     # ---------- 1. VALUATION ----------
     elif section == "1. Valuation":
@@ -686,7 +701,7 @@ if st.session_state.report_data:
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
             status_word = "overvalued" if diff_pct and diff_pct > 0 else "undervalued"
             st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the simplified fair value estimate. This is a heuristic (PEG-based), not a discounted cash flow model.")
-        card("Narrative — Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
+        card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     # ---------- 2. FUTURE GROWTH ----------
     elif section == "2. Future Growth":
@@ -697,7 +712,7 @@ if st.session_state.report_data:
                  f"<b>{m.get('currency','INR')} {m['target_mean_price']}</b> based on {m['num_analysts']} analyst(s).</div>")
         else:
             card("Analyst Coverage", "<div class='swf-check-na'>&#8213; Insufficient analyst coverage to forecast growth for this stock.</div>")
-        card("Narrative — Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
+        card("Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     # ---------- 3. PAST PERFORMANCE ----------
     elif section == "3. Past Performance":
@@ -705,18 +720,26 @@ if st.session_state.report_data:
         card("Past Performance Checklist", render_checks(past_checks))
         p1, p2 = st.columns(2)
         with p1:
+            yoy_val = to_float(m.get('pat_yoy')) or 0
+            qoq_val = to_float(m.get('pat_qoq')) or 0
             fig = go.Figure(data=[go.Bar(x=['PAT YoY', 'PAT QoQ'],
-                                          y=[to_float(m.get('pat_yoy')) or 0, to_float(m.get('pat_qoq')) or 0],
-                                          marker_color=[GREEN, BLUE], text_auto=True)])
+                                          y=[yoy_val, qoq_val],
+                                          marker_color=[GREEN, BLUE], 
+                                          text=[f"{yoy_val}%", f"{qoq_val}%"], 
+                                          textposition='auto')])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Earnings Momentum")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         with p2:
+            roe_val = to_float(m.get('roe')) or 0
+            roa_val = to_float(m.get('roce_roa')) or 0
             fig = go.Figure(data=[go.Bar(x=['ROE', 'ROA/ROCE'],
-                                          y=[to_float(m.get('roe')) or 0, to_float(m.get('roce_roa')) or 0],
-                                          marker_color=[GOLD, '#a855f7'], text_auto=True)])
+                                          y=[roe_val, roa_val],
+                                          marker_color=[GOLD, '#a855f7'], 
+                                          text=[f"{roe_val}%", f"{roa_val}%"], 
+                                          textposition='auto')])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Profitability Returns")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-        card("Narrative — Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
+        card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
     # ---------- 4. FINANCIAL HEALTH ----------
     elif section == "4. Financial Health":
@@ -727,13 +750,13 @@ if st.session_state.report_data:
             st.plotly_chart(tm, use_container_width=True, config={'displayModeBar': False})
         else:
             st.caption("Balance sheet breakdown unavailable for this ticker.")
-        card("Narrative — Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
+        card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
 
     # ---------- 5. DIVIDEND ----------
     elif section == "5. Dividend":
         st.markdown(f"### 5. Dividend — Score {score_from_checks(div_checks)}/100")
         card("Dividend Checklist", render_checks(div_checks))
-        card("Narrative — Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
+        card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
 
     # ---------- 6. MANAGEMENT ----------
     elif section == "6. Management":
@@ -751,15 +774,14 @@ if st.session_state.report_data:
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
             card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management/board data is not available via this data source.</div>")
-        card("Narrative — Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
+        card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
 
     # ---------- 7. OWNERSHIP ----------
     elif section == "7. Ownership":
         st.markdown("### 7. Ownership")
         if m.get('shareholding'):
             st.plotly_chart(ownership_bar(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
-        card("Insider Transactions", "<div class='swf-check-na'>&#8213; Insider buy/sell transaction history is not reliably available via this data source.</div>")
-        card("Narrative — Ownership Structure & Insider Sentiment", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
+        card("Ownership Structure & Insider Sentiment", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
     # ---------- 8. OTHER INFORMATION ----------
     elif section == "8. Other Information":
@@ -774,7 +796,7 @@ if st.session_state.report_data:
             headlines = str(m.get('recent_news', '')).split(" | ") if m.get('recent_news') else []
             news_html = "".join([f"<div class='swf-sub' style='margin-left:0; padding:4px 0; border-bottom:1px solid {BORDER};'>{h}</div>" for h in headlines]) or "<div class='swf-check-na'>No recent headlines.</div>"
             card("Recent News & Updates", news_html)
-        card("Narrative — Summary Verdict & Key Risks", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(7)}</p>")
+        card("Summary Verdict & Key Risks", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(7)}</p>")
 
     st.markdown("---")
 
