@@ -1,4 +1,8 @@
 streamlit
 yfinance
+pandas
+plotly
+requests
 reportlab
 google-genai
+smartapi-python
