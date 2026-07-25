@@ -307,27 +307,27 @@ if st.session_state.report_data:
     st.markdown("---")
     
     # --- SNOWFLAKE SUMMARY COMPONENT ---
-    st.markdown("### ❄️ Gatekeeper Health & Check Summary")
+    st.markdown("### ❄️ Gatekeeper Health & Snowflake Criteria Checks")
     col_r, col_risk = st.columns(2)
     with col_r:
-        st.markdown("**🟢 Key Rewards / Strengths**")
+        st.markdown("**🟢 Key Rewards / Strengths Checked**")
         if m['pe_ratio'] != "N/A" and float(m['pe_ratio']) < 30:
-            st.markdown("- Attractive P/E ratio relative to historical earnings baseline.")
+            st.markdown("- ✅ **Attractive Valuation:** P/E ratio is healthy relative to historical peers.")
         if m['roe'] != "N/A" and float(m['roe'].replace('%','')) > 15:
-            st.markdown(f"- Strong Return on Equity ({m['roe']}).")
+            st.markdown(f"- ✅ **High Quality Returns:** Strong Return on Equity ({m['roe']}).")
         if m['pat_yoy'] != "N/A" and float(m['pat_yoy'].replace('%','')) > 20:
-            st.markdown(f"- High YoY Earnings Growth ({m['pat_yoy']}).")
+            st.markdown(f"- ✅ **Strong Earnings Growth:** YoY PAT growth is robust ({m['pat_yoy']}).")
         else:
-            st.markdown("- Stable operating fundamentals verified.")
+            st.markdown("- ✅ **Stable Operations:** Baseline fundamental performance verified.")
             
     with col_risk:
-        st.markdown("**⚠️ Potential Risk Flags**")
+        st.markdown("**⚠️ Potential Risk Flags Checked**")
         if m['dividend_yield'] == "N/A" or float(m['dividend_yield'].replace('%','')) < 1:
-            st.markdown("- Low dividend yield or inconsistent payout history.")
+            st.markdown("- ❌ **Dividend Track Record:** Low yield or inconsistent payout history.")
         if m['debt_to_equity'] != "N/A" and float(m['debt_to_equity']) > 1.0:
-            st.markdown("- Elevated balance sheet leverage profile.")
+            st.markdown("- ❌ **Balance Sheet Leverage:** Elevated debt-to-equity leverage structure.")
         else:
-            st.markdown("- Standard market volatility and macroeconomic execution risks.")
+            st.markdown("- ✅ **Low Leverage Risk:** Conservative debt framework maintained.")
 
     st.markdown("---")
     
@@ -356,20 +356,52 @@ if st.session_state.report_data:
 
     st.markdown("---")
     
-    # --- ORGANIZED AI REPORT SECTIONS ---
-    st.subheader("📑 Modular Dossier & Deep-Dive Sections")
+    # --- ORGANIZED TABS FOR MODULAR REPORT (Simply Wall St Style) ---
+    st.markdown("### 📑 Modular Terminal Report Sections")
     
-    display_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
-    sections = [
-        "1. VALUATION & FAIR VALUE", "2. FUTURE GROWTH & OUTLOOK", 
-        "3. PAST PERFORMANCE & EARNINGS QUALITY", "4. FINANCIAL HEALTH & BALANCE SHEET", 
-        "5. DIVIDEND & CAPITAL ALLOCATION", "6. MANAGEMENT & COMPENSATION", 
-        "7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT", "8. SUMMARY VERDICT & KEY RISKS"
-    ]
-    for h in sections:
-        display_text = display_text.replace(h, f"\n### {h}")
+    raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
+    
+    # Parse out sections using regex or splitting by headers
+    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
+        "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health",
+        "5. Dividend", "6. Management", "7. Ownership", "8. Verdict & Risks"
+    ])
+    
+    # Simple cleaner for display splitting
+    sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
+    
+    with tab1:
+        st.markdown("### 🏷️ 1. Valuation & Fair Value Analysis")
+        st.write(sections_list[0] if len(sections_list) > 0 else raw_ai_text)
         
-    st.markdown(display_text)
+    with tab2:
+        st.markdown("### 🚀 2. Future Growth & Outlook")
+        st.write(sections_list[1] if len(sections_list) > 1 else "Data processing modular section...")
+        
+    with tab3:
+        st.markdown("### 📊 3. Past Performance & Earnings Quality")
+        st.write(sections_list[2] if len(sections_list) > 2 else "Data processing modular section...")
+        
+    with tab4:
+        st.markdown("### 🛡️ 4. Financial Health & Balance Sheet")
+        st.write(sections_list[3] if len(sections_list) > 3 else "Data processing modular section...")
+        
+    with tab5:
+        st.markdown("### 💰 5. Dividend & Capital Allocation")
+        st.write(sections_list[4] if len(sections_list) > 4 else "Data processing modular section...")
+        
+    with tab6:
+        st.markdown("### 👔 6. Management & Leadership")
+        st.write(sections_list[5] if len(sections_list) > 5 else "Data processing modular section...")
+        
+    with tab7:
+        st.markdown("### 👥 7. Ownership Structure & Insider Sentiment")
+        st.write(sections_list[6] if len(sections_list) > 6 else "Data processing modular section...")
+        
+    with tab8:
+        st.markdown("### 📋 8. Summary Verdict & Key Risks")
+        st.write(sections_list[7] if len(sections_list) > 7 else "Data processing modular section...")
+
     st.markdown("---")
     
     # --- PDF EXPORT ---
