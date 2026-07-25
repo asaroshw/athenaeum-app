@@ -157,12 +157,23 @@ def fetch_finology(ticker):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             
+            # Precise Finology Ticker metric extraction
             for span_id in ['mainContent_lblPE', 'lblPE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['pe_ratio'] = elem.text.strip()
                     break
             
+            # Fallback search for P/E text if ID lookup misses
+            if 'pe_ratio' not in metrics:
+                for el in soup.find_all(['span', 'div', 'td']):
+                    t = el.get_text(strip=True)
+                    if t in ['P/E', 'Price to Earnings']:
+                        next_el = el.find_next_sibling()
+                        if next_el:
+                            metrics['pe_ratio'] = next_el.get_text(strip=True)
+                            break
+
             for span_id in ['mainContent_lblBookValue', 'lblBookValue']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
@@ -285,7 +296,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     net_income_latest = None
     shares_out = info.get("sharesOutstanding")
 
-    # Clean Financial Statements formatted cleanly in Crores (like Finology export)
+    # Clean Financial Statements formatted cleanly in Crores
     pnl_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
     bs_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
     cf_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
@@ -591,7 +602,7 @@ def generate_comprehensive_report(metrics, ticker):
     5. DIVIDEND & CAPITAL ALLOCATION
     6. MANAGEMENT & COMPENSATION
     7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
-    8. VERDICT
+    8. Verdict
     """
 
     user_prompt = f"""
@@ -786,7 +797,7 @@ if st.session_state.report_data:
 
     section = st.session_state.active_section
 
-    # ---------- COMPANY OVERVIEW (Compact with precise font sizes) ----------
+    # ---------- COMPANY OVERVIEW ----------
     if section == "Company Overview":
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -927,7 +938,7 @@ if st.session_state.report_data:
 
         card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
-    # ---------- VERDICT (Cleaned up as requested) ----------
+    # ---------- VERDICT ----------
     elif section == "Verdict":
         st.markdown("### Verdict")
         
