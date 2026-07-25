@@ -158,59 +158,46 @@ def fetch_finology(ticker):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # 1. Look for known IDs on Finology Ticker
+            # Robust Finology P/E extraction
             for span_id in ['mainContent_lblPE', 'lblPE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
-                    metrics['pe_ratio'] = elem.text.strip()
+                    metrics['pe_ratio'] = elem.text.strip().replace('x', '').replace(',', '').strip()
                     break
             
-            # 2. Broad scan for P/E text label if ID is missing
             if 'pe_ratio' not in metrics or metrics['pe_ratio'] in ["N/A", "", None]:
                 for el in soup.find_all(['span', 'div', 'td', 'th', 'label']):
                     t = el.get_text(strip=True)
                     if t in ['P/E', 'Price to Earnings', 'PE']:
-                        # Check sibling or parent next element
                         nxt = el.find_next_sibling()
                         if nxt and nxt.get_text(strip=True):
-                            metrics['pe_ratio'] = nxt.get_text(strip=True).replace('x', '').strip()
+                            metrics['pe_ratio'] = nxt.get_text(strip=True).replace('x', '').replace(',', '').strip()
                             break
-                        parent = el.find_parent()
-                        if parent:
-                            text_vals = parent.get_text(strip=True).replace(t, '')
-                            if text_vals:
-                                metrics['pe_ratio'] = text_vals.replace('x', '').strip()
-                                break
 
-            # Book Value
             for span_id in ['mainContent_lblBookValue', 'lblBookValue']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
-                    metrics['book_value'] = elem.text.strip()
+                    metrics['book_value'] = elem.text.strip().replace(',', '').strip()
                     break
 
-            # ROE
             for span_id in ['mainContent_lblROE', 'lblROE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['roe'] = elem.text.strip()
                     break
 
-            # ROCE
             for span_id in ['mainContent_lblROCE', 'lblROCE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['roce_roa'] = elem.text.strip()
                     break
 
-            # Dividend Yield
             for span_id in ['mainContent_lblDivYield', 'lblDivYield']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['dividend_yield'] = elem.text.strip()
                     break
 
-            # Market Cap
             for span_id in ['mainContent_lblMarketCap', 'lblMarketCap']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
@@ -231,7 +218,7 @@ def fetch_google_finance(ticker):
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             pe_div = soup.find('div', string='P/E ratio')
-            if pe_div: metrics['pe_ratio'] = pe_div.find_next_sibling('div').text.strip()
+            if pe_div: metrics['pe_ratio'] = pe_div.find_next_sibling('div').text.strip().replace('x', '').strip()
             dy_div = soup.find('div', string='Dividend yield')
             if dy_div: metrics['dividend_yield'] = dy_div.find_next_sibling('div').text.replace('%','').strip()
     except Exception: pass
@@ -373,7 +360,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
-    # Strict Fallback Calculation: If not found via cascade sources, calculate via formula; if calculation fails, return "N/A"
+    # Strict Fallback Calculation if all cascade sources miss
     mcap_float = to_float(mcap_raw)
     if pe_raw in ["N/A", None, "", "0"]:
         eps = info.get("trailingEps") or info.get("forwardEps")
