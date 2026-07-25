@@ -121,6 +121,22 @@ def resolve_name_to_ticker(stock_input):
         return upper_input + '.NS'
     return upper_input
 
+def g(d, key, default="N/A"):
+    """Safe dict access that never raises KeyError."""
+    if not isinstance(d, dict):
+        return default
+    val = d.get(key, default)
+    return default if val is None else val
+
+def fmt_num(val, prefix=""):
+    """Format a number with thousands separators; pass through non-numeric values untouched."""
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        try:
+            return f"{prefix}{val:,.0f}" if abs(val) >= 1 else f"{prefix}{val}"
+        except Exception:
+            return f"{prefix}{val}"
+    return f"{prefix}{val}" if val not in (None, "N/A") else "N/A"
+
 def compute_fair_value(price, pe, growth_pct):
     """Simplified PEG-based fair value heuristic (NOT a full DCF model)."""
     if price is None or pe is None or pe <= 0:
@@ -265,13 +281,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
 # 5. CRITERIA CHECKS (mirrors the "snowflake" checklist style)
 # ============================================================
 def valuation_checks(m):
-    price = m['price']; fv = m.get('fair_value')
-    pe = to_float(m['pe_ratio']); peg = to_float(m['peg_ratio'])
+    price = g(m, 'price', None); fv = m.get('fair_value')
+    currency = g(m, 'currency', '')
+    pe = to_float(g(m, 'pe_ratio', None)); peg = to_float(g(m, 'peg_ratio', None))
     tgt = m.get('target_mean_price')
     checks = []
-    if fv:
+    if fv and price is not None:
         checks.append(("Below Fair Value", price < fv,
-                        f"Price {m['currency']} {price} vs an estimated fair value of {m['currency']} {fv} "
+                        f"Price {currency} {price} vs an estimated fair value of {currency} {fv} "
                         f"(simplified PEG-based estimate, not a full DCF model)"))
         checks.append(("Significantly Undervalued (20%+ below)", price < fv * 0.8,
                         "Price is more than 20% below the fair value estimate"))
@@ -282,32 +299,33 @@ def valuation_checks(m):
                     f"Trailing P/E of {pe}x" if pe is not None else "P/E not available"))
     checks.append(("Attractive PEG (<1.5)", None if peg is None else peg < 1.5,
                     f"PEG ratio of {peg}" if peg is not None else "PEG not available"))
-    if tgt:
-        checks.append(("Trading Below Analyst Target", price < tgt, f"Average analyst target {m['currency']} {tgt}"))
+    if tgt and price is not None:
+        checks.append(("Trading Below Analyst Target", price < tgt, f"Average analyst target {currency} {tgt}"))
     else:
         checks.append(("Analyst Target Coverage", None, "Insufficient analyst coverage"))
     return checks
 
 def past_performance_checks(m):
-    yoy = to_float(m['pat_yoy']); qoq = to_float(m['pat_qoq'])
-    roe = to_float(m['roe']); margin = to_float(m['net_margin'])
+    yoy = to_float(g(m, 'pat_yoy', None)); qoq = to_float(g(m, 'pat_qoq', None))
+    roe = to_float(g(m, 'roe', None)); margin = to_float(g(m, 'net_margin', None))
     return [
-        ("Positive Earnings Growth (YoY)", None if yoy is None else yoy > 0, f"PAT YoY growth of {m['pat_yoy']}"),
+        ("Positive Earnings Growth (YoY)", None if yoy is None else yoy > 0, f"PAT YoY growth of {g(m,'pat_yoy')}"),
         ("Accelerating Growth (recent quarter vs YoY)", None if (yoy is None or qoq is None) else qoq > yoy,
          "Comparing most recent quarter growth to the yearly figure"),
-        ("Strong Return on Equity (>15%)", None if roe is None else roe > 15, f"ROE of {m['roe']}"),
-        ("Healthy Net Margin (>10%)", None if margin is None else margin > 10, f"Net margin of {m['net_margin']}"),
+        ("Strong Return on Equity (>15%)", None if roe is None else roe > 15, f"ROE of {g(m,'roe')}"),
+        ("Healthy Net Margin (>10%)", None if margin is None else margin > 10, f"Net margin of {g(m,'net_margin')}"),
     ]
 
 def financial_health_checks(m):
-    de = to_float(m['debt_to_equity'])
+    de = to_float(g(m, 'debt_to_equity', None))
     cash = m.get('total_cash'); debt = m.get('total_debt')
     cr = m.get('current_ratio')
+    currency = g(m, 'currency', '')
     checks = [("Low Leverage (D/E < 1.0)", None if de is None else de < 1.0,
                f"Debt-to-equity of {de}" if de is not None else "Not available")]
     if cash is not None and debt is not None:
         checks.append(("Cash Exceeds Total Debt", cash > debt,
-                        f"Cash {m['currency']} {cash:,.0f} vs Debt {m['currency']} {debt:,.0f}"))
+                        f"Cash {currency} {cash:,.0f} vs Debt {currency} {debt:,.0f}"))
     else:
         checks.append(("Cash Exceeds Total Debt", None, "Insufficient data"))
     if cr is not None:
@@ -317,10 +335,10 @@ def financial_health_checks(m):
     return checks
 
 def dividend_checks(m):
-    dy = to_float(m['dividend_yield'])
+    dy = to_float(g(m, 'dividend_yield', None))
     payout = m.get('payout_ratio')
     checks = [("Pays a Notable Dividend (>1.5%)", None if dy is None else dy > 1.5,
-               f"Dividend yield of {m['dividend_yield']}")]
+               f"Dividend yield of {g(m,'dividend_yield')}")]
     if payout is not None:
         checks.append(("Sustainable Payout (<75%)", payout < 0.75, f"Payout ratio of {round(payout*100,1)}%"))
     else:
@@ -575,17 +593,18 @@ with st.sidebar:
     if st.session_state.report_data:
         m0 = st.session_state.report_data['metrics']
         t0 = st.session_state.report_data['ticker']
+        name0 = g(m0, 'name', t0)
         st.markdown(f"""
         <div class="swf-company-mini">
             <div style="display:flex; align-items:center; gap:10px;">
-                <div class="swf-avatar">{m0['name'][0]}</div>
+                <div class="swf-avatar">{name0[0] if name0 else '?'}</div>
                 <div>
-                    <div style="font-weight:700;">{m0['name']}</div>
+                    <div style="font-weight:700;">{name0}</div>
                     <div style="color:{MUTED}; font-size:0.8em;">{t0} Stock Report</div>
                 </div>
             </div>
             <div style="color:{MUTED}; font-size:0.85em; margin-top:6px;">
-                Market Cap: {m0['currency']} {m0['market_cap']:,}
+                Market Cap: {fmt_num(g(m0, 'market_cap'), prefix=g(m0, 'currency', '') + ' ')}
             </div>
         </div>
         """, unsafe_allow_html=True)
@@ -667,25 +686,28 @@ if st.session_state.report_data:
     }
 
     # ---------- HEADER (always visible) ----------
+    currency = g(m, 'currency', '')
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
         st.markdown(f"""
         <div class="swf-card">
             <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
-                    <div style="color:{MUTED}; font-size:0.85em;">Stocks / {m['industry']}</div>
-                    <div style="font-size:1.4em; font-weight:800;">{m['name']}</div>
-                    <div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report &nbsp;|&nbsp; Market Cap: {m['currency']} {m['market_cap']:,}</div>
+                    <div style="color:{MUTED}; font-size:0.85em;">Stocks / {g(m,'industry')}</div>
+                    <div style="font-size:1.4em; font-weight:800;">{g(m,'name',ticker)}</div>
+                    <div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report &nbsp;|&nbsp; Market Cap: {fmt_num(g(m,'market_cap'), prefix=currency+' ')}</div>
                     <span class="swf-badge" style="margin-top:8px; display:inline-block;">📊 Live Analysis</span>
                 </div>
                 <div style="text-align:right;">
-                    <div style="font-size:1.6em; font-weight:800;">{m['currency']} {m['price']}</div>
+                    <div style="font-size:1.6em; font-weight:800;">{currency} {g(m,'price')}</div>
                     <div style="color:{MUTED}; font-size:0.85em;">Current Price</div>
                 </div>
             </div>
         </div>
         """, unsafe_allow_html=True)
-        st.plotly_chart(price_history_chart(m['history'], m.get('fair_value'), m['currency']), use_container_width=True, config={'displayModeBar': False})
+        hist_df = m.get('history')
+        if hist_df is not None and len(hist_df) > 0:
+            st.plotly_chart(price_history_chart(hist_df, m.get('fair_value'), currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
         st.markdown('<div class="swf-card"><div class="swf-h">Snowflake Analysis</div>', unsafe_allow_html=True)
         st.plotly_chart(snowflake_chart(scores), use_container_width=True, config={'displayModeBar': False})
@@ -697,28 +719,29 @@ if st.session_state.report_data:
 
     # ---------- COMPANY OVERVIEW ----------
     if section == "Company Overview":
+        pe_disp = g(m, 'pe_ratio')
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current Price", f"{m['currency']} {m['price']}")
-        c1.metric("P/E Ratio", f"{m['pe_ratio']}x" if m['pe_ratio'] != "N/A" else "N/A")
-        c2.metric("PEG Ratio", f"{m['peg_ratio']}")
-        c2.metric("14-Day RSI", f"{m['rsi']}")
-        c3.metric("ROE", f"{m['roe']}")
-        c3.metric("Dividend Yield", f"{m['dividend_yield']}")
-        c4.metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
-        c4.metric("PAT Growth (QoQ)", f"{m['pat_qoq']}")
+        c1.metric("Current Price", f"{currency} {g(m,'price')}")
+        c1.metric("P/E Ratio", f"{pe_disp}x" if pe_disp != "N/A" else "N/A")
+        c2.metric("PEG Ratio", f"{g(m,'peg_ratio')}")
+        c2.metric("14-Day RSI", f"{g(m,'rsi')}")
+        c3.metric("ROE", f"{g(m,'roe')}")
+        c3.metric("Dividend Yield", f"{g(m,'dividend_yield')}")
+        c4.metric("PAT Growth (YoY)", f"{g(m,'pat_yoy')}")
+        c4.metric("PAT Growth (QoQ)", f"{g(m,'pat_qoq')}")
 
         st.markdown("### About the Company")
         summary = m.get('business_summary') or "Business summary not available for this ticker."
         card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>"
                           f"<div class='swf-sub'>Founded info not always available via this data source. "
-                          f"Employees: {m.get('employees') or 'N/A'} | Sector: {m['sector']} | Industry: {m['industry']}</div>")
+                          f"Employees: {m.get('employees') or 'N/A'} | Sector: {g(m,'sector')} | Industry: {g(m,'industry')}</div>")
 
     # ---------- 1. VALUATION ----------
     elif section == "1. Valuation":
         st.markdown(f"### 1. Valuation — Score {score_from_checks(val_checks)}/100")
         card("Valuation Checklist", render_checks(val_checks))
-        if m.get('fair_value'):
-            fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], m['currency'])
+        if m.get('fair_value') and g(m, 'price', None) is not None:
+            fig, diff_pct = fair_value_bar(g(m, 'price'), m['fair_value'], currency)
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
             status_word = "overvalued" if diff_pct and diff_pct > 0 else "undervalued"
             st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the simplified fair value estimate. This is a heuristic (PEG-based), not a discounted cash flow model.")
@@ -730,7 +753,7 @@ if st.session_state.report_data:
         if m.get('target_mean_price') and m.get('num_analysts'):
             card("Analyst Coverage",
                  f"<div class='swf-sub' style='margin-left:0;'>Average 12-month analyst target: "
-                 f"<b>{m['currency']} {m['target_mean_price']}</b> based on {m['num_analysts']} analyst(s).</div>")
+                 f"<b>{currency} {m['target_mean_price']}</b> based on {m['num_analysts']} analyst(s).</div>")
         else:
             card("Analyst Coverage", "<div class='swf-check-na'>&#8213; Insufficient analyst coverage to forecast growth for this stock.</div>")
         card("Narrative — Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
@@ -742,13 +765,13 @@ if st.session_state.report_data:
         p1, p2 = st.columns(2)
         with p1:
             fig = go.Figure(data=[go.Bar(x=['PAT YoY', 'PAT QoQ'],
-                                          y=[to_float(m['pat_yoy']) or 0, to_float(m['pat_qoq']) or 0],
+                                          y=[to_float(g(m,'pat_yoy',None)) or 0, to_float(g(m,'pat_qoq',None)) or 0],
                                           marker_color=[GREEN, BLUE], text_auto=True)])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Earnings Momentum")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         with p2:
             fig = go.Figure(data=[go.Bar(x=['ROE', 'ROA/ROCE'],
-                                          y=[to_float(m['roe']) or 0, to_float(m['roce_roa']) or 0],
+                                          y=[to_float(g(m,'roe',None)) or 0, to_float(g(m,'roce_roa',None)) or 0],
                                           marker_color=[GOLD, '#a855f7'], text_auto=True)])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Profitability Returns")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
@@ -782,7 +805,7 @@ if st.session_state.report_data:
                     "Name": o.get('name', 'N/A'),
                     "Title": o.get('title', 'N/A'),
                     "Age": o.get('age', 'N/A'),
-                    "Total Pay": f"{m['currency']} {o.get('totalPay'):,}" if o.get('totalPay') else "N/A"
+                    "Total Pay": fmt_num(o.get('totalPay'), prefix=currency + ' ') if o.get('totalPay') else "N/A"
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
@@ -792,7 +815,11 @@ if st.session_state.report_data:
     # ---------- 7. OWNERSHIP ----------
     elif section == "7. Ownership":
         st.markdown("### 7. Ownership")
-        st.plotly_chart(ownership_bar(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
+        shareholding = m.get('shareholding') or {}
+        if shareholding:
+            st.plotly_chart(ownership_bar(shareholding), use_container_width=True, config={'displayModeBar': False})
+        else:
+            st.caption("Shareholding breakdown unavailable for this ticker.")
         card("Insider Transactions", "<div class='swf-check-na'>&#8213; Insider buy/sell transaction history is not reliably available via this data source.</div>")
         card("Narrative — Ownership Structure & Insider Sentiment", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
@@ -802,11 +829,12 @@ if st.session_state.report_data:
         oc1, oc2 = st.columns(2)
         with oc1:
             card("Key Information",
-                 f"<div class='swf-sub' style='margin-left:0;'>Exchange: {m['exchange']}<br>"
+                 f"<div class='swf-sub' style='margin-left:0;'>Exchange: {g(m,'exchange')}<br>"
                  f"Ticker: {ticker}<br>Employees: {m.get('employees') or 'N/A'}<br>"
                  f"Website: <a href='{m.get('website')}' style='color:{BLUE};'>{m.get('website') or 'N/A'}</a></div>")
         with oc2:
-            headlines = m['recent_news'].split(" | ") if m['recent_news'] else []
+            news_val = g(m, 'recent_news', '')
+            headlines = news_val.split(" | ") if news_val and news_val != "N/A" else []
             news_html = "".join([f"<div class='swf-sub' style='margin-left:0; padding:4px 0; border-bottom:1px solid {BORDER};'>{h}</div>" for h in headlines]) or "<div class='swf-check-na'>No recent headlines.</div>"
             card("Recent News & Updates", news_html)
         card("Narrative — Summary Verdict & Key Risks", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(7)}</p>")
