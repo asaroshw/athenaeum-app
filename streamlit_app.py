@@ -144,7 +144,7 @@ def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
     
     system_instruction = """
-    You are an elite institutional equity analyst building a rigorous, multi-module stock intelligence dossier styled after professional SimplyWallSt terminal reports.
+    You are an elite institutional equity research director building a comprehensive, exhaustive, multi-page stock intelligence dossier styled after professional SimplyWallSt terminal reports. Do not summarize; provide deep, granular, multi-paragraph qualitative and quantitative breakdowns for every module.
     Do not use markdown hash symbols or asterisks. Output clean raw text with clear section headers.
     
     MANDATORY PRE-AMBLE VARIABLES (Exact format on first 3 lines):
@@ -152,7 +152,7 @@ def generate_comprehensive_report(metrics, ticker):
     DYNAMIC_RATING: [STRONG BUY, BUY, HOLD, DON'T BUY, or SELL]
     DYNAMIC_DURATION: [1-3 Months, 3-5 Years, or N/A]
     
-    Structure your deep-dive analysis using EXACTLY these 8 numbered headers:
+    Structure your exhaustive deep-dive analysis using EXACTLY these 8 numbered headers:
     1. VALUATION & FAIR VALUE
     2. FUTURE GROWTH & OUTLOOK
     3. PAST PERFORMANCE & EARNINGS QUALITY
@@ -162,7 +162,7 @@ def generate_comprehensive_report(metrics, ticker):
     7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
     8. SUMMARY VERDICT & KEY RISKS
     
-    Provide comprehensive, professional commentary covering DCF context, P/E multiples, balance sheet integrity, and management efficiency for each section.
+    Ensure each section contains thorough financial context, comparative industry positioning, cash flow dynamics, and risk evaluations.
     """
     
     user_prompt = f"""
@@ -193,8 +193,8 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
     
     title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
     subtitle_style = ParagraphStyle('DocSub', fontName='Helvetica-Bold', fontSize=8.5, leading=11, textColor=colors.HexColor('#718096'))
-    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#2B6CB0'), spaceBefore=8, spaceAfter=3)
-    body_style = ParagraphStyle('BodyTextCustom', fontName='Helvetica', fontSize=8, leading=11, textColor=colors.HexColor('#2D3748'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, leading=13, textColor=colors.HexColor('#2B6CB0'), spaceBefore=10, spaceAfter=4)
+    body_style = ParagraphStyle('BodyTextCustom', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
     table_text = ParagraphStyle('TableText', fontName='Helvetica', fontSize=7, leading=9, textColor=colors.white)
     table_val = ParagraphStyle('TableVal', fontName='Helvetica-Bold', fontSize=7, leading=9, textColor=colors.white)
     
@@ -239,7 +239,7 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#4299E1')),
     ]))
     story.append(t)
-    story.append(Spacer(1, 6))
+    story.append(Spacer(1, 8))
     
     for line in clean_lines:
         if any(h in line for h in ["1. VALUATION", "2. FUTURE GROWTH", "3. PAST PERFORMANCE", "4. FINANCIAL HEALTH", "5. DIVIDEND", "6. MANAGEMENT", "7. OWNERSHIP", "8. SUMMARY VERDICT"]):
@@ -251,7 +251,7 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
                     pattern = r'(?i)(?<![a-zA-Z])' + re.escape(r_text) + r'(?![a-zA-Z])'
                     processed_line = re.sub(pattern, f'<font color="{rating_colors[r_text]}"><b>{r_text}</b></font>', processed_line)
             story.append(Paragraph(processed_line, body_style))
-            story.append(Spacer(1, 2))
+            story.append(Spacer(1, 3))
             
     doc.build(story)
 
@@ -268,7 +268,7 @@ if st.button("Generate Terminal Dossier", type="primary"):
     if not stock_input.strip():
         st.warning("Please enter a valid stock identifier.")
     else:
-        with st.spinner('Compiling comprehensive quantitative metrics & qualitative modules...'):
+        with st.spinner('Compiling exhaustive institutional intelligence and qualitative modules...'):
             try:
                 resolved_ticker = resolve_name_to_ticker(stock_input)
                 metrics = fetch_stock_data(resolved_ticker, stock_input)
@@ -356,19 +356,16 @@ if st.session_state.report_data:
 
     st.markdown("---")
     
-    # --- ORGANIZED TABS FOR MODULAR REPORT (Simply Wall St Style) ---
-    st.markdown("### 📑 Modular Terminal Report Sections")
+    # --- ORGANIZED TABS FOR EXHAUSTIVE MODULAR REPORT ---
+    st.markdown("### 📑 Exhaustive Modular Terminal Sections")
     
     raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
+    sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
     
-    # Parse out sections using regex or splitting by headers
     tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
         "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health",
         "5. Dividend", "6. Management", "7. Ownership", "8. Verdict & Risks"
     ])
-    
-    # Simple cleaner for display splitting
-    sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
     
     with tab1:
         st.markdown("### 🏷️ 1. Valuation & Fair Value Analysis")
@@ -376,31 +373,31 @@ if st.session_state.report_data:
         
     with tab2:
         st.markdown("### 🚀 2. Future Growth & Outlook")
-        st.write(sections_list[1] if len(sections_list) > 1 else "Data processing modular section...")
+        st.write(sections_list[1] if len(sections_list) > 1 else "Module compilation pending...")
         
     with tab3:
         st.markdown("### 📊 3. Past Performance & Earnings Quality")
-        st.write(sections_list[2] if len(sections_list) > 2 else "Data processing modular section...")
+        st.write(sections_list[2] if len(sections_list) > 2 else "Module compilation pending...")
         
     with tab4:
         st.markdown("### 🛡️ 4. Financial Health & Balance Sheet")
-        st.write(sections_list[3] if len(sections_list) > 3 else "Data processing modular section...")
+        st.write(sections_list[3] if len(sections_list) > 3 else "Module compilation pending...")
         
     with tab5:
         st.markdown("### 💰 5. Dividend & Capital Allocation")
-        st.write(sections_list[4] if len(sections_list) > 4 else "Data processing modular section...")
+        st.write(sections_list[4] if len(sections_list) > 4 else "Module compilation pending...")
         
     with tab6:
         st.markdown("### 👔 6. Management & Leadership")
-        st.write(sections_list[5] if len(sections_list) > 5 else "Data processing modular section...")
+        st.write(sections_list[5] if len(sections_list) > 5 else "Module compilation pending...")
         
     with tab7:
         st.markdown("### 👥 7. Ownership Structure & Insider Sentiment")
-        st.write(sections_list[6] if len(sections_list) > 6 else "Data processing modular section...")
+        st.write(sections_list[6] if len(sections_list) > 6 else "Module compilation pending...")
         
     with tab8:
         st.markdown("### 📋 8. Summary Verdict & Key Risks")
-        st.write(sections_list[7] if len(sections_list) > 7 else "Data processing modular section...")
+        st.write(sections_list[7] if len(sections_list) > 7 else "Module compilation pending...")
 
     st.markdown("---")
     
@@ -410,9 +407,9 @@ if st.session_state.report_data:
     pdf_buffer.seek(0)
     
     st.download_button(
-        label="📥 Download Official PDF Dossier (Exact Match)", 
+        label="📥 Download Complete PDF Dossier (Full Layout Match)", 
         data=pdf_buffer, 
-        file_name=f"{data['ticker']}_Gatekeeper_Dossier.pdf", 
+        file_name=f"{data['ticker']}_Gatekeeper_Exhaustive_Dossier.pdf", 
         mime="application/pdf",
         type="primary"
     )
