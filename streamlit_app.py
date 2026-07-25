@@ -7,6 +7,7 @@ import logging
 import re
 import io
 import requests
+import xml.etree.ElementTree as ET
 from reportlab.lib.pagesizes import letter
 from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
@@ -33,7 +34,7 @@ MUTED = "#8B949E"
 BLUE = "#38BDF8"
 
 # ============================================================
-# 2. THEME (SimplyWallSt-inspired dark UI)
+# 2. THEME (Dark UI)
 # ============================================================
 st.markdown(f"""
 <style>
@@ -46,10 +47,10 @@ st.markdown(f"""
     section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background-color: #1c2128; }}
     .swf-topbar {{
         background: linear-gradient(90deg, #12151c, #171b24); border-bottom: 1px solid {BORDER};
-        padding: 10px 18px; border-radius: 8px; margin-bottom: 14px; display:flex; align-items:center;
-        justify-content:space-between; color:{MUTED}; font-size:0.85em;
+        padding: 12px 20px; border-radius: 8px; margin-bottom: 16px; display:flex; align-items:center;
+        justify-content:space-between; color:{MUTED}; font-size:0.9em;
     }}
-    .swf-topbar b {{ color:{GOLD}; font-size:1.05em; }}
+    .swf-topbar b {{ color:{GOLD}; font-size:1.1em; }}
     .swf-card {{
         background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px;
         padding: 18px 20px; margin-bottom: 16px;
@@ -74,17 +75,12 @@ st.markdown(f"""
 # 3. HELPERS
 # ============================================================
 def to_float(val):
-    if val is None:
+    if val is None or val == "N/A":
         return None
     if isinstance(val, (int, float)):
-        try:
-            return float(val)
-        except Exception:
-            return None
-    if val == "N/A":
-        return None
+        return float(val)
     try:
-        return float(str(val).replace('%', '').replace('x', '').strip())
+        return float(str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').strip())
     except Exception:
         return None
 
@@ -122,14 +118,12 @@ def resolve_name_to_ticker(stock_input):
     return upper_input
 
 def g(d, key, default="N/A"):
-    """Safe dict access that never raises KeyError."""
     if not isinstance(d, dict):
         return default
     val = d.get(key, default)
     return default if val is None else val
 
 def fmt_num(val, prefix=""):
-    """Format a number with thousands separators; pass through non-numeric values untouched."""
     if isinstance(val, (int, float)) and not isinstance(val, bool):
         try:
             return f"{prefix}{val:,.0f}" if abs(val) >= 1 else f"{prefix}{val}"
@@ -138,7 +132,6 @@ def fmt_num(val, prefix=""):
     return f"{prefix}{val}" if val not in (None, "N/A") else "N/A"
 
 def compute_fair_value(price, pe, growth_pct):
-    """Simplified PEG-based fair value heuristic (NOT a full DCF model)."""
     if price is None or pe is None or pe <= 0:
         return None
     eps = price / pe
@@ -147,6 +140,21 @@ def compute_fair_value(price, pe, growth_pct):
     else:
         fair_pe = 15
     return round(eps * fair_pe, 2)
+
+def fetch_google_news(query_term):
+    """Fallback news puller using Google News RSS feed."""
+    try:
+        url = f"https://news.google.com/rss/search?q={query_term}&hl=en-IN&gl=IN&ceid=IN:en"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            headlines = [item.find('title').text for item in items[:4] if item.find('title') is not None]
+            if headlines:
+                return " | ".join(headlines)
+    except Exception:
+        pass
+    return None
 
 # ============================================================
 # 4. DATA FETCH
@@ -230,15 +238,18 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "company_officers": info.get("companyOfficers", []),
     }
 
+    # News fetching with Google News RSS fallback
     try:
         news_items = stock.news
         if news_items:
             headlines = [n.get('title', '') for n in news_items[:4]]
             metrics["recent_news"] = " | ".join(headlines)
-        else:
-            metrics["recent_news"] = "No recent major headlines."
     except Exception:
-        metrics["recent_news"] = "News unavailable."
+        pass
+
+    if not metrics["recent_news"]:
+        google_news = fetch_google_news(raw_input)
+        metrics["recent_news"] = google_news if google_news else "No recent headlines available."
 
     if metrics["debt_to_equity"] != "N/A":
         try:
@@ -251,34 +262,33 @@ def fetch_stock_data(resolved_ticker, raw_input):
         except Exception:
             pass
 
-    # Balance sheet breakdown for the treemap visual
+    # Balance sheet breakdown
     try:
         bs = stock.balance_sheet
         if bs is not None and not bs.empty:
             col = bs.columns[0]
-            def g(row):
+            def g_bs(row):
                 try:
                     return float(bs.loc[row, col])
                 except Exception:
                     return None
-            metrics["total_assets"] = g('Total Assets')
-            metrics["cash_bs"] = g('Cash And Cash Equivalents')
-            metrics["receivables"] = g('Receivables')
-            metrics["inventory"] = g('Inventory')
-            metrics["current_liab"] = g('Current Liabilities')
-            metrics["total_debt_bs"] = g('Total Debt')
-            metrics["total_equity"] = g('Common Stock Equity') or g('Stockholders Equity')
+            metrics["total_assets"] = g_bs('Total Assets')
+            metrics["cash_bs"] = g_bs('Cash And Cash Equivalents')
+            metrics["receivables"] = g_bs('Receivables')
+            metrics["inventory"] = g_bs('Inventory')
+            metrics["current_liab"] = g_bs('Current Liabilities')
+            metrics["total_debt_bs"] = g_bs('Total Debt')
+            metrics["total_equity"] = g_bs('Common Stock Equity') or g_bs('Stockholders Equity')
     except Exception:
         pass
 
-    # Price history for the sparkline / fair-value chart
     hist_df = hist.reset_index()[["Date", "Close"]]
     metrics["history"] = hist_df
 
     return metrics
 
 # ============================================================
-# 5. CRITERIA CHECKS (mirrors the "snowflake" checklist style)
+# 5. CRITERIA CHECKS
 # ============================================================
 def valuation_checks(m):
     price = g(m, 'price', None); fv = m.get('fair_value')
@@ -288,8 +298,7 @@ def valuation_checks(m):
     checks = []
     if fv and price is not None:
         checks.append(("Below Fair Value", price < fv,
-                        f"Price {currency} {price} vs an estimated fair value of {currency} {fv} "
-                        f"(simplified PEG-based estimate, not a full DCF model)"))
+                        f"Price {currency} {price} vs an estimated fair value of {currency} {fv}"))
         checks.append(("Significantly Undervalued (20%+ below)", price < fv * 0.8,
                         "Price is more than 20% below the fair value estimate"))
     else:
@@ -370,7 +379,7 @@ def card(title, body_html):
 # ============================================================
 # 6. CHART BUILDERS
 # ============================================================
-def snowflake_chart(scores):
+def analysis_radar_chart(scores):
     categories = list(scores.keys())
     values = list(scores.values())
     fig = go.Figure()
@@ -454,21 +463,22 @@ def balance_sheet_treemap(m):
     return fig
 
 # ============================================================
-# 7. AI NARRATIVE + PDF EXPORT (data logic unchanged)
+# 7. AI NARRATIVE & RATING LOGIC
 # ============================================================
 def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
 
     system_instruction = """
-    You are an elite institutional equity research director building a comprehensive, exhaustive, multi-page stock intelligence dossier styled after professional SimplyWallSt terminal reports. Do not summarize; provide deep, granular, multi-paragraph qualitative and quantitative breakdowns for every module.
-    Do not use markdown hash symbols or asterisks. Output clean raw text with clear section headers.
+    You are an elite institutional equity research director building a comprehensive, exhaustive, multi-page stock intelligence dossier.
+    Do not summarize; provide deep, granular breakdowns for every module.
+    Do not use markdown hash symbols or asterisks in pre-ambles.
 
     MANDATORY PRE-AMBLE VARIABLES (Exact format on first 3 lines):
     DYNAMIC_SECTOR: [Insert Industry]
-    DYNAMIC_RATING: [STRONG BUY, BUY, HOLD, DON'T BUY, or SELL]
+    DYNAMIC_RATING: [Choose strictly ONE: STRONG BUY, BUY, OBSERVE, DON'T BUY, SELL]
     DYNAMIC_DURATION: [1-3 Months, 3-5 Years, or N/A]
 
-    Structure your exhaustive deep-dive analysis using EXACTLY these 8 numbered headers:
+    Structure your deep-dive analysis using EXACTLY these 8 numbered headers:
     1. VALUATION & FAIR VALUE
     2. FUTURE GROWTH & OUTLOOK
     3. PAST PERFORMANCE & EARNINGS QUALITY
@@ -478,7 +488,18 @@ def generate_comprehensive_report(metrics, ticker):
     7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
     8. SUMMARY VERDICT & KEY RISKS
 
-    Ensure each section contains thorough financial context, comparative industry positioning, cash flow dynamics, and risk evaluations.
+    RATING & VERDICT GUIDELINES:
+    - Distinguish between BUY and STRONG BUY:
+      * STRONG BUY: Conviction growth with high safety margin, stellar ROCE/ROE, low debt.
+      * BUY: Strong fundamentals but moderate valuation margin.
+      * OBSERVE: Use this instead of Hold. We do not know if the user already holds shares. Focus on key watch triggers/entry catalysts.
+      * DON'T BUY / SELL: Clear warning signs, overvaluation, or high balance sheet risks.
+    - Under section '8. SUMMARY VERDICT & KEY RISKS', you MUST explicitly begin with:
+      Line 1: Rating: [STRONG BUY / BUY / OBSERVE / DON'T BUY / SELL]
+      Line 2: Recommended Entry Level: [Specific price or range, e.g., ₹X - ₹Y]
+      Line 3: Target Price & Horizon: [Price Target & time horizon, e.g., ₹Z (12-18 Months)]
+      Line 4: Suggested Stop Loss: [Risk boundary, e.g., ₹SL]
+      Followed by the detailed qualitative rationale and key risk factors.
     """
 
     user_prompt = f"""
@@ -494,7 +515,7 @@ def generate_comprehensive_report(metrics, ticker):
     Debt to Equity: {metrics['debt_to_equity']}
     Net Margin: {metrics['net_margin']}
     Industry: {metrics['industry']} | Sector: {metrics['sector']}
-    Recent News Headwinds/Catalysts: {metrics['recent_news']}
+    Recent Headlines / Catalysts: {metrics['recent_news']}
     """
 
     response = client.models.generate_content(
@@ -514,7 +535,13 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
     table_text = ParagraphStyle('TableText', fontName='Helvetica', fontSize=7, leading=9, textColor=colors.white)
     table_val = ParagraphStyle('TableVal', fontName='Helvetica-Bold', fontSize=7, leading=9, textColor=colors.white)
 
-    rating_colors = {"STRONG BUY": "#15803D", "DON'T BUY": "#DC2626", "BUY": "#172554", "HOLD": "#D97706", "SELL": "#1E3A8A"}
+    rating_colors = {
+        "STRONG BUY": "#15803D",
+        "BUY": "#172554",
+        "OBSERVE": "#D97706",
+        "DON'T BUY": "#DC2626",
+        "SELL": "#991B1B"
+    }
 
     sector_val, duration_val, rating_val = "Growth / Cyclical", "N/A", "EVALUATED"
     clean_lines = []
@@ -576,7 +603,7 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
     doc.build(story)
 
 # ============================================================
-# 8. APP STATE
+# 8. APP STATE & NAVIGATION
 # ============================================================
 if 'report_data' not in st.session_state:
     st.session_state.report_data = None
@@ -594,6 +621,9 @@ with st.sidebar:
         m0 = st.session_state.report_data['metrics']
         t0 = st.session_state.report_data['ticker']
         name0 = g(m0, 'name', t0)
+        mcap_val = g(m0, 'market_cap')
+        mcap_str = fmt_num(mcap_val, prefix=g(m0, 'currency', '') + ' ') if mcap_val != "N/A" else ""
+
         st.markdown(f"""
         <div class="swf-company-mini">
             <div style="display:flex; align-items:center; gap:10px;">
@@ -603,9 +633,7 @@ with st.sidebar:
                     <div style="color:{MUTED}; font-size:0.8em;">{t0} Stock Report</div>
                 </div>
             </div>
-            <div style="color:{MUTED}; font-size:0.85em; margin-top:6px;">
-                Market Cap: {fmt_num(g(m0, 'market_cap'), prefix=g(m0, 'currency', '') + ' ')}
-            </div>
+            {"<div style='color:" + MUTED + "; font-size:0.85em; margin-top:6px;'>Market Cap: " + mcap_str + "</div>" if mcap_str else ""}
         </div>
         """, unsafe_allow_html=True)
         st.session_state.active_section = st.radio(
@@ -616,12 +644,11 @@ with st.sidebar:
         st.markdown(f'<div style="color:{MUTED}; padding:10px;">Generate a report to unlock section navigation.</div>', unsafe_allow_html=True)
 
 # ============================================================
-# 10. TOP BAR + SEARCH
+# 10. TOP BAR (CLEANED)
 # ============================================================
 st.markdown(f"""
 <div class="swf-topbar">
     <div>🐂 <b>ASW STOCK IDEAS</b> &nbsp;|&nbsp; Financial Intelligence Dashboard</div>
-    <div>Dashboard &nbsp; Portfolios &nbsp; Watchlist &nbsp; Discover &nbsp; Screener</div>
 </div>
 """, unsafe_allow_html=True)
 
@@ -685,17 +712,21 @@ if st.session_state.report_data:
         "Dividend": score_from_checks(div_checks),
     }
 
-    # ---------- HEADER (always visible) ----------
+    # ---------- HEADER ----------
     currency = g(m, 'currency', '')
+    mcap_val = g(m, 'market_cap')
+    mcap_display = fmt_num(mcap_val, prefix=currency + ' ') if mcap_val != "N/A" else ""
+
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
+        sector_str = f"Stocks / {g(m, 'industry')}" if g(m, 'industry') != "N/A" else "Stock Overview"
         st.markdown(f"""
         <div class="swf-card">
             <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
-                    <div style="color:{MUTED}; font-size:0.85em;">Stocks / {g(m,'industry')}</div>
+                    <div style="color:{MUTED}; font-size:0.85em;">{sector_str}</div>
                     <div style="font-size:1.4em; font-weight:800;">{g(m,'name',ticker)}</div>
-                    <div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report &nbsp;|&nbsp; Market Cap: {fmt_num(g(m,'market_cap'), prefix=currency+' ')}</div>
+                    <div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report {"| Market Cap: " + mcap_display if mcap_display else ""}</div>
                     <span class="swf-badge" style="margin-top:8px; display:inline-block;">📊 Live Analysis</span>
                 </div>
                 <div style="text-align:right;">
@@ -709,8 +740,8 @@ if st.session_state.report_data:
         if hist_df is not None and len(hist_df) > 0:
             st.plotly_chart(price_history_chart(hist_df, m.get('fair_value'), currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
-        st.markdown('<div class="swf-card"><div class="swf-h">Snowflake Analysis</div>', unsafe_allow_html=True)
-        st.plotly_chart(snowflake_chart(scores), use_container_width=True, config={'displayModeBar': False})
+        st.markdown('<div class="swf-card"><div class="swf-h">Analysis</div>', unsafe_allow_html=True)
+        st.plotly_chart(analysis_radar_chart(scores), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
@@ -730,11 +761,23 @@ if st.session_state.report_data:
         c4.metric("PAT Growth (YoY)", f"{g(m,'pat_yoy')}")
         c4.metric("PAT Growth (QoQ)", f"{g(m,'pat_qoq')}")
 
-        st.markdown("### About the Company")
-        summary = m.get('business_summary') or "Business summary not available for this ticker."
-        card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>"
-                          f"<div class='swf-sub'>Founded info not always available via this data source. "
-                          f"Employees: {m.get('employees') or 'N/A'} | Sector: {g(m,'sector')} | Industry: {g(m,'industry')}</div>")
+        summary = m.get('business_summary')
+        meta_items = []
+        if m.get('employees'):
+            meta_items.append(f"Employees: {m['employees']:,}")
+        if g(m, 'sector') != "N/A":
+            meta_items.append(f"Sector: {g(m, 'sector')}")
+        if g(m, 'industry') != "N/A":
+            meta_items.append(f"Industry: {g(m, 'industry')}")
+
+        meta_html = f"<div class='swf-sub' style='margin-left:0; margin-top:8px;'>{' | '.join(meta_items)}</div>" if meta_items else ""
+
+        if summary:
+            st.markdown("### About the Company")
+            card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>{meta_html}")
+        elif meta_html:
+            st.markdown("### About the Company")
+            card("Overview", meta_html)
 
     # ---------- 1. VALUATION ----------
     elif section == "1. Valuation":
@@ -744,7 +787,7 @@ if st.session_state.report_data:
             fig, diff_pct = fair_value_bar(g(m, 'price'), m['fair_value'], currency)
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
             status_word = "overvalued" if diff_pct and diff_pct > 0 else "undervalued"
-            st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the simplified fair value estimate. This is a heuristic (PEG-based), not a discounted cash flow model.")
+            st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the simplified fair value estimate.")
         card("Narrative — Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     # ---------- 2. FUTURE GROWTH ----------
@@ -754,27 +797,40 @@ if st.session_state.report_data:
             card("Analyst Coverage",
                  f"<div class='swf-sub' style='margin-left:0;'>Average 12-month analyst target: "
                  f"<b>{currency} {m['target_mean_price']}</b> based on {m['num_analysts']} analyst(s).</div>")
-        else:
-            card("Analyst Coverage", "<div class='swf-check-na'>&#8213; Insufficient analyst coverage to forecast growth for this stock.</div>")
         card("Narrative — Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     # ---------- 3. PAST PERFORMANCE ----------
     elif section == "3. Past Performance":
         st.markdown(f"### 3. Past Performance — Score {score_from_checks(past_checks)}/100")
         card("Past Performance Checklist", render_checks(past_checks))
+
+        yoy_val = to_float(g(m, 'pat_yoy', None)) or 0
+        qoq_val = to_float(g(m, 'pat_qoq', None)) or 0
+        roe_val = to_float(g(m, 'roe', None)) or 0
+        roa_val = to_float(g(m, 'roce_roa', None)) or 0
+
         p1, p2 = st.columns(2)
         with p1:
-            fig = go.Figure(data=[go.Bar(x=['PAT YoY', 'PAT QoQ'],
-                                          y=[to_float(g(m,'pat_yoy',None)) or 0, to_float(g(m,'pat_qoq',None)) or 0],
-                                          marker_color=[GREEN, BLUE], text_auto=True)])
+            fig = go.Figure(data=[go.Bar(
+                x=['PAT YoY', 'PAT QoQ'],
+                y=[yoy_val, qoq_val],
+                marker_color=[GREEN, BLUE],
+                text=[f"{yoy_val}%", f"{qoq_val}%"],
+                textposition='auto'
+            )])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Earnings Momentum")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         with p2:
-            fig = go.Figure(data=[go.Bar(x=['ROE', 'ROA/ROCE'],
-                                          y=[to_float(g(m,'roe',None)) or 0, to_float(g(m,'roce_roa',None)) or 0],
-                                          marker_color=[GOLD, '#a855f7'], text_auto=True)])
+            fig = go.Figure(data=[go.Bar(
+                x=['ROE', 'ROA/ROCE'],
+                y=[roe_val, roa_val],
+                marker_color=[GOLD, '#a855f7'],
+                text=[f"{roe_val}%", f"{roa_val}%"],
+                textposition='auto'
+            )])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Profitability Returns")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
         card("Narrative — Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
     # ---------- 4. FINANCIAL HEALTH ----------
@@ -784,8 +840,6 @@ if st.session_state.report_data:
         tm = balance_sheet_treemap(m)
         if tm:
             st.plotly_chart(tm, use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.caption("Balance sheet breakdown unavailable for this ticker.")
         card("Narrative — Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
 
     # ---------- 5. DIVIDEND ----------
@@ -808,8 +862,6 @@ if st.session_state.report_data:
                     "Total Pay": fmt_num(o.get('totalPay'), prefix=currency + ' ') if o.get('totalPay') else "N/A"
                 })
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
-        else:
-            card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management/board data is not available via this data source.</div>")
         card("Narrative — Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
 
     # ---------- 7. OWNERSHIP ----------
@@ -818,9 +870,6 @@ if st.session_state.report_data:
         shareholding = m.get('shareholding') or {}
         if shareholding:
             st.plotly_chart(ownership_bar(shareholding), use_container_width=True, config={'displayModeBar': False})
-        else:
-            st.caption("Shareholding breakdown unavailable for this ticker.")
-        card("Insider Transactions", "<div class='swf-check-na'>&#8213; Insider buy/sell transaction history is not reliably available via this data source.</div>")
         card("Narrative — Ownership Structure & Insider Sentiment", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
     # ---------- 8. OTHER INFORMATION ----------
@@ -828,14 +877,17 @@ if st.session_state.report_data:
         st.markdown("### 8. Other Information")
         oc1, oc2 = st.columns(2)
         with oc1:
-            card("Key Information",
-                 f"<div class='swf-sub' style='margin-left:0;'>Exchange: {g(m,'exchange')}<br>"
-                 f"Ticker: {ticker}<br>Employees: {m.get('employees') or 'N/A'}<br>"
-                 f"Website: <a href='{m.get('website')}' style='color:{BLUE};'>{m.get('website') or 'N/A'}</a></div>")
+            info_lines = []
+            if g(m, 'exchange') != "N/A": info_lines.append(f"Exchange: {g(m,'exchange')}")
+            info_lines.append(f"Ticker: {ticker}")
+            if m.get('employees'): info_lines.append(f"Employees: {m['employees']:,}")
+            if m.get('website'): info_lines.append(f"Website: <a href='{m['website']}' style='color:{BLUE};'>{m['website']}</a>")
+
+            card("Key Information", f"<div class='swf-sub' style='margin-left:0;'>{'<br>'.join(info_lines)}</div>")
         with oc2:
             news_val = g(m, 'recent_news', '')
             headlines = news_val.split(" | ") if news_val and news_val != "N/A" else []
-            news_html = "".join([f"<div class='swf-sub' style='margin-left:0; padding:4px 0; border-bottom:1px solid {BORDER};'>{h}</div>" for h in headlines]) or "<div class='swf-check-na'>No recent headlines.</div>"
+            news_html = "".join([f"<div class='swf-sub' style='margin-left:0; padding:4px 0; border-bottom:1px solid {BORDER};'>{h}</div>" for h in headlines]) if headlines else "<div class='swf-check-na'>No recent news available.</div>"
             card("Recent News & Updates", news_html)
         card("Narrative — Summary Verdict & Key Risks", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(7)}</p>")
 
