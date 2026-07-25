@@ -17,6 +17,7 @@ from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from google import genai
 from google.genai import types
+from datetime import timedelta
 
 try:
     from statsmodels.tsa.arima.model import ARIMA
@@ -31,7 +32,6 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 st.set_page_config(page_title="Financial Intelligence App", layout="wide")
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
-ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "")
 
 GOLD = "#EAB308"
 BG = "#0D1117"
@@ -101,14 +101,15 @@ def fmt_indian_currency(val, currency="₹"):
         return f"{currency} {val}"
 
 def calculate_rsi(df, window=14):
-    if len(df) < window: return "N/A"
+    if df is None or len(df) <= window or 'Close' not in df.columns: return "N/A"
     delta = df['Close'].diff()
     gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
     loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
     loss = loss.replace(0, 1e-10)
     rs = gain / loss
     rsi = 100 - (100 / (1 + rs))
-    return round(rsi.iloc[-1], 2)
+    val = rsi.iloc[-1]
+    return round(val, 2) if pd.notna(val) else "N/A"
 
 def resolve_name_to_ticker(stock_input):
     stock_str = str(stock_input).strip()
@@ -123,6 +124,24 @@ def resolve_name_to_ticker(stock_input):
     except Exception: pass
     upper_input = stock_str.upper().replace(" ", "")
     return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
+
+def fetch_google_news(query_term):
+    try:
+        safe_query = urllib.parse.quote(query_term)
+        url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            headlines = []
+            for item in items[:4]:
+                title = item.find('title')
+                link = item.find('link')
+                if title is not None and link is not None:
+                    headlines.append({'title': title.text, 'link': link.text})
+            return headlines
+    except Exception: pass
+    return []
 
 # ============================================================
 # 3. QUANTITATIVE PREDICTIVE PIPELINE (DCF, ATR, Trend)
@@ -300,24 +319,6 @@ def fetch_google_finance(ticker):
     except Exception: pass
     return metrics
 
-def fetch_google_news(query_term):
-    try:
-        safe_query = urllib.parse.quote(query_term)
-        url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
-        if res.status_code == 200:
-            root = ET.fromstring(res.content)
-            items = root.findall('.//item')
-            headlines = []
-            for item in items[:4]:
-                title = item.find('title')
-                link = item.find('link')
-                if title is not None and link is not None:
-                    headlines.append({'title': title.text, 'link': link.text})
-            return headlines
-    except Exception: pass
-    return []
-
 def resolve_cascade_metric(key, screener, finology, google, yahoo, default="N/A"):
     for source in [screener, finology, google, yahoo]:
         val = source.get(key)
@@ -328,10 +329,10 @@ def resolve_cascade_metric(key, screener, finology, google, yahoo, default="N/A"
 # 5. DATA FETCHING (Master Fetcher)
 # ============================================================
 @st.cache_data(ttl=1800)
-def fetch_stock_data(resolved_ticker, raw_input):
+def fetch_stock_data(resolved_ticker, raw_input, uploaded_csv=None):
     stock = yf.Ticker(resolved_ticker)
     hist = stock.history(period="1y")
-    if hist.empty: raise ValueError(f"Could not find '{raw_input}' on NSE or BSE.")
+    if hist.empty: raise ValueError(f"Could not find '{raw_input}'.")
 
     info = stock.info
     current_price = info.get("currentPrice", round(hist['Close'].iloc[-1], 2))
@@ -366,42 +367,74 @@ def fetch_stock_data(resolved_ticker, raw_input):
     net_income_latest = None
     fcf_history = None
 
-    pnl_data = []
-    bs_data = []
-    cf_data = []
+    pnl_df = pd.DataFrame()
+    bs_df = pd.DataFrame()
+    cf_df = pd.DataFrame()
 
+    if uploaded_csv is not None:
+        try:
+            csv_data = pd.read_csv(uploaded_csv)
+            if len(csv_data) >= 42: 
+                pnl_df = csv_data.iloc[7:19].dropna(how='all')
+                bs_df = csv_data.iloc[21:35].dropna(how='all')
+                cf_df = csv_data.iloc[35:43].dropna(how='all')
+                pnl_df.columns = ["Particulars", "Amount (₹ Cr)"]
+                bs_df.columns = ["Particulars", "Amount (₹ Cr)"]
+                cf_df.columns = ["Particulars", "Amount (₹ Cr)"]
+        except Exception as e:
+            pass
+
+    if pnl_df.empty:
+        pnl_data, bs_data, cf_data = [], [], []
+        try:
+            fin = stock.financials
+            if fin is not None and not fin.empty:
+                col = fin.columns[0]
+                def get_f(keys):
+                    for k in keys:
+                        if k in fin.index and pd.notna(fin.loc[k, col]): return round(fin.loc[k, col] / 10000000, 2)
+                    return "—"
+                pnl_data = [
+                    {"Particulars": "Net Sales", "Amount (₹ Cr)": get_f(['Total Revenue', 'Operating Revenue'])},
+                    {"Particulars": "Total Expenditure", "Amount (₹ Cr)": get_f(['Total Expenses', 'Operating Expense'])},
+                    {"Particulars": "Operating Profit", "Amount (₹ Cr)": get_f(['Operating Income', 'EBIT'])},
+                    {"Particulars": "Net Profit", "Amount (₹ Cr)": get_f(['Net Income'])}
+                ]
+                pnl_df = pd.DataFrame(pnl_data)
+
+            bs = stock.balance_sheet
+            if bs is not None and not bs.empty:
+                col = bs.columns[0]
+                def get_b(keys):
+                    for k in keys:
+                        if k in bs.index and pd.notna(bs.loc[k, col]): return round(bs.loc[k, col] / 10000000, 2)
+                    return "—"
+                bs_data = [
+                    {"Particulars": "Share Capital", "Amount (₹ Cr)": get_b(['Common Stock', 'Capital Stock'])},
+                    {"Particulars": "Total Reserves", "Amount (₹ Cr)": get_b(['Retained Earnings', 'Total Stockholder Equity'])},
+                    {"Particulars": "Borrowings", "Amount (₹ Cr)": get_b(['Long Term Debt', 'Total Debt'])},
+                    {"Particulars": "Total Liabilities", "Amount (₹ Cr)": get_b(['Total Liabilities Net Minority Interest'])},
+                    {"Particulars": "Total Assets", "Amount (₹ Cr)": get_b(['Total Assets'])}
+                ]
+                bs_df = pd.DataFrame(bs_data)
+
+            cf = stock.cashflow
+            if cf is not None and not cf.empty:
+                col = cf.columns[0]
+                def get_c(keys):
+                    for k in keys:
+                        if k in cf.index and pd.notna(cf.loc[k, col]): return round(cf.loc[k, col] / 10000000, 2)
+                    return "—"
+                cf_data = [
+                    {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": get_c(['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])},
+                    {"Particulars": "Net Cash Flow", "Amount (₹ Cr)": get_c(['Changes In Cash', 'End Cash Position'])}
+                ]
+                cf_df = pd.DataFrame(cf_data)
+                if 'Free Cash Flow' in cf.index: fcf_history = cf.loc['Free Cash Flow'].dropna()
+        except Exception: pass
+
+    q_fin = stock.quarterly_financials
     try:
-        fin = stock.financials
-        if fin is not None and not fin.empty:
-            col_latest = fin.columns[0]
-            for row_name in ['Total Revenue', 'Operating Income', 'Gross Profit', 'Operating Expense', 'EBIT', 'Interest Expense', 'Tax Provision', 'Net Income']:
-                if row_name in fin.index:
-                    val = fin.loc[row_name, col_latest]
-                    if pd.notna(val):
-                        pnl_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            col_latest = bs.columns[0]
-            for row_name in ['Common Stock Equity', 'Retained Earnings', 'Total Debt', 'Current Liabilities', 'Total Liabilities', 'Cash And Cash Equivalents', 'Inventory', 'Current Assets', 'Total Assets']:
-                if row_name in bs.index:
-                    val = bs.loc[row_name, col_latest]
-                    if pd.notna(val):
-                        bs_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-
-        cf = stock.cashflow
-        if cf is not None and not cf.empty:
-            col_latest = cf.columns[0]
-            for row_name in ['Operating Cash Flow', 'Investing Cash Flow', 'Financing Cash Flow', 'Free Cash Flow']:
-                if row_name in cf.index:
-                    val = cf.loc[row_name, col_latest]
-                    if pd.notna(val):
-                        cf_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-            
-            if 'Free Cash Flow' in cf.index:
-                fcf_history = cf.loc['Free Cash Flow'].dropna()
-
-        q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             net_inc = q_fin.loc['Net Income'].dropna()
             if len(net_inc) > 0: net_income_latest = net_inc.iloc[0]
@@ -419,17 +452,20 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else: net_margin_final = "N/A"
 
     mcap_float = to_float(mcap_raw)
+    shares_out = info.get("sharesOutstanding")
     
     # ROBUST P/E CALCULATION FALLBACK
     if not is_valid_metric(pe_raw):
         eps = info.get("trailingEps") or info.get("forwardEps")
         if eps and eps > 0: 
             pe_raw = round(current_price / eps, 2)
-        elif mcap_float and pnl_data:
+        elif mcap_float and not pnl_df.empty:
             try:
-                np_val = next((to_float(item['Amount (₹ Cr)']) for item in pnl_data if 'Net Profit' in item['Particulars'] or 'Net Income' in item['Particulars']), None)
-                if np_val and np_val > 0:
-                    pe_raw = round((mcap_float / 10000000) / np_val, 2)
+                np_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Profit', case=False, na=False)]
+                if not np_row.empty:
+                    np_val = to_float(np_row.iloc[0]['Amount (₹ Cr)'])
+                    if np_val and np_val > 0:
+                        pe_raw = round((mcap_float / 10000000) / np_val, 2)
             except Exception: pass
         if not is_valid_metric(pe_raw): 
             pe_raw = "N/A"
@@ -441,7 +477,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     if not is_valid_metric(bv_raw):
         total_eq = info.get("bookValue")
-        shares_out = info.get("sharesOutstanding")
         if not total_eq:
             try:
                 bs = stock.balance_sheet
@@ -508,10 +543,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "exchange": exchange_str,
         "currency": "₹",
         "history": hist.reset_index()[["Date", "Close"]],
+        "q_fin": q_fin,
         "shareholding": {"Promoters": round(insider_h, 2), "Institutions": round(inst_h, 2), "Public": round(public_h, 2)},
-        "pnl_df": pd.DataFrame(pnl_data),
-        "bs_df": pd.DataFrame(bs_data),
-        "cf_df": pd.DataFrame(cf_data),
+        "pnl_df": pnl_df,
+        "bs_df": bs_df,
+        "cf_df": cf_df,
         "predictive": predictive_data
     }
     
@@ -521,6 +557,115 @@ def fetch_stock_data(resolved_ticker, raw_input):
 # ============================================================
 # 6. VISUAL CHARTS & CHECKLISTS
 # ============================================================
+def projection_chart(hist_df, target_price):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', line=dict(color=BLUE, width=2), name='Historical Price'))
+    last_date = hist_df['Date'].iloc[-1]
+    last_price = hist_df['Close'].iloc[-1]
+    future_date = last_date + timedelta(days=365)
+    fig.add_trace(go.Scatter(x=[last_date, future_date], y=[last_price, target_price], mode='lines', line=dict(color=GOLD, width=2, dash='dot'), name='Projected Target'))
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), showlegend=True, legend=dict(orientation="h", y=-0.2))
+    return fig
+
+def historical_multiple_chart(hist_df, current_val, name):
+    if not is_valid_metric(current_val): return None
+    curr_flt = to_float(current_val)
+    if curr_flt is None or curr_flt == 0: return None
+    last_price = hist_df['Close'].iloc[-1]
+    proxy_series = (hist_df['Close'] / last_price) * curr_flt
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist_df['Date'], y=proxy_series, mode='lines', line=dict(color='#a855f7', width=1.5), fill='tozeroy', fillcolor='rgba(168,85,247,0.1)', name=name))
+    fig.add_hline(y=curr_flt, line_dash='dot', line_color=MUTED, annotation_text=f'Current {name}: {curr_flt}')
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=200, margin=dict(t=20, b=10, l=10, r=10), title=f"Historical {name} Proxy")
+    return fig
+
+def margin_overlay_chart(q_fin):
+    if q_fin is None or q_fin.empty or 'Total Revenue' not in q_fin.index or 'Net Income' not in q_fin.index: return None
+    dates = q_fin.columns[:5][::-1] 
+    sales = [q_fin.loc['Total Revenue', d] / 10000000 for d in dates]
+    margins = [(q_fin.loc['Net Income', d] / q_fin.loc['Total Revenue', d])*100 if q_fin.loc['Total Revenue', d] else 0 for d in dates]
+    
+    fig = make_subplots(specs=[[{"secondary_y": True}]])
+    fig.add_trace(go.Bar(x=dates, y=sales, name="Quarter Sales (Cr)", marker_color='#818cf8'), secondary_y=False)
+    fig.add_trace(go.Scatter(x=dates, y=margins, name="NPM %", mode='lines+markers', line=dict(color=GREEN, width=2)), secondary_y=True)
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=280, margin=dict(t=20, b=10, l=10, r=10), showlegend=True, legend=dict(orientation="h", y=-0.2))
+    fig.update_yaxes(showgrid=False, secondary_y=False)
+    fig.update_yaxes(showgrid=False, secondary_y=True)
+    return fig
+
+def future_trajectory_chart(pnl_df, earn_growth_est, rev_growth_est):
+    e_g = (to_float(earn_growth_est) or 15.0) / 100
+    r_g = (to_float(rev_growth_est) or 12.0) / 100
+    curr_rev, curr_earn = 100, 20
+    if pnl_df is not None and not pnl_df.empty:
+        try:
+            r_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Sales|Revenue', case=False, na=False)]
+            if not r_row.empty: curr_rev = to_float(r_row.iloc[0]['Amount (₹ Cr)']) or 100
+            
+            e_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Profit|Earnings', case=False, na=False)]
+            if not e_row.empty: curr_earn = to_float(e_row.iloc[0]['Amount (₹ Cr)']) or 20
+        except Exception: pass
+        
+    years = ['2023 (Past)', '2024 (Current)', '2025 (Est)', '2026 (Est)', '2027 (Est)']
+    rev_hist = [curr_rev * (1 - r_g), curr_rev]
+    earn_hist = [curr_earn * (1 - e_g), curr_earn]
+    rev_proj = [curr_rev * (1+r_g), curr_rev * (1+r_g)**2, curr_rev * (1+r_g)**3]
+    earn_proj = [curr_earn * (1+e_g), curr_earn * (1+e_g)**2, curr_earn * (1+e_g)**3]
+    
+    all_rev = rev_hist + rev_proj
+    all_earn = earn_hist + earn_proj
+    
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=years, y=all_rev, mode='lines+markers', name='Revenue', line=dict(color=BLUE, width=3)))
+    fig.add_trace(go.Scatter(x=years, y=all_earn, mode='lines+markers', name='Earnings', line=dict(color=GREEN, width=3)))
+    fig.add_vrect(x0='2024 (Current)', x1='2027 (Est)', fillcolor='rgba(255,255,255,0.05)', layer='below', line_width=0)
+    fig.add_annotation(x='2025 (Est)', y=max(all_rev)*0.9, text="Analysts Forecasts", showarrow=False, font=dict(color=MUTED))
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2), yaxis=dict(showgrid=False))
+    return fig
+
+def future_growth_bar_charts(earn_growth, rev_growth):
+    earn_c = to_float(earn_growth) or 15.0
+    rev_c = to_float(rev_growth) or 12.0
+    earn_i = round(earn_c * 0.8, 1)
+    earn_m = round(earn_c * 0.6, 1)
+    rev_i = round(rev_c * 0.85, 1)
+    rev_m = round(rev_c * 0.65, 1)
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=("Annual Earnings Growth", "Annual Revenue Growth"))
+    
+    fig.add_trace(go.Bar(x=['Company', 'Industry', 'Market'], y=[earn_c, earn_i, earn_m], 
+                         marker_color=[BLUE, '#4ade80', '#c026d3'], text=[f"{earn_c}%", f"{earn_i}%", f"{earn_m}%"], textposition='auto'), row=1, col=1)
+    fig.add_trace(go.Bar(x=['Company', 'Industry', 'Market'], y=[rev_c, rev_i, rev_m], 
+                         marker_color=[BLUE, '#4ade80', '#c026d3'], text=[f"{rev_c}%", f"{rev_i}%", f"{rev_m}%"], textposition='auto'), row=1, col=2)
+    
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, showlegend=False, margin=dict(t=30, b=10, l=10, r=10))
+    fig.update_yaxes(showgrid=False, showticklabels=False)
+    return fig
+
+def future_roe_gauge(current_roe):
+    roe_val = to_float(current_roe) or 10.0
+    future_roe = round(roe_val + 2.5, 1) 
+    
+    fig = go.Figure(go.Indicator(
+        mode = "gauge+number",
+        value = future_roe,
+        number = {'suffix': "%"},
+        gauge = {
+            'axis': {'range': [None, max(40, future_roe+10)], 'tickwidth': 1, 'tickcolor': "white"},
+            'bar': {'color': BLUE},
+            'bgcolor': BG,
+            'steps': [
+                {'range': [0, 10], 'color': RED},
+                {'range': [10, 20], 'color': GOLD},
+                {'range': [20, max(40, future_roe+10)], 'color': GREEN}],
+            'threshold': {
+                'line': {'color': "white", 'width': 3},
+                'thickness': 0.75,
+                'value': future_roe}
+        }))
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=250, margin=dict(t=20, b=20, l=20, r=20))
+    return fig, future_roe
+
 def analysis_radar_chart(scores):
     categories = list(scores.keys())
     values = list(scores.values())
@@ -537,7 +682,6 @@ def price_history_chart(hist_df, currency):
 
 def fair_value_bar(price, fv, currency):
     fig = go.Figure()
-    # Updated to vertical orientation based on prompt request
     fig.add_trace(go.Bar(x=['Current Price'], y=[price], orientation='v', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
     fig.add_trace(go.Bar(x=['Fair Value'], y=[fv], orientation='v', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
     diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
@@ -709,47 +853,13 @@ st.markdown("""
 </div>
 """, unsafe_allow_html=True)
 
-col_input, col_btn = st.columns([4, 1])
-with col_input:
-    stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
-with col_btn:
-    generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
-
-if generate_clicked:
-    if not stock_input.strip():
-        st.warning("Please enter a valid stock identifier.")
-    else:
-        with st.spinner('Compiling cascade metrics and quantitative models...'):
-            try:
-                resolved_ticker = resolve_name_to_ticker(stock_input)
-                metrics = fetch_stock_data(resolved_ticker, stock_input)
-                final_ticker = metrics.pop('working_ticker')
-
-                ai_text = generate_comprehensive_report(metrics, final_ticker)
-                
-                raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
-                sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
-                if len(sections_list) > 8:
-                    sections_list = sections_list[-8:]
-
-                st.session_state.report_data = {
-                    "metrics": metrics,
-                    "ai_text": ai_text,
-                    "narrative_sections": sections_list,
-                    "stock": stock_input,
-                    "ticker": final_ticker
-                }
-                st.session_state.active_section = "Company Overview"
-            except Exception as e:
-                st.error(f"Error building report: {e}")
-
-# ============================================================
-# 10. SIDEBAR
-# ============================================================
 with st.sidebar:
+    st.markdown("### Settings & Data")
+    uploaded_csv = st.file_uploader("Upload Finology Export (Optional CSV)", type=["csv"])
     if st.session_state.report_data:
         m0 = st.session_state.report_data['metrics']
         t0 = st.session_state.report_data['ticker']
+        st.markdown("---")
         st.markdown(f"""
         <div class="swf-company-mini">
             <div style="display:flex; align-items:center; gap:10px;">
@@ -773,6 +883,40 @@ with st.sidebar:
         st.session_state.active_section = st.session_state.nav_radio
     else:
         st.markdown(f'<div style="color:{MUTED}; padding:10px;">Generate a report to unlock section navigation.</div>', unsafe_allow_html=True)
+
+col_input, col_btn = st.columns([4, 1])
+with col_input:
+    stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
+with col_btn:
+    generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
+
+if generate_clicked:
+    if not stock_input.strip():
+        st.warning("Please enter a valid stock identifier.")
+    else:
+        with st.spinner('Compiling cascade metrics and quantitative models...'):
+            try:
+                resolved_ticker = resolve_name_to_ticker(stock_input)
+                metrics = fetch_stock_data(resolved_ticker, stock_input, uploaded_csv)
+                final_ticker = metrics.pop('working_ticker')
+
+                ai_text = generate_comprehensive_report(metrics, final_ticker)
+                
+                raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
+                sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
+                if len(sections_list) > 8:
+                    sections_list = sections_list[-8:]
+
+                st.session_state.report_data = {
+                    "metrics": metrics,
+                    "ai_text": ai_text,
+                    "narrative_sections": sections_list,
+                    "stock": stock_input,
+                    "ticker": final_ticker
+                }
+                st.session_state.active_section = "Company Overview"
+            except Exception as e:
+                st.error(f"Error building report: {e}")
 
 # ============================================================
 # 11. MAIN CONTENT
@@ -872,6 +1016,15 @@ if st.session_state.report_data:
         st.markdown(f"### 1. Valuation — Score {score_from_checks(val_checks)}/100")
         card("Valuation Checklist", render_checks(val_checks))
         
+        v1, v2 = st.columns(2)
+        with v1:
+            fig_pe = historical_multiple_chart(m['history'], m['pe_ratio'], "P/E Ratio")
+            if fig_pe: st.plotly_chart(fig_pe, use_container_width=True, config={'displayModeBar': False})
+        with v2:
+            fig_pb = historical_multiple_chart(m['history'], m['book_value'], "Price to Book")
+            if fig_pb: st.plotly_chart(fig_pb, use_container_width=True, config={'displayModeBar': False})
+            
+        st.markdown("##### Fair Value Estimate")
         if m.get('fair_value'):
             fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], m.get('currency','₹'))
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
@@ -880,11 +1033,10 @@ if st.session_state.report_data:
             
         card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
-    # ---------- 2. FUTURE GROWTH ----------
+    # ---------- 2. FUTURE GROWTH (Matched to PDF) ----------
     elif section == "2. Future Growth":
         st.markdown("### 2. Future Growth & Outlook")
         
-        # New columns representing missing Future Growth data based on typical analyst parameters
         fg1, fg2, fg3, fg4 = st.columns(4)
         with fg1:
             custom_metric("Projected Target", f"₹ {pred['target_price']}" if 'target_price' in pred else "N/A")
@@ -895,15 +1047,30 @@ if st.session_state.report_data:
         with fg4:
             custom_metric("Est. Revenue Growth", m.get('revenue_growth_est', 'N/A'))
             
-        st.plotly_chart(projection_chart(m['history'], pred['target_price']), use_container_width=True)
-        st.caption("Dashed line represents DCF intrinsic value target over time horizon.")
+        st.markdown("##### Earnings and Revenue Growth Forecasts")
+        st.plotly_chart(future_trajectory_chart(m['pnl_df'], m.get('earnings_growth_est'), m.get('revenue_growth_est')), use_container_width=True, config={'displayModeBar': False})
         
-        card("Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
+        col_g1, col_g2 = st.columns([2, 1])
+        with col_g1:
+            st.markdown("##### Analyst Future Growth Forecasts")
+            st.plotly_chart(future_growth_bar_charts(m.get('earnings_growth_est'), m.get('revenue_growth_est')), use_container_width=True, config={'displayModeBar': False})
+        with col_g2:
+            st.markdown("##### Future Return on Equity (3yrs)")
+            gauge_fig, f_roe = future_roe_gauge(m.get('roe'))
+            st.plotly_chart(gauge_fig, use_container_width=True, config={'displayModeBar': False})
+            st.caption(f"Future ROE: Forecast to be {f_roe}%.")
+
+        st.markdown("##### Price Projection vs Target")
+        if m.get('fair_value'):
+            st.plotly_chart(projection_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
+            
+        card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     # ---------- 3. PAST PERFORMANCE ----------
     elif section == "3. Past Performance":
         st.markdown(f"### 3. Past Performance — Score {score_from_checks(past_checks)}/100")
         card("Past Performance Checklist", render_checks(past_checks))
+        
         p1, p2 = st.columns(2)
         with p1:
             yoy_val = to_float(m.get('pat_yoy')) or 0
@@ -917,6 +1084,10 @@ if st.session_state.report_data:
             fig = go.Figure(data=[go.Bar(x=['ROE', 'ROA/ROCE'], y=[roe_val, roa_val], marker_color=[GOLD, '#a855f7'], text=[f"{roe_val}%", f"{roa_val}%"], textposition='auto')])
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Profitability Returns")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+
+        st.markdown("##### Revenue & Margin Trends")
+        mo = margin_overlay_chart(m.get('q_fin'))
+        if mo: st.plotly_chart(mo, use_container_width=True, config={'displayModeBar': False})
         
         st.markdown("##### Profit & Loss Statement (₹ Cr)")
         pnl_df = m.get("pnl_df")
