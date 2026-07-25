@@ -1,3 +1,495 @@
+import streamlit as st
+import yfinance as yf
+import pandas as pd
+import plotly.graph_objects as go
+from plotly.subplots import make_subplots
+import logging
+import re
+import io
+import requests
+from bs4 import BeautifulSoup
+import xml.etree.ElementTree as ET
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, Image
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from google import genai
+from google.genai import types
+
+# ============================================================
+# 1. SETUP & CONFIGURATION
+# ============================================================
+logging.getLogger('yfinance').setLevel(logging.CRITICAL)
+st.set_page_config(page_title="ASW Stock Ideas - Financial Intelligence Dashboard", layout="wide")
+
+GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
+ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "WjBiiHX1")
+
+GOLD = "#EAB308"
+BG = "#0D1117"
+CARD_BG = "#161B22"
+BORDER = "#262B36"
+GREEN = "#3FB950"
+RED = "#F85149"
+ORANGE = "#F97316"
+MUTED = "#8B949E"
+BLUE = "#38BDF8"
+
+st.markdown(f"""
+<style>
+    .stApp {{ background-color: {BG}; color: #E6E6E6; }}
+    section[data-testid="stSidebar"] {{ background-color: {BG}; border-right: 1px solid {BORDER}; }}
+    section[data-testid="stSidebar"] .stRadio > label {{ display:none; }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] label {{
+        background-color: transparent; padding: 8px 10px; border-radius: 6px; margin-bottom: 2px;
+    }}
+    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background-color: #1c2128; }}
+    .swf-topbar {{
+        background: linear-gradient(90deg, #12151c, #171b24); border-bottom: 1px solid {BORDER};
+        padding: 12px 20px; border-radius: 8px; margin-bottom: 16px; display:flex; align-items:center;
+        justify-content:space-between; color:{MUTED}; font-size:0.9em;
+    }}
+    .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
+    .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.05em; margin-bottom:6px; }}
+    .swf-sub {{ color:{MUTED}; font-size:0.85em; margin-left:22px; }}
+    .swf-check-pass {{ color: {GREEN}; }}
+    .swf-check-fail {{ color: {RED}; }}
+    .swf-check-na {{ color: {MUTED}; }}
+    .swf-company-mini {{ padding: 6px 4px 14px 4px; border-bottom: 1px solid {BORDER}; margin-bottom: 8px; }}
+    .swf-avatar {{ width:40px; height:40px; border-radius:8px; background:#fff; color:#111; font-weight:800; display:flex; align-items:center; justify-content:center; font-size:1.2em; }}
+</style>
+""", unsafe_allow_html=True)
+
+# ============================================================
+# 2. HELPERS & DATA CASCADE
+# ============================================================
+def to_float(val):
+    if val in [None, "N/A", ""]: return None
+    try: return float(str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').strip())
+    except Exception: return None
+
+def fmt_num(val, prefix=""):
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        try: return f"{prefix}{val:,.0f}" if abs(val) >= 1 else f"{prefix}{val}"
+        except Exception: return f"{prefix}{val}"
+    return f"{prefix}{val}" if val not in (None, "N/A") else "N/A"
+
+def g(d, key, default="N/A"):
+    if not isinstance(d, dict): return default
+    val = d.get(key, default)
+    return default if val is None else val
+
+def calculate_rsi(df, window=14):
+    if len(df) < window: return "N/A"
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    loss = loss.replace(0, 1e-10)
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi.iloc[-1], 2)
+
+def fetch_google_finance_fallback(ticker, metric_type):
+    try:
+        url = f"https://www.google.com/finance/quote/{ticker}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
+        if res.status_code == 200:
+            soup = BeautifulSoup(res.text, 'html.parser')
+            if metric_type == "pe_ratio":
+                pe_div = soup.find('div', string='P/E ratio')
+                if pe_div: return pe_div.find_next_sibling('div').text.strip()
+            if metric_type == "dividend_yield":
+                dy_div = soup.find('div', string='Dividend yield')
+                if dy_div: return dy_div.find_next_sibling('div').text.replace('%','').strip()
+    except Exception: pass
+    return "N/A"
+
+def fetch_angel_one_fallback(ticker, metric_type):
+    try:
+        headers = {"Authorization": f"Bearer {ANGEL_KEY}", "Accept": "application/json"}
+        pass
+    except Exception: pass
+    return "N/A"
+
+def fetch_metric_cascade(y_val, ticker, metric_type):
+    if y_val not in [None, "N/A", "", 0, 0.0]: return y_val
+    g_val = fetch_google_finance_fallback(ticker, metric_type)
+    if g_val not in [None, "N/A", ""]: return g_val
+    a_val = fetch_angel_one_fallback(ticker, metric_type)
+    if a_val not in [None, "N/A", ""]: return a_val
+    return "N/A"
+
+def fetch_google_news(query_term):
+    try:
+        url = f"https://news.google.com/rss/search?q={query_term}&hl=en-IN&gl=IN&ceid=IN:en"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            headlines = [item.find('title').text for item in items[:4] if item.find('title') is not None]
+            if headlines: return " | ".join(headlines)
+    except Exception: pass
+    return None
+
+def resolve_name_to_ticker(stock_input):
+    stock_str = str(stock_input).strip()
+    if stock_str.isdigit(): return stock_str + '.BO'
+    try:
+        url = f"https://query2.finance.yahoo.com/v1/finance/search?q={stock_str}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            for q in res.json().get('quotes', []):
+                sym = q.get('symbol', '').upper()
+                if sym.endswith('.NS') or sym.endswith('.BO'): return sym
+    except Exception: pass
+    upper_input = stock_str.upper().replace(" ", "")
+    return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
+
+# ============================================================
+# 3. DATA FETCHING
+# ============================================================
+@st.cache_data(ttl=1800)
+def fetch_stock_data(resolved_ticker, raw_input):
+    stock = yf.Ticker(resolved_ticker)
+    hist = stock.history(period="1y")
+    if hist.empty: raise ValueError(f"Could not find '{raw_input}'.")
+    info = stock.info
+
+    pe_raw = fetch_metric_cascade(info.get("trailingPE", "N/A"), resolved_ticker, "pe_ratio")
+    dy_raw = fetch_metric_cascade(info.get("dividendYield", "N/A"), resolved_ticker, "dividend_yield")
+    if dy_raw != "N/A" and isinstance(dy_raw, (int, float)): dy_raw = round(float(dy_raw) * 100, 2)
+
+    pat_qoq, pat_yoy = "N/A", "N/A"
+    try:
+        q_fin = stock.quarterly_financials
+        if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
+            net_inc = q_fin.loc['Net Income'].dropna()
+            if len(net_inc) >= 2 and net_inc.iloc[1] != 0: pat_qoq = round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)
+            if len(net_inc) >= 5 and net_inc.iloc[4] != 0: pat_yoy = round(((net_inc.iloc[0] - net_inc.iloc[4]) / abs(net_inc.iloc[4])) * 100, 2)
+    except Exception: pass
+
+    roe_val = info.get("returnOnEquity")
+    roa_val = info.get("returnOnAssets")
+    de_val = info.get("debtToEquity")
+
+    recent_news = ""
+    try:
+        news_items = stock.news
+        if news_items:
+            headlines = [n.get('title', '') for n in news_items[:4]]
+            recent_news = " | ".join(headlines)
+    except Exception: pass
+    if not recent_news:
+        google_news = fetch_google_news(raw_input)
+        recent_news = google_news if google_news else "No recent headlines available."
+        
+    insider_h = (info.get("heldPercentInsiders") or 0) * 100
+    inst_h = (info.get("heldPercentInstitutions") or 0) * 100
+    public_h = max(0, 100 - (insider_h + inst_h))
+
+    metrics = {
+        "name": info.get("longName", resolved_ticker),
+        "price": info.get("currentPrice", round(hist['Close'].iloc[-1], 2)),
+        "pe_ratio": pe_raw,
+        "peg_ratio": info.get("pegRatio", "N/A"),
+        "roe": f"{round(roe_val * 100, 2)}%" if isinstance(roe_val, (int, float)) else "N/A",
+        "roce_roa": f"{round(roa_val * 100, 2)}%" if isinstance(roa_val, (int, float)) else "N/A",
+        "dividend_yield": f"{dy_raw}%" if dy_raw != "N/A" else "N/A",
+        "pat_qoq": f"{pat_qoq}%" if pat_qoq != "N/A" else "N/A",
+        "pat_yoy": f"{pat_yoy}%" if pat_yoy != "N/A" else "N/A",
+        "rsi": calculate_rsi(hist, 14),
+        "debt_to_equity": round(de_val / 100, 2) if isinstance(de_val, (int, float)) else "N/A",
+        "market_cap": info.get("marketCap", "N/A"),
+        "industry": info.get("industry", "N/A"),
+        "sector": info.get("sector", "N/A"),
+        "currency": info.get("currency", "INR"),
+        "employees": info.get("fullTimeEmployees"),
+        "website": info.get("website"),
+        "business_summary": info.get("longBusinessSummary"),
+        "current_ratio": info.get("currentRatio"),
+        "total_cash": info.get("totalCash"),
+        "total_debt": info.get("totalDebt"),
+        "target_mean_price": info.get("targetMeanPrice"),
+        "num_analysts": info.get("numberOfAnalystOpinions"),
+        "payout_ratio": info.get("payoutRatio"),
+        "company_officers": info.get("companyOfficers", []),
+        "recent_news": recent_news,
+        "working_ticker": resolved_ticker,
+        "history": hist.reset_index()[["Date", "Close"]],
+        "shareholding": {"Promoters / Insiders": round(insider_h, 2), "Institutions (FII/DII)": round(inst_h, 2), "General Public": round(public_h, 2)}
+    }
+
+    try:
+        bs = stock.balance_sheet
+        if bs is not None and not bs.empty:
+            col = bs.columns[0]
+            def g_bs(row):
+                try: return float(bs.loc[row, col])
+                except Exception: return None
+            metrics["total_assets"] = g_bs('Total Assets')
+            metrics["cash_bs"] = g_bs('Cash And Cash Equivalents')
+            metrics["receivables"] = g_bs('Receivables')
+            metrics["inventory"] = g_bs('Inventory')
+            metrics["current_liab"] = g_bs('Current Liabilities')
+            metrics["total_debt_bs"] = g_bs('Total Debt')
+            metrics["total_equity"] = g_bs('Common Stock Equity') or g_bs('Stockholders Equity')
+    except Exception: pass
+    
+    pe_num = to_float(metrics['pe_ratio'])
+    growth_num = to_float(pat_yoy)
+    if metrics['price'] and pe_num and pe_num > 0:
+        fair_pe = min(max(growth_num, 8), 40) if growth_num else 15
+        metrics['fair_value'] = round((metrics['price'] / pe_num) * fair_pe, 2)
+    else:
+        metrics['fair_value'] = None
+
+    return metrics
+
+# ============================================================
+# 4. CHART BUILDERS
+# ============================================================
+def analysis_radar_chart(scores):
+    categories = list(scores.keys())
+    values = list(scores.values())
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=values + [values[0]], theta=categories + [categories[0]],
+        fill='toself', fillcolor='rgba(234,179,8,0.35)', line=dict(color=GOLD, width=2)
+    ))
+    fig.update_layout(polar=dict(bgcolor=BG, radialaxis=dict(visible=False, range=[0, 100]), angularaxis=dict(color=MUTED, gridcolor=BORDER)), showlegend=False, paper_bgcolor=BG, margin=dict(t=10, b=10, l=30, r=30), height=230)
+    return fig
+
+def price_history_chart(hist_df, fair_value, currency):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', line=dict(color=BLUE, width=1.5), fill='tozeroy', fillcolor='rgba(56,189,248,0.08)', name='Price'))
+    if fair_value: fig.add_hline(y=fair_value, line_dash='dot', line_color=GOLD, annotation_text=f'Fair Value {currency} {fair_value}', annotation_font_color=GOLD)
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=20, l=10, r=10), xaxis=dict(showgrid=False, title=None), yaxis=dict(showgrid=False, title=currency))
+    return fig
+
+def fair_value_bar(price, fv, currency):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
+    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
+    diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=170, margin=dict(t=10, b=10, l=10, r=10), showlegend=False, xaxis=dict(showgrid=False, title=currency))
+    return fig, diff_pct
+
+def mom_returns_chart(m):
+    yoy = to_float(m['pat_yoy']) or 0
+    qoq = to_float(m['pat_qoq']) or 0
+    fig = go.Figure(data=[go.Bar(x=['YoY Growth', 'QoQ Growth'], y=[yoy, qoq], marker_color=[GREEN, BLUE], text=[f"{yoy}%", f"{qoq}%"], textposition='auto')])
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10))
+    return fig
+
+def ownership_bar(shareholding):
+    fig = go.Figure()
+    colors_list = [BLUE, '#a855f7', GOLD]
+    for (k, v), c in zip(shareholding.items(), colors_list):
+        fig.add_trace(go.Bar(y=['Ownership'], x=[v], name=f"{k} ({v}%)", orientation='h', marker_color=c, text=[f"{v}%"], textposition='auto'))
+    fig.update_layout(barmode='stack', template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=150, margin=dict(t=10, b=40, l=10, r=10), xaxis=dict(visible=False), yaxis=dict(visible=False), legend=dict(orientation='h', y=-0.3))
+    return fig
+
+def balance_sheet_treemap(m):
+    assets_labels, assets_vals, assets_colors = [], [], []
+    if m.get('cash_bs'):
+        assets_labels.append('Cash & Equivalents'); assets_vals.append(m['cash_bs']); assets_colors.append('#22c55e')
+    if m.get('receivables'):
+        assets_labels.append('Receivables'); assets_vals.append(m['receivables']); assets_colors.append('#4ade80')
+    if m.get('inventory'):
+        assets_labels.append('Inventory'); assets_vals.append(m['inventory']); assets_colors.append('#86efac')
+    if m.get('total_assets') and assets_vals:
+        other = m['total_assets'] - sum(assets_vals)
+        if other > 0:
+            assets_labels.append('Other Assets'); assets_vals.append(other); assets_colors.append('#bbf7d0')
+
+    liab_labels, liab_vals, liab_colors = [], [], []
+    if m.get('current_liab'):
+        liab_labels.append('Current Liabilities'); liab_vals.append(m['current_liab']); liab_colors.append('#4ade80')
+    if m.get('total_debt_bs'):
+        liab_labels.append('Debt'); liab_vals.append(m['total_debt_bs']); liab_colors.append('#f87171')
+    if m.get('total_equity'):
+        liab_labels.append('Equity'); liab_vals.append(m['total_equity']); liab_colors.append('#22c55e')
+
+    if not assets_vals or not liab_vals: return None
+
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'domain'}, {'type': 'domain'}]], subplot_titles=("Assets", "Liabilities + Equity"))
+    fig.add_trace(go.Treemap(labels=assets_labels, parents=[""] * len(assets_labels), values=assets_vals, marker_colors=assets_colors, textinfo="label+value"), row=1, col=1)
+    fig.add_trace(go.Treemap(labels=liab_labels, parents=[""] * len(liab_labels), values=liab_vals, marker_colors=liab_colors, textinfo="label+value"), row=1, col=2)
+    fig.update_layout(paper_bgcolor=BG, margin=dict(t=40, b=10, l=10, r=10), height=320, font_color="#E6E6E6")
+    return fig
+
+# ============================================================
+# 5. CHECKLIST BUILDERS
+# ============================================================
+def valuation_checks(m):
+    price = g(m, 'price', None); fv = m.get('fair_value')
+    currency = g(m, 'currency', '')
+    pe = to_float(g(m, 'pe_ratio', None)); peg = to_float(g(m, 'peg_ratio', None))
+    tgt = m.get('target_mean_price')
+    checks = []
+    if fv and price is not None:
+        checks.append(("Below Fair Value", price < fv, f"Price {currency} {price} vs an estimated fair value of {currency} {fv}"))
+        checks.append(("Significantly Undervalued (20%+ below)", price < fv * 0.8, "Price is more than 20% below the fair value estimate"))
+    else:
+        checks.append(("Below Fair Value", None, "Insufficient data to estimate fair value"))
+        checks.append(("Significantly Undervalued", None, "Insufficient data"))
+    checks.append(("Reasonable P/E (<25x)", None if pe is None else pe < 25, f"Trailing P/E of {pe}x" if pe is not None else "P/E not available"))
+    checks.append(("Attractive PEG (<1.5)", None if peg is None else peg < 1.5, f"PEG ratio of {peg}" if peg is not None else "PEG not available"))
+    if tgt and price is not None:
+        checks.append(("Trading Below Analyst Target", price < tgt, f"Average analyst target {currency} {tgt}"))
+    else:
+        checks.append(("Analyst Target Coverage", None, "Insufficient analyst coverage"))
+    return checks
+
+def past_performance_checks(m):
+    yoy = to_float(g(m, 'pat_yoy', None)); qoq = to_float(g(m, 'pat_qoq', None))
+    roe = to_float(g(m, 'roe', None)); margin = to_float(g(m, 'net_margin', None))
+    return [
+        ("Positive Earnings Growth (YoY)", None if yoy is None else yoy > 0, f"PAT YoY growth of {g(m,'pat_yoy')}"),
+        ("Accelerating Growth (recent quarter vs YoY)", None if (yoy is None or qoq is None) else qoq > yoy, "Comparing most recent quarter growth to the yearly figure"),
+        ("Strong Return on Equity (>15%)", None if roe is None else roe > 15, f"ROE of {g(m,'roe')}"),
+        ("Healthy Net Margin (>10%)", None if margin is None else margin > 10, f"Net margin of {g(m,'net_margin')}"),
+    ]
+
+def financial_health_checks(m):
+    de = to_float(g(m, 'debt_to_equity', None))
+    cash = m.get('total_cash'); debt = m.get('total_debt')
+    cr = m.get('current_ratio')
+    currency = g(m, 'currency', '')
+    checks = [("Low Leverage (D/E < 1.0)", None if de is None else de < 1.0, f"Debt-to-equity of {de}" if de is not None else "Not available")]
+    if cash is not None and debt is not None:
+        checks.append(("Cash Exceeds Total Debt", cash > debt, f"Cash {currency} {cash:,.0f} vs Debt {currency} {debt:,.0f}"))
+    else:
+        checks.append(("Cash Exceeds Total Debt", None, "Insufficient data"))
+    if cr is not None:
+        checks.append(("Short-Term Liquidity (Current Ratio > 1)", cr > 1, f"Current ratio of {round(cr,2)}"))
+    else:
+        checks.append(("Short-Term Liquidity", None, "Insufficient data"))
+    return checks
+
+def dividend_checks(m):
+    dy = to_float(g(m, 'dividend_yield', None))
+    payout = m.get('payout_ratio')
+    checks = [("Pays a Notable Dividend (>1.5%)", None if dy is None else dy > 1.5, f"Dividend yield of {g(m,'dividend_yield')}")]
+    if payout is not None:
+        checks.append(("Sustainable Payout (<75%)", payout < 0.75, f"Payout ratio of {round(payout*100,1)}%"))
+    else:
+        checks.append(("Sustainable Payout", None, "Insufficient data"))
+    return checks
+
+def score_from_checks(checks):
+    vals = [c[1] for c in checks if c[1] is not None]
+    if not vals: return 0
+    return round(100 * sum(vals) / len(vals))
+
+def render_checks(checks):
+    html = ""
+    for label, status, desc in checks:
+        if status is True: icon, cls = "&#9989;", "swf-check-pass"
+        elif status is False: icon, cls = "&#10060;", "swf-check-fail"
+        else: icon, cls = "&#8213;", "swf-check-na"
+        html += f'<div style="padding:5px 0;"><span class="{cls}">{icon} <b>{label}</b></span><div class="swf-sub">{desc}</div></div>'
+    return html
+
+def card(title, body_html):
+    st.markdown(f'<div class="swf-card"><div class="swf-h">{title}</div>{body_html}</div>', unsafe_allow_html=True)
+
+# ============================================================
+# 6. AI GENERATION & PDF BUILDER
+# ============================================================
+def generate_comprehensive_report(metrics, ticker):
+    client = genai.Client(api_key=GEMINI_KEY)
+
+    system_instruction = """
+    You are an elite institutional equity research director building a comprehensive stock intelligence dossier.
+    
+    MANDATORY PRE-AMBLE VARIABLES (Exact format on first 2 lines):
+    DYNAMIC_SECTOR: [Insert Industry]
+    DYNAMIC_RATING: [Choose strictly ONE: STRONG BUY, BUY, OBSERVE, SELL]
+    
+    Structure your deep-dive analysis using EXACTLY these headers:
+    1. VALUATION & FAIR VALUE
+    2. FUTURE GROWTH & OUTLOOK
+    3. PAST PERFORMANCE & EARNINGS QUALITY
+    4. FINANCIAL HEALTH & BALANCE SHEET
+    5. DIVIDEND & CAPITAL ALLOCATION
+    6. MANAGEMENT & COMPENSATION
+    7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
+    8. SUMMARY VERDICT & KEY RISKS
+
+    STRICT VERDICT RULES FOR SECTION 8:
+    - If the rating is STRONG BUY or BUY, you MUST explicitly include:
+        Recommended Entry Level: [Price or Range]
+        Target Price & Horizon: [Price Target & Duration]
+        Suggested Stop Loss: [Risk boundary level]
+    - If the rating is OBSERVE or SELL, you MUST NOT include Entry Level, Target Price, Horizon, or Stop Loss. Provide rationale only.
+    """
+
+    user_prompt = f"""
+    Target Company: {metrics['name']} ({ticker})
+    Current Price: {metrics['currency']} {metrics['price']}
+    P/E Ratio: {metrics['pe_ratio']} | PEG Ratio: {metrics['peg_ratio']}
+    ROE: {metrics['roe']} | ROA: {metrics['roce_roa']}
+    Dividend Yield: {metrics['dividend_yield']}
+    PAT Growth YoY: {metrics['pat_yoy']} | QoQ: {metrics['pat_qoq']}
+    Debt to Equity: {metrics['debt_to_equity']}
+    Headlines: {metrics['recent_news']}
+    """
+
+    response = client.models.generate_content(
+        model='gemini-3.5-flash-lite',
+        contents=user_prompt,
+        config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
+    )
+    return response.text
+
+def get_image_from_fig(fig):
+    try:
+        img_bytes = fig.to_image(format="png", width=600, height=250)
+        return Image(io.BytesIO(img_bytes), width=450, height=187)
+    except Exception:
+        return Paragraph("<i>[Chart graphic unavailable: 'kaleido' dependency required for PDF chart export]</i>", getSampleStyleSheet()['Normal'])
+
+def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    
+    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor('#2B6CB0'))
+    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
+    
+    clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_")]
+            
+    rating_color = GREEN if "BUY" in rating_val else ORANGE if "OBSERVE" in rating_val else RED
+    
+    story = [
+        Paragraph("ASW Stock Ideas — Research Division", title_style),
+        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Rating: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
+        Spacer(1, 10)
+    ]
+
+    for line in clean_lines:
+        if any(h in line for h in ["1. VALUATION", "2. FUTURE GROWTH", "3. PAST PERFORMANCE", "4. FINANCIAL", "5. DIVIDEND", "6. MANAGEMENT", "7. OWNERSHIP", "8. SUMMARY"]):
+            story.append(Paragraph(line, h1_style))
+            if "1. VALUATION" in line and m.get('fair_value'):
+                story.append(get_image_from_fig(fair_value_bar(m['price'], m['fair_value'], m['currency'])))
+            elif "3. PAST PERFORMANCE" in line:
+                story.append(get_image_from_fig(mom_returns_chart(m)))
+            elif "4. FINANCIAL" in line:
+                tm = balance_sheet_treemap(m)
+                if tm: story.append(get_image_from_fig(tm))
+            elif "7. OWNERSHIP" in line and m.get('shareholding'):
+                story.append(get_image_from_fig(ownership_bar(m['shareholding'])))
+        else:
+            processed_line = line
+            processed_line = re.sub(r'(?i)\bSTRONG BUY\b', f'<font color="{GREEN}"><b>STRONG BUY</b></font>', processed_line)
+            processed_line = re.sub(r'(?i)(?<!STRONG )\bBUY\b', f'<font color="{GREEN}"><b>BUY</b></font>', processed_line)
+            processed_line = re.sub(r'(?i)\bOBSERVE\b', f'<font color="{ORANGE}"><b>OBSERVE</b></font>', processed_line)
+            processed_line = re.sub(r'(?i)\bSELL\b', f'<font color="{RED}"><b>SELL</b></font>', processed_line)
+            story.append(Paragraph(processed_line, body_style))
+            story.append(Spacer(1, 3))
+
+    doc.build(story)
+
 # ============================================================
 # 7. APP STATE
 # ============================================================
@@ -38,7 +530,7 @@ if generate_clicked:
                 st.error(f"Error compiling dossier: {e}")
 
 # ============================================================
-# 9. SIDEBAR NAVIGATION (Moved below data generation)
+# 9. SIDEBAR NAVIGATION
 # ============================================================
 with st.sidebar:
     if st.session_state.report_data:
