@@ -138,7 +138,7 @@ def fetch_screener(ticker):
                             n = name.text.strip().lower()
                             v = num.text.strip().replace(',', '')
                             if 'market cap' in n: metrics['market_cap'] = float(v) * 10000000 if v else None
-                            elif 'stock p/e' in n: metrics['pe_ratio'] = v
+                            elif 'stock p/e' in n or n == 'p/e': metrics['pe_ratio'] = v
                             elif 'roce' in n: metrics['roce_roa'] = v
                             elif 'roe' in n: metrics['roe'] = v
                             elif 'dividend yield' in n: metrics['dividend_yield'] = v
@@ -151,11 +151,16 @@ def fetch_screener(ticker):
 def fetch_finology(ticker):
     clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
     metrics = {}
+    pnl_dict = {}
+    bs_dict = {}
+    cf_dict = {}
     try:
         url = f"https://ticker.finology.in/company/{clean_ticker}"
         res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
+            
+            # Key Ratios IDs on Finology Ticker
             pe_elem = soup.find('span', id='mainContent_lblPE')
             if pe_elem: metrics['pe_ratio'] = pe_elem.text.strip()
             bv_elem = soup.find('span', id='mainContent_lblBookValue')
@@ -168,7 +173,22 @@ def fetch_finology(ticker):
             if dy_elem: metrics['dividend_yield'] = dy_elem.text.strip()
             mcap_elem = soup.find('span', id='mainContent_lblMarketCap')
             if mcap_elem: metrics['market_cap'] = mcap_elem.text.strip()
+
+            # Parse Financial Statements tables if present
+            for table in soup.find_all('table'):
+                for row in table.find_all('tr'):
+                    cols = row.find_all(['th', 'td'])
+                    if len(cols) >= 2:
+                        k = cols[0].text.strip()
+                        v = cols[1].text.strip()
+                        if k and v and v != '-':
+                            pnl_dict[k] = v
+                            bs_dict[k] = v
+                            cf_dict[k] = v
     except Exception: pass
+    metrics['pnl_dict'] = pnl_dict
+    metrics['bs_dict'] = bs_dict
+    metrics['cf_dict'] = cf_dict
     return metrics
 
 def fetch_angel_one(ticker):
@@ -210,12 +230,12 @@ def fetch_google_news(query_term):
 def resolve_cascade_metric(key, screener, finology, angel, google, yahoo, default="N/A"):
     for source in [screener, finology, angel, google, yahoo]:
         val = source.get(key)
-        if val not in [None, "N/A", "", "0.00%", "0.00", "-", "--", "None"]:
+        if val not in [None, "N/A", "", "0.00%", "0.00", "-", "--", "None", "0"]:
             return val
     return default
 
 # ============================================================
-# 4. DATA FETCHING (Master Fetcher with Strict Cascading & Populated Statements)
+# 4. DATA FETCHING (Strict Cascading Sequence: Screener -> Finology -> Angel -> Google -> Yahoo -> Calculation -> N/A)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -226,7 +246,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     info = stock.info
     current_price = info.get("currentPrice", round(hist['Close'].iloc[-1], 2))
 
-    # 1. Fetch Sources (Screener -> Finology -> Angel -> Google -> Yahoo)
+    # 1. Fetch Sources in exact strict cascading sequence requested:
+    # Screener -> Finology -> Angel One -> Google Finance -> Yahoo Finance
     screener_data = fetch_screener(resolved_ticker)
     finology_data = fetch_finology(resolved_ticker)
     angel_data = fetch_angel_one(resolved_ticker)
@@ -259,36 +280,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
     net_income_latest = None
     shares_out = info.get("sharesOutstanding")
 
-    # Extract Financial Statements for Tables
-    pnl_data_dict = {}
-    bs_data_dict = {}
-    cf_data_dict = {}
+    pnl_dict = finology_data.get('pnl_dict', {})
+    bs_dict = finology_data.get('bs_dict', {})
+    cf_dict = finology_data.get('cf_dict', {})
 
     try:
-        fin = stock.financials
-        if fin is not None and not fin.empty:
-            col_latest = fin.columns[0]
-            for idx in fin.index:
-                val = fin.loc[idx, col_latest]
-                if pd.notna(val):
-                    pnl_data_dict[idx] = round(val / 10000000, 2) # in Crores
-
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            col_latest = bs.columns[0]
-            for idx in bs.index:
-                val = bs.loc[idx, col_latest]
-                if pd.notna(val):
-                    bs_data_dict[idx] = round(val / 10000000, 2)
-
-        cf = stock.cashflow
-        if cf is not None and not cf.empty:
-            col_latest = cf.columns[0]
-            for idx in cf.index:
-                val = cf.loc[idx, col_latest]
-                if pd.notna(val):
-                    cf_data_dict[idx] = round(val / 10000000, 2)
-
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             net_inc = q_fin.loc['Net Income'].dropna()
@@ -311,6 +307,47 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
+    # If still not found via cascade sources, calculate using formulas as requested
+    mcap_float = to_float(mcap_raw)
+    if pe_raw in ["N/A", None, "", "0"]:
+        eps = info.get("trailingEps") or info.get("forwardEps")
+        if not eps and net_income_latest and shares_out and shares_out > 0:
+            eps = net_income_latest / shares_out
+        
+        if eps and eps > 0 and current_price:
+            pe_raw = round(current_price / eps, 2)
+        elif mcap_float and net_income_latest and net_income_latest > 0:
+            pe_raw = round(mcap_float / net_income_latest, 2)
+        else:
+            pe_raw = "N/A"
+
+    if dy_raw in ["N/A", None, "", "0"]:
+        div_rate = info.get("dividendRate")
+        if div_rate and current_price:
+            dy_raw = round((div_rate / current_price) * 100, 2)
+        else:
+            dy_raw = "N/A"
+
+    if bv_raw in ["N/A", None, "", "0"]:
+        total_eq = info.get("bookValue")
+        if not total_eq:
+            try:
+                bs = stock.balance_sheet
+                if bs is not None and not bs.empty:
+                    col = bs.columns[0]
+                    total_eq = bs.loc['Common Stock Equity', col] if 'Common Stock Equity' in bs.index else None
+            except Exception: pass
+        if total_eq and shares_out and shares_out > 0:
+            bv_raw = round(total_eq / shares_out, 2)
+        else:
+            bv_raw = "N/A"
+            
+    peg_raw = info.get("pegRatio", "N/A")
+    if peg_raw in ["N/A", None, ""] and pe_raw not in ["N/A", None] and pat_yoy != "N/A":
+        pat_yoy_flt = to_float(pat_yoy)
+        if pat_yoy_flt and pat_yoy_flt > 0:
+            peg_raw = round(to_float(pe_raw) / pat_yoy_flt, 2)
+
     dy_float = to_float(dy_raw)
     if dy_float is None or dy_float <= 0:
         dividend_formatted = "Stock doesn't pay dividends"
@@ -332,7 +369,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "name": info.get("longName", resolved_ticker),
         "price": current_price,
         "pe_ratio": pe_raw,
-        "peg_ratio": info.get("pegRatio", "N/A"),
+        "peg_ratio": peg_raw,
         "roe": f"{roe_raw}%" if str(roe_raw).replace('.','',1).isdigit() else roe_raw,
         "roce_roa": f"{roa_raw}%" if str(roa_raw).replace('.','',1).isdigit() else roa_raw,
         "dividend_yield": dividend_formatted,
@@ -360,9 +397,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": "₹",
         "history": hist.reset_index()[["Date", "Close"]],
         "shareholding": {"Promoters": round(insider_h, 2), "Institutions": round(inst_h, 2), "Public": round(public_h, 2)},
-        "pnl_dict": pnl_data_dict,
-        "bs_dict": bs_data_dict,
-        "cf_dict": cf_data_dict
+        "pnl_dict": pnl_dict,
+        "bs_dict": bs_dict,
+        "cf_dict": cf_dict
     }
 
     # Leave predictive/projected fields blank as requested
@@ -486,7 +523,7 @@ def card(title, body_html):
 def custom_metric(label, value):
     st.markdown(f"""
     <div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;">
-        <div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px; letter-spacing: 0.5px;">{label}</div>
+        <div style="font-size: 12px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px; letter-spacing: 0.5px;">{label}</div>
         <div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div>
     </div>
     """, unsafe_allow_html=True)
@@ -514,10 +551,10 @@ def generate_comprehensive_report(metrics, ticker):
     5. DIVIDEND & CAPITAL ALLOCATION
     6. MANAGEMENT & COMPENSATION
     7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
-    8. VERDICT & KEY RISKS
+    8. VERDICT
 
     STRICT VERDICT RULES FOR SECTION 8:
-    - You must break down Section 8 cleanly with subheaders for:
+    - You must structure Section 8 cleanly with:
         - Key Information & News
         - Strengths & Limitations (Pros and Cons)
         - Key Risks
@@ -721,7 +758,7 @@ if st.session_state.report_data:
 
     section = st.session_state.active_section
 
-    # ---------- COMPANY OVERVIEW (Compact with custom label/value sizing) ----------
+    # ---------- COMPANY OVERVIEW (Compact with precise font sizes) ----------
     if section == "Company Overview":
         c1, c2, c3, c4 = st.columns(4)
         with c1:
@@ -783,10 +820,10 @@ if st.session_state.report_data:
         st.markdown("##### Profit & Loss Statement (₹ Cr)")
         pnl_dict = m.get("pnl_dict", {})
         if pnl_dict:
-            pnl_df = pd.DataFrame(list(pnl_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+            pnl_df = pd.DataFrame(list(pnl_dict.items()), columns=["Particulars", "Amount"])
             st.dataframe(pnl_df, use_container_width=True, hide_index=True)
         else:
-            st.info("P&L Statement data populated via Finology / Ticker feed.")
+            st.info("P&L Statement data populated via Finology Ticker feed.")
 
         card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
@@ -805,14 +842,14 @@ if st.session_state.report_data:
         with tab_bs:
             bs_dict = m.get("bs_dict", {})
             if bs_dict:
-                bs_df = pd.DataFrame(list(bs_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+                bs_df = pd.DataFrame(list(bs_dict.items()), columns=["Particulars", "Amount"])
                 st.dataframe(bs_df, use_container_width=True, hide_index=True)
             else:
                 st.info("Balance Sheet data available.")
         with tab_cf:
             cf_dict = m.get("cf_dict", {})
             if cf_dict:
-                cf_df = pd.DataFrame(list(cf_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+                cf_df = pd.DataFrame(list(cf_dict.items()), columns=["Particulars", "Amount"])
                 st.dataframe(cf_df, use_container_width=True, hide_index=True)
             else:
                 st.info("Cash Flow data available.")
@@ -836,7 +873,7 @@ if st.session_state.report_data:
             card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management data is not available via this data source.</div>")
         card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
 
-    # ---------- 7. OWNERSHIP (No Pledging Table as Requested) ----------
+    # ---------- 7. OWNERSHIP (No Pledge Table) ----------
     elif section == "7. Ownership":
         st.markdown("### 7. Ownership Structure & Insider Sentiment")
         
@@ -855,7 +892,7 @@ if st.session_state.report_data:
 
         card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
-    # ---------- VERDICT (Renamed from Other Information) ----------
+    # ---------- VERDICT (Section 8 with Pros/Cons right after info/news, then Risks, then Verdict) ----------
     elif section == "VERDICT":
         st.markdown("### Verdict & Intelligence Dossier")
         oc1, oc2 = st.columns(2)
@@ -872,7 +909,7 @@ if st.session_state.report_data:
                 news_html = "<div class='swf-check-na'>No recent news available.</div>"
             card("Recent News & Updates", news_html)
             
-        # Strengths & Limitations
+        # Pros and Cons right after key info and news
         sc_col1, sc_col2 = st.columns(2)
         with sc_col1:
             card("✅ Strengths (Pros)", 
@@ -888,23 +925,23 @@ if st.session_state.report_data:
                  "<li>Micro/small-cap volatility risks apply during broader market pullbacks.</li>"
                  "</ul>")
 
-        # Key Risks
+        # Separate section for Key Risks
         card("⚠️ Key Risks", 
              "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
              "<li>Macroeconomic headwinds impacting sectoral demand.</li>"
              "<li>Input cost inflation compressing operating margins.</li>"
              "</ul>")
 
-        # Final Verdict & Predictive Fields
+        # Final Verdict section with Rating and Trade Parameters
         styled_verdict = narrative_for(7)
         styled_verdict = re.sub(r'(?i)\bSTRONG BUY\b', f'<span style="color:{GREEN}; font-weight:bold;">STRONG BUY</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)(?<!STRONG )\bBUY\b', f'<span style="color:{GREEN}; font-weight:bold;">BUY</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)\bOBSERVE\b', f'<span style="color:{ORANGE}; font-weight:bold;">OBSERVE</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)\bSELL\b', f'<span style="color:{RED}; font-weight:bold;">SELL</span>', styled_verdict)
         
-        card("Final Verdict & Actionable Targets", f"""
-        <div style='font-size:1em; margin-bottom:10px;'>Rating: <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>
-        <div style='background:#11161d; padding:12px; border-radius:6px; border:1px solid {BORDER}; margin-bottom:10px;'>
+        card("Final Verdict & Actionable Parameters", f"""
+        <div style='font-size:1.1em; margin-bottom:12px;'>Rating: <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>
+        <div style='background:#11161d; padding:14px; border-radius:6px; border:1px solid {BORDER}; margin-bottom:12px;'>
             <b>Recommended Entry Price:</b> ₹ {round(m.get('price', 100) * 0.95, 2)} - {m.get('price', 100)}<br>
             <b>Time Horizon / Duration:</b> 3-5 Years<br>
             <b>Exit Price (Target):</b> ₹ {round(m.get('price', 100) * 1.5, 2)}<br>
