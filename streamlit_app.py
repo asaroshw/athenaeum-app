@@ -80,7 +80,6 @@ def to_float(val):
     except Exception: return None
 
 def is_valid_metric(val):
-    """Validation Gate: Only accepts values that can be mathematically parsed."""
     if val in [None, "N/A", "", "-", "--", "None", "0", "0.00%", "0.00"]: return False
     if isinstance(val, (int, float)): return True
     try:
@@ -101,6 +100,16 @@ def fmt_indian_currency(val, currency="₹"):
     except Exception:
         return f"{currency} {val}"
 
+def calculate_rsi(df, window=14):
+    if len(df) < window: return "N/A"
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    loss = loss.replace(0, 1e-10)
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi.iloc[-1], 2)
+
 def resolve_name_to_ticker(stock_input):
     stock_str = str(stock_input).strip()
     if stock_str.isdigit(): return stock_str + '.BO'
@@ -116,7 +125,108 @@ def resolve_name_to_ticker(stock_input):
     return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
 
 # ============================================================
-# 3. STRICT CASCADE SCRAPERS 
+# 3. QUANTITATIVE PREDICTIVE PIPELINE (DCF, ATR, Trend)
+# ============================================================
+def calculate_vwap_support(df):
+    df = df.dropna(subset=['Close', 'Volume'])
+    if df.empty: return None
+    df['PriceBin'] = pd.cut(df['Close'], bins=20)
+    vol_by_bin = df.groupby('PriceBin')['Volume'].sum()
+    best_bin = vol_by_bin.idxmax()
+    return best_bin.mid
+
+def calculate_atr(df, period=14):
+    if len(df) < period: return None
+    high_low = df['High'] - df['Low']
+    high_close = np.abs(df['High'] - df['Close'].shift())
+    low_close = np.abs(df['Low'] - df['Close'].shift())
+    ranges = pd.concat([high_low, high_close, low_close], axis=1)
+    true_range = np.max(ranges, axis=1)
+    atr = true_range.rolling(period).mean()
+    return atr.iloc[-1]
+
+def run_predictive_pipeline(info, hist, fcf_history):
+    current_price = info.get('currentPrice', hist['Close'].iloc[-1])
+    
+    # --- DCF Fair Value ---
+    beta = info.get('beta', 1.0)
+    if beta is None or pd.isna(beta): beta = 1.0
+    ke = 0.07 + beta * 0.07 
+    
+    if fcf_history is not None and not fcf_history.empty and len(fcf_history) > 0:
+        avg_fcf = fcf_history.mean()
+    else:
+        avg_fcf = info.get('netIncomeToCommon', 0)
+        
+    shares = info.get('sharesOutstanding', 1)
+    if shares == 0 or shares is None: shares = 1
+    
+    fcf_per_share = avg_fcf / shares if avg_fcf else 0
+    intrinsic_value = current_price 
+    
+    if fcf_per_share > 0:
+        g = 0.05 
+        tg = 0.03 
+        pv_fcf = sum([fcf_per_share * (1+g)**t / (1+ke)**t for t in range(1, 6)])
+        tv = (fcf_per_share * (1+g)**5 * (1+tg)) / (ke - tg)
+        pv_tv = tv / (1+ke)**5
+        intrinsic_value = pv_fcf + pv_tv
+    
+    target_price = round(intrinsic_value, 2)
+    
+    margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
+    if margin_of_safety > 0.15: dcf_verdict = "BUY"
+    elif margin_of_safety < -0.10: dcf_verdict = "DON'T BUY"
+    else: dcf_verdict = "OBSERVE"
+
+    # --- ATR Risk Model ---
+    atr = calculate_atr(hist)
+    support = calculate_vwap_support(hist)
+    if support is None or pd.isna(support): support = current_price * 0.9
+    
+    stop_loss = round(support - (1.5 * atr if pd.notna(atr) and atr else current_price * 0.05), 2)
+    entry_low = round(support, 2)
+    entry_high = round(support + (0.5 * atr if pd.notna(atr) and atr else current_price * 0.02), 2)
+    
+    if entry_low > current_price: 
+        entry_low = round(current_price * 0.95, 2)
+        entry_high = round(current_price, 2)
+
+    # --- Momentum & Horizon ---
+    momentum = "NEUTRAL"
+    time_horizon = "3-5 Years"
+    
+    if len(hist) > 30:
+        x = np.arange(len(hist))
+        y = hist['Close'].values
+        slope, _ = np.polyfit(x, y, 1)
+        
+        if slope > 0.1: momentum = "UP"
+        elif slope < -0.1: momentum = "DOWN"
+        
+        if HAS_ARIMA and len(hist) > 100:
+            try:
+                model = ARIMA(hist['Close'].values, order=(5,1,0))
+                fitted = model.fit()
+                forecast = fitted.forecast(steps=30)
+                momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
+                time_horizon = "12-18 Months (Accelerated)" if momentum == "UP" else "3-5 Years"
+            except: pass
+            
+    final_verdict = dcf_verdict
+    if dcf_verdict == "BUY" and momentum == "DOWN":
+        final_verdict = "OBSERVE" # Value trap override
+        
+    return {
+        "verdict": final_verdict,
+        "target_price": target_price,
+        "entry_range": f"₹ {entry_low} - {entry_high}",
+        "stop_loss": stop_loss,
+        "time_horizon": time_horizon
+    }
+
+# ============================================================
+# 4. STRICT CASCADE SCRAPERS 
 # ============================================================
 def fetch_screener(ticker):
     clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
@@ -143,7 +253,7 @@ def fetch_screener(ticker):
                             elif 'dividend yield' in n: metrics['dividend_yield'] = v
                             elif 'book value' in n: metrics['book_value'] = v
                             elif 'face value' in n: metrics['face_value'] = v
-                    if metrics: break # CLAUDE FIX: Only break if data was actually found
+                    if metrics: break 
         except Exception: continue
     return metrics
 
@@ -156,7 +266,6 @@ def fetch_finology(ticker):
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
-            # CLAUDE FIX: Strict ID parsing only. No broad "P/E" text scanning.
             id_map = {
                 'pe_ratio': ['mainContent_lblPE', 'lblPE'],
                 'book_value': ['mainContent_lblBookValue', 'lblBookValue'],
@@ -173,9 +282,6 @@ def fetch_finology(ticker):
                         break
     except Exception: pass
     return metrics
-
-def fetch_angel_one(ticker):
-    return {} # No-op per Claude's feedback (Angel One SmartAPI is for execution, not fundamentals)
 
 def fetch_google_finance(ticker):
     clean_ticker = ticker.replace('.NS', ':NSE').replace('.BO', ':BOM')
@@ -194,117 +300,29 @@ def fetch_google_finance(ticker):
     except Exception: pass
     return metrics
 
-def resolve_cascade_metric(key, screener, finology, angel, google, yahoo, default="N/A"):
-    # CLAUDE FIX: Added validation gate. Garbage falls through to next source.
-    for source in [screener, finology, angel, google, yahoo]:
+def fetch_google_news(query_term):
+    try:
+        safe_query = urllib.parse.quote(query_term)
+        url = f"https://news.google.com/rss/search?q={safe_query}&hl=en-IN&gl=IN&ceid=IN:en"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')
+            headlines = []
+            for item in items[:4]:
+                title = item.find('title')
+                link = item.find('link')
+                if title is not None and link is not None:
+                    headlines.append({'title': title.text, 'link': link.text})
+            return headlines
+    except Exception: pass
+    return []
+
+def resolve_cascade_metric(key, screener, finology, google, yahoo, default="N/A"):
+    for source in [screener, finology, google, yahoo]:
         val = source.get(key)
-        if is_valid_metric(val):
-            return val
+        if is_valid_metric(val): return val
     return default
-
-# ============================================================
-# 4. PREDICTIVE PIPELINE (DCF, ATR, ARIMA)
-# ============================================================
-def calculate_vwap_support(df):
-    df = df.dropna(subset=['Close', 'Volume'])
-    if df.empty: return None
-    df['PriceBin'] = pd.cut(df['Close'], bins=20)
-    vol_by_bin = df.groupby('PriceBin')['Volume'].sum()
-    best_bin = vol_by_bin.idxmax()
-    return best_bin.mid
-
-def calculate_atr(df, period=14):
-    if len(df) < period: return None
-    high_low = df['High'] - df['Low']
-    high_close = np.abs(df['High'] - df['Close'].shift())
-    low_close = np.abs(df['Low'] - df['Close'].shift())
-    ranges = pd.concat([high_low, high_close, low_close], axis=1)
-    true_range = np.max(ranges, axis=1)
-    atr = true_range.rolling(period).mean()
-    return atr.iloc[-1]
-
-def run_predictive_pipeline(info, hist, fcf_history):
-    current_price = info.get('currentPrice', hist['Close'].iloc[-1])
-    
-    # --- 1. DCF Model ---
-    beta = info.get('beta', 1.0)
-    if beta is None or pd.isna(beta): beta = 1.0
-    rfr = 0.07 # 7% India 10Y Risk Free Rate
-    erp = 0.07 # 7% Equity Risk Premium
-    ke = rfr + beta * erp
-    
-    if fcf_history is not None and not fcf_history.empty and len(fcf_history) > 0:
-        avg_fcf = fcf_history.mean()
-    else:
-        avg_fcf = info.get('netIncomeToCommon', 0)
-        
-    shares = info.get('sharesOutstanding', 1)
-    if shares == 0 or shares is None: shares = 1
-    
-    fcf_per_share = avg_fcf / shares if avg_fcf else 0
-    intrinsic_value = current_price 
-    
-    if fcf_per_share > 0:
-        g = 0.05 # 5% medium-term growth
-        tg = 0.03 # 3% terminal growth
-        pv_fcf = sum([fcf_per_share * (1+g)**t / (1+ke)**t for t in range(1, 6)])
-        tv = (fcf_per_share * (1+g)**5 * (1+tg)) / (ke - tg)
-        pv_tv = tv / (1+ke)**5
-        intrinsic_value = pv_fcf + pv_tv
-    
-    target_price = round(intrinsic_value, 2)
-    
-    margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
-    if margin_of_safety > 0.15: dcf_verdict = "BUY"
-    elif margin_of_safety < -0.10: dcf_verdict = "DON'T BUY"
-    else: dcf_verdict = "OBSERVE"
-
-    # --- 2. ATR Risk Model ---
-    atr = calculate_atr(hist)
-    support = calculate_vwap_support(hist)
-    if support is None or pd.isna(support): support = current_price * 0.9
-    
-    stop_loss = round(support - (1.5 * atr if pd.notna(atr) and atr else current_price * 0.05), 2)
-    entry_low = round(support, 2)
-    entry_high = round(support + (0.5 * atr if pd.notna(atr) and atr else current_price * 0.02), 2)
-    
-    if entry_low > current_price: 
-        entry_low = round(current_price * 0.95, 2)
-        entry_high = round(current_price, 2)
-
-    # --- 3. Momentum & Time Horizon (ARIMA/Trend) ---
-    momentum = "NEUTRAL"
-    time_horizon = "3-5 Years"
-    
-    if len(hist) > 30:
-        x = np.arange(len(hist))
-        y = hist['Close'].values
-        slope, _ = np.polyfit(x, y, 1)
-        
-        if slope > 0.1: momentum = "UP"
-        elif slope < -0.1: momentum = "DOWN"
-        
-        if HAS_ARIMA and len(hist) > 100:
-            try:
-                model = ARIMA(hist['Close'].values, order=(5,1,0))
-                fitted = model.fit()
-                forecast = fitted.forecast(steps=30)
-                momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
-                time_horizon = "12-18 Months (Momentum Accelerated)" if momentum == "UP" else "3-5 Years"
-            except: pass
-            
-    # Verdict Override
-    final_verdict = dcf_verdict
-    if dcf_verdict == "BUY" and momentum == "DOWN":
-        final_verdict = "OBSERVE" # Value trap override
-        
-    return {
-        "verdict": final_verdict,
-        "target_price": target_price,
-        "entry_range": f"₹ {entry_low} - {entry_high}",
-        "stop_loss": stop_loss,
-        "time_horizon": time_horizon
-    }
 
 # ============================================================
 # 5. DATA FETCHING (Master Fetcher)
@@ -320,7 +338,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     screener_data = fetch_screener(resolved_ticker)
     finology_data = fetch_finology(resolved_ticker)
-    angel_data = fetch_angel_one(resolved_ticker)
     google_data = fetch_google_finance(resolved_ticker)
     yahoo_data = {
         "pe_ratio": info.get("trailingPE"),
@@ -332,13 +349,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "face_value": info.get("faceValue")
     }
 
-    pe_raw = resolve_cascade_metric('pe_ratio', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    dy_raw = resolve_cascade_metric('dividend_yield', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    roe_raw = resolve_cascade_metric('roe', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    roa_raw = resolve_cascade_metric('roce_roa', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    mcap_raw = resolve_cascade_metric('market_cap', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    bv_raw = resolve_cascade_metric('book_value', screener_data, finology_data, angel_data, google_data, yahoo_data)
-    fv_raw = resolve_cascade_metric('face_value', screener_data, finology_data, angel_data, google_data, yahoo_data)
+    pe_raw = resolve_cascade_metric('pe_ratio', screener_data, finology_data, google_data, yahoo_data)
+    dy_raw = resolve_cascade_metric('dividend_yield', screener_data, finology_data, google_data, yahoo_data)
+    roe_raw = resolve_cascade_metric('roe', screener_data, finology_data, google_data, yahoo_data)
+    roa_raw = resolve_cascade_metric('roce_roa', screener_data, finology_data, google_data, yahoo_data)
+    mcap_raw = resolve_cascade_metric('market_cap', screener_data, finology_data, google_data, yahoo_data)
+    bv_raw = resolve_cascade_metric('book_value', screener_data, finology_data, google_data, yahoo_data)
+    fv_raw = resolve_cascade_metric('face_value', screener_data, finology_data, google_data, yahoo_data)
 
     if is_valid_metric(dy_raw) and isinstance(dy_raw, float): dy_raw = round(dy_raw * 100, 2)
     if is_valid_metric(roe_raw) and isinstance(roe_raw, float): roe_raw = round(roe_raw * 100, 2)
@@ -348,12 +365,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
     net_margin_calculated = None
     net_income_latest = None
     shares_out = info.get("sharesOutstanding")
+    fcf_history = None
 
     pnl_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
     bs_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
     cf_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
-    
-    fcf_history = None
 
     try:
         fin = stock.financials
@@ -414,12 +430,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         eps = info.get("trailingEps") or info.get("forwardEps")
         if not eps and net_income_latest and shares_out and shares_out > 0:
             eps = net_income_latest / shares_out
-        if eps and eps > 0 and current_price:
-            pe_raw = round(current_price / eps, 2)
-        elif mcap_float and net_income_latest and net_income_latest > 0:
-            pe_raw = round(mcap_float / net_income_latest, 2)
-        else:
-            pe_raw = "N/A"
+        if eps and eps > 0 and current_price: pe_raw = round(current_price / eps, 2)
+        elif mcap_float and net_income_latest and net_income_latest > 0: pe_raw = round(mcap_float / net_income_latest, 2)
+        else: pe_raw = "N/A"
 
     if not is_valid_metric(dy_raw):
         div_rate = info.get("dividendRate")
@@ -451,6 +464,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if resolved_ticker.endswith('.NS'): exchange_str = "NSE & BSE"
     elif resolved_ticker.endswith('.BO'): exchange_str = "BSE"
     else: exchange_str = info.get("exchange", "N/A")
+
+    comp_name = info.get("longName") or resolved_ticker.replace('.NS','').replace('.BO','')
+    recent_news = fetch_google_news(f"{comp_name} stock news")
 
     insider_h = (info.get("heldPercentInsiders") or 0) * 100
     inst_h = (info.get("heldPercentInstitutions") or 0) * 100
@@ -484,6 +500,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "total_cash": info.get("totalCash"),
         "total_debt": info.get("totalDebt"),
         "company_officers": info.get("companyOfficers", []),
+        "recent_news": recent_news,
         "working_ticker": resolved_ticker,
         "exchange": exchange_str,
         "currency": "₹",
@@ -495,7 +512,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "predictive": predictive_data
     }
     
-    # Used for charts
     metrics['fair_value'] = predictive_data['target_price']
     return metrics
 
@@ -516,11 +532,41 @@ def price_history_chart(hist_df, currency):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=20, l=10, r=10), xaxis=dict(showgrid=False, title=None), yaxis=dict(showgrid=False, title=currency))
     return fig
 
+def fair_value_bar(price, fv, currency):
+    fig = go.Figure()
+    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
+    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
+    diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=170, margin=dict(t=10, b=10, l=10, r=10), showlegend=False, xaxis=dict(showgrid=False, title=currency))
+    return fig, diff_pct
+
 def ownership_donut(shareholding):
     labels = list(shareholding.keys())
     values = list(shareholding.values())
     fig = go.Figure(data=[go.Pie(labels=labels, values=values, hole=.5, marker_colors=[BLUE, '#a855f7', GOLD])])
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=240, margin=dict(t=10, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.1))
+    return fig
+
+def balance_sheet_donuts(m):
+    assets_labels, assets_vals = [], []
+    if m.get('cash_bs'): assets_labels.append('Cash'); assets_vals.append(m['cash_bs'])
+    if m.get('receivables'): assets_labels.append('Receivables'); assets_vals.append(m['receivables'])
+    if m.get('inventory'): assets_labels.append('Inventory'); assets_vals.append(m['inventory'])
+    if m.get('total_assets') and assets_vals:
+        other = m['total_assets'] - sum(assets_vals)
+        if other > 0: assets_labels.append('Other Assets'); assets_vals.append(other)
+
+    liab_labels, liab_vals = [], []
+    if m.get('current_liab'): liab_labels.append('Current Liab'); liab_vals.append(m['current_liab'])
+    if m.get('total_debt_bs'): liab_labels.append('Debt'); liab_vals.append(m['total_debt_bs'])
+    if m.get('total_equity'): liab_labels.append('Equity'); liab_vals.append(m['total_equity'])
+
+    if not assets_vals or not liab_vals: return None
+
+    fig = make_subplots(rows=1, cols=2, specs=[[{'type': 'domain'}, {'type': 'domain'}]], subplot_titles=("Assets Breakdown", "Liabilities & Equity"))
+    fig.add_trace(go.Pie(labels=assets_labels, values=assets_vals, hole=.5, marker_colors=['#22c55e', '#4ade80', '#86efac', '#bbf7d0']), row=1, col=1)
+    fig.add_trace(go.Pie(labels=liab_labels, values=liab_vals, hole=.5, marker_colors=['#f87171', '#ef4444', '#22c55e']), row=1, col=2)
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=250, margin=dict(t=30, b=10, l=10, r=10), font_color="#E6E6E6")
     return fig
 
 def valuation_checks(m):
@@ -620,6 +666,27 @@ def generate_comprehensive_report(metrics, ticker):
     )
     return response.text
 
+def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor('#2B6CB0'))
+    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
+    
+    clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_")]
+    rating_color = GREEN if "BUY" in rating_val else ORANGE if "OBSERVE" in rating_val else RED
+    
+    story = [
+        Paragraph("Financial Intelligence App — Research Division", title_style),
+        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Verdict: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
+        Spacer(1, 10)
+    ]
+
+    for line in clean_lines:
+        story.append(Paragraph(line, body_style))
+        story.append(Spacer(1, 3))
+
+    doc.build(story)
+
 # ============================================================
 # 8. APP STATE & NAVIGATION
 # ============================================================
@@ -642,7 +709,8 @@ col_input, col_btn = st.columns([4, 1])
 with col_input:
     stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn:
-    generate_clicked = st.button("Generate Terminal Dossier", type="primary", use_container_width=True)
+    # Action button changed to "Analyse" per user request
+    generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
 if generate_clicked:
     if not stock_input.strip():
@@ -800,6 +868,13 @@ if st.session_state.report_data:
     elif section == "1. Valuation":
         st.markdown(f"### 1. Valuation — Score {score_from_checks(val_checks)}/100")
         card("Valuation Checklist", render_checks(val_checks))
+        
+        if m.get('fair_value'):
+            fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], m.get('currency','₹'))
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            status_word = "overvalued" if diff_pct and diff_pct > 0 else "undervalued"
+            st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the projected fair value estimate.")
+            
         card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     # ---------- 2. FUTURE GROWTH ----------
@@ -838,6 +913,11 @@ if st.session_state.report_data:
     elif section == "4. Financial Health":
         st.markdown(f"### 4. Financial Health — Score {score_from_checks(health_checks)}/100")
         card("Financial Health Checklist", render_checks(health_checks))
+        bs_donuts = balance_sheet_donuts(m)
+        if bs_donuts:
+            st.plotly_chart(bs_donuts, use_container_width=True, config={'displayModeBar': False})
+        else:
+            st.caption("Balance sheet breakdown unavailable for this ticker.")
         
         st.markdown("##### Balance Sheet & Cash Flows (₹ Cr)")
         tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
@@ -862,7 +942,7 @@ if st.session_state.report_data:
         card("Dividend Checklist", render_checks(div_checks))
         card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
 
-    # ---------- 6. MANAGEMENT (Restored Full Table) ----------
+    # ---------- 6. MANAGEMENT ----------
     elif section == "6. Management":
         st.markdown("### 6. Management & Leadership")
         officers = m.get('company_officers', [])
@@ -900,7 +980,7 @@ if st.session_state.report_data:
 
         card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
-    # ---------- VERDICT (Cleaned to exactly match request) ----------
+    # ---------- VERDICT ----------
     elif section == "Verdict":
         st.markdown("### Verdict")
         
@@ -927,3 +1007,18 @@ if st.session_state.report_data:
         styled_verdict = re.sub(r'(?i)\bDON\'T BUY\b', f'<span style="color:{RED}; font-weight:bold;">DON\'T BUY</span>', styled_verdict)
         
         st.markdown(f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled_verdict}</p>", unsafe_allow_html=True)
+
+    st.markdown("---")
+
+    # ---------- PDF EXPORT ----------
+    pdf_buffer = io.BytesIO()
+    build_pdf_report(pdf_buffer, m, data['ai_text'], ticker, current_rating)
+    pdf_buffer.seek(0)
+
+    st.download_button(
+        label="📥 Download Official PDF Dossier",
+        data=pdf_buffer,
+        file_name=f"{ticker}_Terminal_Dossier.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
