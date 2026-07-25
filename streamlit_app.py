@@ -80,9 +80,9 @@ def fmt_indian_currency(val, currency="INR"):
     try:
         num = float(str(val).replace(',', '').replace('₹', '').replace('%', '').strip())
         sym = "₹" if currency == "INR" else f"{currency} "
-        if abs(num) >= 10000000: # 1 Crore = 10,000,000
+        if abs(num) >= 10000000:
             return f"{sym}{num/10000000:,.2f} Cr"
-        elif abs(num) >= 100000: # 1 Lakh = 100,000
+        elif abs(num) >= 100000:
             return f"{sym}{num/100000:,.2f} Lakh"
         else:
             return f"{sym}{num:,.2f}"
@@ -114,7 +114,7 @@ def resolve_name_to_ticker(stock_input):
     return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
 
 # ============================================================
-# 3. CASCADE SCRAPERS (Screener -> Angel -> Google -> Yahoo)
+# 3. STRICT CASCADE SCRAPERS (Screener -> Angel -> Google -> Yahoo)
 # ============================================================
 def fetch_screener(ticker):
     clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
@@ -137,7 +137,7 @@ def fetch_screener(ticker):
                         if name and num:
                             n = name.text.strip().lower()
                             v = num.text.strip().replace(',', '')
-                            if 'market cap' in n: metrics['market_cap'] = float(v) * 10000000 if v else None # Screener gives Crores
+                            if 'market cap' in n: metrics['market_cap'] = float(v) * 10000000 if v else None
                             elif 'stock p/e' in n: metrics['pe_ratio'] = v
                             elif 'roce' in n: metrics['roce_roa'] = v
                             elif 'roe' in n: metrics['roe'] = v
@@ -190,7 +190,7 @@ def resolve_cascade_metric(key, screener, angel, google, yahoo, default="N/A"):
     return default
 
 # ============================================================
-# 4. DATA FETCHING (Master Fetcher)
+# 4. DATA FETCHING (Master Fetcher with Short-Circuiting Cascade)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -233,14 +233,12 @@ def fetch_stock_data(resolved_ticker, raw_input):
             if len(net_inc) >= 2 and net_inc.iloc[1] != 0: pat_qoq = round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)
             if len(net_inc) >= 5 and net_inc.iloc[4] != 0: pat_yoy = round(((net_inc.iloc[0] - net_inc.iloc[4]) / abs(net_inc.iloc[4])) * 100, 2)
             
-            # Net margin fallback calculation
             if 'Total Revenue' in q_fin.index and len(net_inc) > 0:
                 tot_rev = q_fin.loc['Total Revenue'].dropna()
                 if len(tot_rev) > 0 and tot_rev.iloc[0] != 0:
                     net_margin_calculated = round((net_inc.iloc[0] / tot_rev.iloc[0]) * 100, 2)
     except Exception: pass
 
-    # Net Margin Final
     net_margin_val = info.get("profitMargins")
     if net_margin_val not in [None, "N/A", "None"]:
         net_margin_final = f"{round(net_margin_val * 100, 2)}%"
@@ -249,7 +247,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
-    # Math Fallbacks
     if pe_raw in ["N/A", None, ""]:
         eps = info.get("trailingEps") or info.get("forwardEps")
         if eps and eps > 0 and current_price:
@@ -266,12 +263,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
         if pat_yoy_flt and pat_yoy_flt > 0:
             peg_raw = round(to_float(pe_raw) / pat_yoy_flt, 2)
 
-    # Exchange Logic
     if resolved_ticker.endswith('.NS'): exchange_str = "NSE & BSE"
     elif resolved_ticker.endswith('.BO'): exchange_str = "BSE"
     else: exchange_str = info.get("exchange", "N/A")
 
-    # Smart News Search
     comp_name = info.get("longName") or resolved_ticker.replace('.NS','').replace('.BO','')
     recent_news = fetch_google_news(f"{comp_name} stock news")
 
@@ -286,7 +281,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "peg_ratio": peg_raw,
         "roe": f"{roe_raw}%" if str(roe_raw).replace('.','',1).isdigit() else roe_raw,
         "roce_roa": f"{roa_raw}%" if str(roa_raw).replace('.','',1).isdigit() else roa_raw,
-        "dividend_yield": f"{dy_raw}%" if dy_raw != "N/A" else "N/A",
+        "dividend_yield": f"{dy_raw}%" if dy_raw != "N/A" and str(dy_raw) not in ["0", "0.0", "0.00"] else "STOCK DOESN'T PAY DIVIDENDS",
         "pat_qoq": f"{pat_qoq}%" if pat_qoq != "N/A" else "N/A",
         "pat_yoy": f"{pat_yoy}%" if pat_yoy != "N/A" else "N/A",
         "rsi": calculate_rsi(hist, 14),
@@ -325,7 +320,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
             metrics["total_equity"] = g_bs('Common Stock Equity') or g_bs('Stockholders Equity')
     except Exception: pass
     
-    # Fair Value Calculation
     pe_num = to_float(metrics['pe_ratio'])
     growth_num = to_float(pat_yoy)
     if metrics['price'] and pe_num and pe_num > 0:
@@ -338,7 +332,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     return metrics
 
 # ============================================================
-# 5. VISUAL CHART BUILDERS (Ring / Donut Charts)
+# 5. VISUAL CHART BUILDERS (Donut Charts & Radar)
 # ============================================================
 def analysis_radar_chart(scores):
     categories = list(scores.keys())
@@ -445,8 +439,11 @@ def financial_health_checks(m):
     return checks
 
 def dividend_checks(m):
-    dy = to_float(m.get('dividend_yield'))
-    checks = [("Pays a Notable Dividend (>1.5%)", None if dy is None else dy > 1.5, f"Dividend yield of {m.get('dividend_yield')}")]
+    dy_str = str(m.get('dividend_yield', ''))
+    is_paying = "DOESN'T PAY" not in dy_str.upper() and dy_str != "N/A"
+    dy = to_float(dy_str) if is_paying else 0.0
+    
+    checks = [("Pays a Notable Dividend (>1.5%)", None if not is_paying else dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
     return checks
 
 def score_from_checks(checks):
@@ -467,7 +464,7 @@ def card(title, body_html):
     st.markdown(f'<div class="swf-card"><div class="swf-h">{title}</div>{body_html}</div>', unsafe_allow_html=True)
 
 # ============================================================
-# 7. AI GENERATION & PDF BUILDER
+# 7. AI GENERATION & PDF BUILDER (Gemini 3.5 Flash-Lite)
 # ============================================================
 def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
@@ -599,7 +596,8 @@ if generate_clicked:
                 rating = rating_match.group(1).strip().upper() if rating_match else "EVALUATED"
 
                 raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
-                sections_list = [s.strip() for s in re.split(r'\n+(?=(?:\*\*|__)?\d+\.\s)', raw_ai_text) if s.strip()]
+                # STRICT REGEX SLICER: Only splits on exact numbered main headers, preventing internal bullets from breaking tabs
+                sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|SUMMARY VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
                 if len(sections_list) > 8:
                     sections_list = sections_list[-8:]
 
