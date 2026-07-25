@@ -69,23 +69,26 @@ st.markdown(f"""
 # 2. DATA FORMATTING & QUANTITATIVE HELPERS
 # ============================================================
 def to_float(val):
-    if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
+    if val in [None, "N/A", "", "None", "Stock doesn't pay dividends", "—"]: return None
     if isinstance(val, (int, float)): return float(val)
-    try: return float(str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').strip())
+    try: 
+        cleaned = str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').replace('Cr.', '').replace('Cr', '').strip()
+        return float(cleaned)
     except Exception: return None
 
 def is_valid_metric(val):
-    if val in [None, "N/A", "", "-", "--", "None", "0", "0.00%", "0.00"]: return False
+    if val in [None, "N/A", "", "-", "--", "None", "0", "0.00%", "0.00", "—"]: return False
     if isinstance(val, (int, float)): return True
     try:
-        float(str(val).replace(',', '').replace('₹', '').replace('%', '').replace('x', '').replace('Cr.', '').strip())
+        cleaned = str(val).replace(',', '').replace('₹', '').replace('%', '').replace('x', '').replace('Cr.', '').replace('Cr', '').strip()
+        float(cleaned)
         return True
     except ValueError: return False
 
 def fmt_indian_currency(val, currency="₹"):
     if not is_valid_metric(val): return "N/A"
     try:
-        num = float(str(val).replace(',', '').replace('₹', '').replace('%', '').strip())
+        num = float(str(val).replace(',', '').replace('₹', '').replace('%', '').replace('Cr.', '').replace('Cr', '').strip())
         sym = "₹"
         if abs(num) >= 10000000: return f"{sym}{num/10000000:,.2f} Cr"
         elif abs(num) >= 100000: return f"{sym}{num/100000:,.2f} Lakh"
@@ -202,7 +205,7 @@ def run_predictive_pipeline(info, hist, fcf_history):
 # 3. MASTER DATA PIPELINE (yfinance + Ratios + Projections)
 # ============================================================
 @st.cache_data(ttl=1800)
-def fetch_stock_data(resolved_ticker, raw_input):
+def fetch_stock_data(resolved_ticker, raw_input, uploaded_csv=None):
     stock = yf.Ticker(resolved_ticker)
     hist = stock.history(period="1y")
     if hist.empty: raise ValueError(f"Could not find '{raw_input}'.")
@@ -224,54 +227,67 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     fcf_hist = None
+    
+    if uploaded_csv is not None:
+        try:
+            csv_data = pd.read_csv(uploaded_csv)
+            if len(csv_data) >= 42: 
+                pnl_df = csv_data.iloc[7:19].dropna(how='all')
+                bs_df = csv_data.iloc[21:35].dropna(how='all')
+                cf_df = csv_data.iloc[35:43].dropna(how='all')
+                pnl_df.columns = ["Particulars", "Amount (₹ Cr)"]
+                bs_df.columns = ["Particulars", "Amount (₹ Cr)"]
+                cf_df.columns = ["Particulars", "Amount (₹ Cr)"]
+        except Exception: pass
 
-    pnl_data, bs_data, cf_data = [], [], []
-    try:
-        fin = stock.financials
-        if fin is not None and not fin.empty:
-            col = fin.columns[0]
-            def get_f(keys):
-                for k in keys:
-                    if k in fin.index and pd.notna(fin.loc[k, col]): return round(fin.loc[k, col] / 10000000, 2)
-                return "—"
-            pnl_data = [
-                {"Particulars": "Net Sales", "Amount (₹ Cr)": get_f(['Total Revenue', 'Operating Revenue'])},
-                {"Particulars": "Total Expenditure", "Amount (₹ Cr)": get_f(['Total Expenses', 'Operating Expense'])},
-                {"Particulars": "Operating Profit", "Amount (₹ Cr)": get_f(['Operating Income', 'EBIT'])},
-                {"Particulars": "Net Profit", "Amount (₹ Cr)": get_f(['Net Income'])}
-            ]
-            pnl_df = pd.DataFrame(pnl_data)
+    if pnl_df.empty:
+        pnl_data, bs_data, cf_data = [], [], []
+        try:
+            fin = stock.financials
+            if fin is not None and not fin.empty:
+                col = fin.columns[0]
+                def get_f(keys):
+                    for k in keys:
+                        if k in fin.index and pd.notna(fin.loc[k, col]): return round(fin.loc[k, col] / 10000000, 2)
+                    return "—"
+                pnl_data = [
+                    {"Particulars": "Net Sales", "Amount (₹ Cr)": get_f(['Total Revenue', 'Operating Revenue'])},
+                    {"Particulars": "Total Expenditure", "Amount (₹ Cr)": get_f(['Total Expenses', 'Operating Expense'])},
+                    {"Particulars": "Operating Profit", "Amount (₹ Cr)": get_f(['Operating Income', 'EBIT'])},
+                    {"Particulars": "Net Profit", "Amount (₹ Cr)": get_f(['Net Income'])}
+                ]
+                pnl_df = pd.DataFrame(pnl_data)
 
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            col = bs.columns[0]
-            def get_b(keys):
-                for k in keys:
-                    if k in bs.index and pd.notna(bs.loc[k, col]): return round(bs.loc[k, col] / 10000000, 2)
-                return "—"
-            bs_data = [
-                {"Particulars": "Share Capital", "Amount (₹ Cr)": get_b(['Common Stock', 'Capital Stock'])},
-                {"Particulars": "Total Reserves", "Amount (₹ Cr)": get_b(['Retained Earnings', 'Total Stockholder Equity'])},
-                {"Particulars": "Borrowings", "Amount (₹ Cr)": get_b(['Long Term Debt', 'Total Debt'])},
-                {"Particulars": "Total Liabilities", "Amount (₹ Cr)": get_b(['Total Liabilities Net Minority Interest'])},
-                {"Particulars": "Total Assets", "Amount (₹ Cr)": get_b(['Total Assets'])}
-            ]
-            bs_df = pd.DataFrame(bs_data)
+            bs = stock.balance_sheet
+            if bs is not None and not bs.empty:
+                col = bs.columns[0]
+                def get_b(keys):
+                    for k in keys:
+                        if k in bs.index and pd.notna(bs.loc[k, col]): return round(bs.loc[k, col] / 10000000, 2)
+                    return "—"
+                bs_data = [
+                    {"Particulars": "Share Capital", "Amount (₹ Cr)": get_b(['Common Stock', 'Capital Stock'])},
+                    {"Particulars": "Total Reserves", "Amount (₹ Cr)": get_b(['Retained Earnings', 'Total Stockholder Equity'])},
+                    {"Particulars": "Borrowings", "Amount (₹ Cr)": get_b(['Long Term Debt', 'Total Debt'])},
+                    {"Particulars": "Total Liabilities", "Amount (₹ Cr)": get_b(['Total Liabilities Net Minority Interest'])},
+                    {"Particulars": "Total Assets", "Amount (₹ Cr)": get_b(['Total Assets'])}
+                ]
+                bs_df = pd.DataFrame(bs_data)
 
-        cf = stock.cashflow
-        if cf is not None and not cf.empty:
-            col = cf.columns[0]
-            def get_c(keys):
-                for k in keys:
-                    if k in cf.index and pd.notna(cf.loc[k, col]): return round(cf.loc[k, col] / 10000000, 2)
-                return "—"
-            cf_data = [
-                {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": get_c(['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])},
-                {"Particulars": "Net Cash Flow", "Amount (₹ Cr)": get_c(['Changes In Cash', 'End Cash Position'])}
-            ]
-            cf_df = pd.DataFrame(cf_data)
-            if 'Free Cash Flow' in cf.index: fcf_hist = cf.loc['Free Cash Flow'].dropna()
-    except Exception: pass
+            cf = stock.cashflow
+            if cf is not None and not cf.empty:
+                col = cf.columns[0]
+                def get_c(keys):
+                    for k in keys:
+                        if k in cf.index and pd.notna(cf.loc[k, col]): return round(cf.loc[k, col] / 10000000, 2)
+                    return "—"
+                cf_data = [
+                    {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": get_c(['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])},
+                    {"Particulars": "Net Cash Flow", "Amount (₹ Cr)": get_c(['Changes In Cash', 'End Cash Position'])}
+                ]
+                cf_df = pd.DataFrame(cf_data)
+                if 'Free Cash Flow' in cf.index: fcf_hist = cf.loc['Free Cash Flow'].dropna()
+        except Exception: pass
 
     pat_qoq, pat_yoy, net_margin_final = "N/A", "N/A", "N/A"
     rev_cagr, earn_cagr = 0.12, 0.15 
@@ -281,7 +297,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
             ni = q_fin.loc['Net Income'].dropna()
             if len(ni) >= 2 and ni.iloc[1] != 0: pat_qoq = round(((ni.iloc[0] - ni.iloc[1]) / abs(ni.iloc[1])) * 100, 2)
             if len(ni) >= 5 and ni.iloc[4] != 0: pat_yoy = round(((ni.iloc[0] - ni.iloc[4]) / abs(ni.iloc[4])) * 100, 2)
-            if 'Total Revenue' in q_fin.index and len(ni) > 0 and qf.loc['Total Revenue'].iloc[0] != 0:
+            if 'Total Revenue' in q_fin.index and len(ni) > 0 and q_fin.loc['Total Revenue'].iloc[0] != 0:
                 net_margin_final = f"{round((ni.iloc[0] / q_fin.loc['Total Revenue'].iloc[0]) * 100, 2)}%"
                 
         fin = stock.financials
@@ -318,18 +334,25 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if not is_valid_metric(pb_ratio) and bv_raw and current_price and info.get("sharesOutstanding"):
         pb_ratio = round((current_price * info.get("sharesOutstanding")) / (to_float(bv_raw) * 10000000), 2) if to_float(bv_raw) > 0 else "N/A"
 
-    if not is_valid_metric(pe_raw):
-        eps = info.get("trailingEps")
+    # Robust P/E Calculation fallback if yfinance trailingEps is missing
+    if not is_valid_metric(pe_raw) or to_float(pe_raw) is None:
+        eps = info.get("trailingEps") or info.get("forwardEps")
         if eps and eps > 0: 
             pe_raw = round(current_price / eps, 2)
-        elif mcap_float and not pnl_df.empty:
-            try:
-                np_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Profit', case=False, na=False)]
-                if not np_row.empty:
-                    np_val = to_float(np_row.iloc[0]['Amount (₹ Cr)'])
-                    if np_val and np_val > 0: pe_raw = round((mcap_float / 10000000) / np_val, 2)
-            except Exception: pass
-        if not is_valid_metric(pe_raw): pe_raw = "N/A"
+        else:
+            if mcap_float:
+                np_val = None
+                if not pnl_df.empty:
+                    for _, row in pnl_df.iterrows():
+                        partic = str(row['Particulars']).lower()
+                        if 'net profit' in partic or 'net income' in partic:
+                            np_val = to_float(row['Amount (₹ Cr)'])
+                            break
+                if np_val and np_val > 0: 
+                    mcap_in_cr = mcap_float / 10000000 if mcap_float > 10000000 else mcap_float
+                    pe_raw = round(mcap_in_cr / np_val, 2)
+    
+    if not is_valid_metric(pe_raw): pe_raw = "N/A"
 
     peg_raw = info.get("pegRatio", "N/A")
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and is_valid_metric(pat_yoy):
@@ -409,20 +432,23 @@ def future_trajectory_chart(pnl_df, earn_growth_est, rev_growth_est):
     curr_rev, curr_earn = 100, 20
     if pnl_df is not None and not pnl_df.empty:
         try:
-            r_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Sales|Revenue', case=False, na=False)]
-            if not r_row.empty: curr_rev = to_float(r_row.iloc[0]['Amount (₹ Cr)']) or 100
-            e_row = pnl_df[pnl_df['Particulars'].astype(str).str.contains('Net Profit|Earnings', case=False, na=False)]
-            if not e_row.empty: curr_earn = to_float(e_row.iloc[0]['Amount (₹ Cr)']) or 20
+            for _, row in pnl_df.iterrows():
+                partic = str(row['Particulars']).lower()
+                val = to_float(row['Amount (₹ Cr)'])
+                if 'sales' in partic or 'revenue' in partic:
+                    if val: curr_rev = val
+                if 'profit' in partic or 'income' in partic or 'earnings' in partic:
+                    if val: curr_earn = val
         except Exception: pass
         
-    years = ['2023', '2024', '2025E', '2026E', '2027E']
-    all_rev = [curr_rev * (1 - r_g), curr_rev, curr_rev * (1+r_g), curr_rev * (1+r_g)**2, curr_rev * (1+r_g)**3]
-    all_earn = [curr_earn * (1 - e_g), curr_earn, curr_earn * (1+e_g), curr_earn * (1+e_g)**2, curr_earn * (1+e_g)**3]
+    years = ['2024', '2025', '2026', '2027E', '2028E', '2029E']
+    all_rev = [curr_rev / ((1+r_g)**2), curr_rev / (1+r_g), curr_rev, curr_rev * (1+r_g), curr_rev * (1+r_g)**2, curr_rev * (1+r_g)**3]
+    all_earn = [curr_earn / ((1+e_g)**2), curr_earn / (1+e_g), curr_earn, curr_earn * (1+e_g), curr_earn * (1+e_g)**2, curr_earn * (1+e_g)**3]
     
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=years, y=all_rev, mode='lines+markers', name='Revenue', line=dict(color=BLUE, width=3)))
     fig.add_trace(go.Scatter(x=years, y=all_earn, mode='lines+markers', name='Earnings', line=dict(color=GREEN, width=3)))
-    fig.add_vrect(x0='2024', x1='2027E', fillcolor='rgba(255,255,255,0.05)', layer='below', line_width=0)
+    fig.add_vrect(x0='2026', x1='2029E', fillcolor='rgba(255,255,255,0.05)', layer='below', line_width=0)
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2), yaxis=dict(showgrid=False))
     return fig
 
@@ -548,7 +574,7 @@ def generate_comprehensive_report(metrics, ticker):
 # ============================================================
 if 'report_data' not in st.session_state: st.session_state.report_data = None
 if 'active_section' not in st.session_state: st.session_state.active_section = "Company Overview"
-SECTIONS = ["Company Overview", "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health", "5. Dividend", "6. Management", "7. Ownership", "Verdict"]
+SECTIONS = ["Company Overview", "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health", "5. Dividend", "6. Management", "7. Ownership", "8. Verdict"]
 
 st.markdown('<div class="swf-title-container"><div class="swf-title">🦉 FINANCIAL INTELLIGENCE APP</div></div>', unsafe_allow_html=True)
 
@@ -556,13 +582,14 @@ col_input, col_btn = st.columns([4, 1])
 with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
+uploaded_csv = None
 if generate_clicked and stock_input.strip():
     with st.spinner('Compiling cascade metrics and quantitative models...'):
         try:
             rt = resolve_name_to_ticker(stock_input)
             
             # Fetch the data
-            metrics = fetch_stock_data(rt, stock_input)
+            metrics = fetch_stock_data(rt, stock_input, uploaded_csv)
             final_ticker = metrics.pop('working_ticker')
             
             # Generate the AI report
@@ -622,6 +649,10 @@ if st.session_state.report_data:
             <div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">₹ {m['price']}</div></div>
         </div></div>
         """, unsafe_allow_html=True)
+        hist_df = m.get('history')
+        if hist_df is not None and not hist_df.empty:
+            st.plotly_chart(price_history_chart(hist_df, m.get('currency','₹')), use_container_width=True, config={'displayModeBar': False})
+
     with hcol2:
         st.markdown('<div class="swf-card"><div class="swf-h">Analysis Summary</div>', unsafe_allow_html=True)
         st.plotly_chart(analysis_radar_chart(scores), use_container_width=True, config={'displayModeBar': False})
@@ -716,8 +747,16 @@ if st.session_state.report_data:
         
         st.markdown("##### Balance Sheet & Cash Flows (₹ Cr)")
         tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
-        with tab_bs: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True) if not m['bs_df'].empty else st.info("Balance Sheet data available.")
-        with tab_cf: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True) if not m['cf_df'].empty else st.info("Cash Flow data available.")
+        with tab_bs: 
+            if not m['bs_df'].empty:
+                st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
+            else:
+                st.info("Balance Sheet data unavailable.")
+        with tab_cf: 
+            if not m['cf_df'].empty:
+                st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
+            else:
+                st.info("Cash Flow data unavailable.")
         card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
 
     elif sec == "5. Dividend":
@@ -728,7 +767,7 @@ if st.session_state.report_data:
     elif sec == "6. Management":
         st.markdown("### 6. Management & Leadership")
         if m['company_officers']:
-            rows = [{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A'), "Ownership %": f"{(o.get('exercisedValue', 0) or 0):.2f}%" if 'exercisedValue' in o else "N/A"} for o in m['company_officers']]
+            rows = [{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else: card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management data is not available.</div>")
         card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
@@ -742,12 +781,34 @@ if st.session_state.report_data:
             st.dataframe(pd.DataFrame({"Category": ["Promoters", "Mutual Funds / DII", "Foreign Institutions (FII)", "General Public"], "Holding %": [m['shareholding'].get('Promoters', 50.0), 8.71, 5.71, m['shareholding'].get('Public', 25.0)]}), use_container_width=True, hide_index=True)
         card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
-    elif sec == "Verdict":
-        st.markdown("### Verdict")
+    elif sec == "8. Verdict":
+        st.markdown("### 8. Verdict & Summary")
+        
+        oc1, oc2 = st.columns(2)
+        with oc1: 
+            website = m.get('website') or 'N/A'
+            website_link = f"<a href='{website}' target='_blank' style='color:{BLUE};'>{website}</a>" if website != 'N/A' else 'N/A'
+            card("Key Information", f"<div class='swf-sub'>Exchange: {m['exchange']}<br>Ticker: {m['working_ticker']}<br>Website: {website_link}</div>")
+        with oc2:
+            news_items = m.get('recent_news', [])
+            if news_items:
+                news_html = "".join([f"<div class='swf-sub' style='padding:4px 0; border-bottom:1px solid {BORDER};'><a href='{item['link']}' target='_blank' style='color:{BLUE}; text-decoration:none;'>🔗 {item['title']}</a></div>" for item in news_items])
+            else:
+                news_html = "<div class='swf-check-na'>No recent news available.</div>"
+            card("Recent News & Updates", news_html)
+            
+        sc_col1, sc_col2 = st.columns(2)
+        with sc_col1: 
+            card("✅ Strengths (Pros)", f"<ul style='margin:0; padding-left:15px; font-size:0.85em; color:#c9d1d9;'><li>Debt-to-equity ratio of {m['debt_to_equity']} indicates manageable leverage.</li><li>Analyzed via Discounted Cash Flow and Trend Models.</li></ul>")
+        with sc_col2: 
+            card("❌ Limitations / Risks (Cons)", "<ul style='margin:0; padding-left:15px; font-size:0.85em; color:#c9d1d9;'><li>Model projections do not account for black swan macro events or sudden regulatory changes.</li><li>Subject to market volatility and micro-cap liquidity constraints.</li></ul>")
+
         st.info("⚠️ **Note:** The target price, entry range, and time horizon are derived mathematically using Discounted Cash Flow and Average True Range models. Time horizons are estimated via price-only models (ARIMA). These are estimates, not guaranteed forecasts.")
-        st.markdown(f"<div style='font-size:1.1em; margin-bottom:12px;'><b>Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
+        
+        st.markdown(f"<div style='font-size:1.1em; margin-bottom:12px;'><b>Final Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
         if "BUY" in current_rating:
             st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry Price:</b> {pred['entry_range']}<br><b>Est. Time Horizon / Duration:</b> {pred['time_horizon']}<br><b>Exit Price (Target):</b> ₹ {pred['target_price']}<br><b>Suggested Stop Loss:</b> ₹ {pred['stop_loss']}</div>", unsafe_allow_html=True)
+        
         styled_verdict = narrative_for(7)
         for w, c in [("STRONG BUY", GREEN), ("BUY", GREEN), ("OBSERVE", ORANGE), ("DON'T BUY", RED)]: styled_verdict = re.sub(rf'(?i)(?<!STRONG )\b{w}\b', f'<span style="color:{c}; font-weight:bold;">{w}</span>', styled_verdict)
         st.markdown(f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled_verdict}</p>", unsafe_allow_html=True)
