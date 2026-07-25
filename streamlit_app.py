@@ -677,7 +677,7 @@ if st.session_state.report_data:
             st.plotly_chart(price_history_chart(hist_df, m.get('fair_value'), m.get('currency','INR')), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
         st.markdown('<div class="swf-card"><div class="swf-h">Analysis Summary</div>', unsafe_allow_html=True)
-        st.plotly_chart(snowflake_chart(scores), use_container_width=True, config={'displayModeBar': False})
+        st.plotly_chart(analysis_radar_chart(scores), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
