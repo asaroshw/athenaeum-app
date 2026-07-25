@@ -68,6 +68,31 @@ st.markdown(f"""
 # ============================================================
 # 2. HELPERS
 # ============================================================
+def calculate_rsi(df, period=14):
+    """Calculates Relative Strength Index (RSI) using price history."""
+    if df is None or len(df) <= period or 'Close' not in df.columns:
+        return "N/A"
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    val = rsi.iloc[-1]
+    return round(val, 2) if pd.notna(val) else "N/A"
+
+def fetch_google_news(query):
+    """Fetches top news headlines from Google News RSS feed."""
+    try:
+        url = f"https://news.google.com/rss/search?q={urllib.parse.quote(query)}"
+        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        if res.status_code == 200:
+            root = ET.fromstring(res.content)
+            items = root.findall('.//item')[:3]
+            return [{"title": item.find('title').text, "link": item.find('link').text} for item in items]
+    except Exception:
+        pass
+    return []
+    
 def to_float(val):
     if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
     try: return float(str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').strip())
