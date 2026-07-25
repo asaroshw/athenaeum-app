@@ -153,51 +153,64 @@ def fetch_finology(ticker):
     metrics = {}
     try:
         url = f"https://ticker.finology.in/company/{clean_ticker}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             soup = BeautifulSoup(res.text, 'html.parser')
             
-            # Precise Finology Ticker metric extraction
+            # 1. Look for known IDs on Finology Ticker
             for span_id in ['mainContent_lblPE', 'lblPE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['pe_ratio'] = elem.text.strip()
                     break
             
-            # Fallback search for P/E text if ID lookup misses
-            if 'pe_ratio' not in metrics:
-                for el in soup.find_all(['span', 'div', 'td']):
+            # 2. Broad scan for P/E text label if ID is missing
+            if 'pe_ratio' not in metrics or metrics['pe_ratio'] in ["N/A", "", None]:
+                for el in soup.find_all(['span', 'div', 'td', 'th', 'label']):
                     t = el.get_text(strip=True)
-                    if t in ['P/E', 'Price to Earnings']:
-                        next_el = el.find_next_sibling()
-                        if next_el:
-                            metrics['pe_ratio'] = next_el.get_text(strip=True)
+                    if t in ['P/E', 'Price to Earnings', 'PE']:
+                        # Check sibling or parent next element
+                        nxt = el.find_next_sibling()
+                        if nxt and nxt.get_text(strip=True):
+                            metrics['pe_ratio'] = nxt.get_text(strip=True).replace('x', '').strip()
                             break
+                        parent = el.find_parent()
+                        if parent:
+                            text_vals = parent.get_text(strip=True).replace(t, '')
+                            if text_vals:
+                                metrics['pe_ratio'] = text_vals.replace('x', '').strip()
+                                break
 
+            # Book Value
             for span_id in ['mainContent_lblBookValue', 'lblBookValue']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['book_value'] = elem.text.strip()
                     break
 
+            # ROE
             for span_id in ['mainContent_lblROE', 'lblROE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['roe'] = elem.text.strip()
                     break
 
+            # ROCE
             for span_id in ['mainContent_lblROCE', 'lblROCE']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['roce_roa'] = elem.text.strip()
                     break
 
+            # Dividend Yield
             for span_id in ['mainContent_lblDivYield', 'lblDivYield']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
                     metrics['dividend_yield'] = elem.text.strip()
                     break
 
+            # Market Cap
             for span_id in ['mainContent_lblMarketCap', 'lblMarketCap']:
                 elem = soup.find('span', id=lambda x: x and span_id in x)
                 if elem and elem.text.strip():
@@ -243,7 +256,7 @@ def fetch_google_news(query_term):
     return []
 
 def resolve_cascade_metric(key, screener, finology, angel, google, yahoo, default="N/A"):
-    # Strict sequence: Screener -> Finology -> Angel One -> Google Finance -> Yahoo Finance
+    # Strict cascading sequence: Screener -> Finology -> Angel One -> Google Finance -> Yahoo Finance
     for source in [screener, finology, angel, google, yahoo]:
         val = source.get(key)
         if val not in [None, "N/A", "", "0.00%", "0.00", "-", "--", "None", "0"]:
@@ -251,7 +264,7 @@ def resolve_cascade_metric(key, screener, finology, angel, google, yahoo, defaul
     return default
 
 # ============================================================
-# 4. DATA FETCHING (Master Fetcher with Strict Cascade & Formula Fallbacks)
+# 4. DATA FETCHING (Master Fetcher with Strict Cascade & Fallbacks)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -360,7 +373,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
-    # Strict fallback calculation: If cascade sources don't provide PE, calculate via formula; if calculation fails, return "N/A"
+    # Strict Fallback Calculation: If not found via cascade sources, calculate via formula; if calculation fails, return "N/A"
     mcap_float = to_float(mcap_raw)
     if pe_raw in ["N/A", None, "", "0"]:
         eps = info.get("trailingEps") or info.get("forwardEps")
@@ -637,7 +650,7 @@ def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     
     story = [
         Paragraph("Financial Intelligence App — Research Division", title_style),
-        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Rating: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
+        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Verdict: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
         Spacer(1, 10)
     ]
 
@@ -900,23 +913,21 @@ if st.session_state.report_data:
 
     # ---------- 6. MANAGEMENT ----------
     elif section == "6. Management":
-        st.markdown("### 6. Management Summary")
+        st.markdown("### 6. Management & Leadership")
         officers = m.get('company_officers', [])
-        ceo_name = "N/A"
-        for o in officers:
-            if any(title_word in o.get('title', '').lower() for title_word in ['ceo', 'managing director', 'chairman', 'md']):
-                ceo_name = o.get('name', 'N/A')
-                break
-        if ceo_name == "N/A" and officers:
-            ceo_name = officers[0].get('name', 'N/A')
-
-        card("Executive Leadership", f"""
-        <div style='font-size:0.95em; line-height:1.8em;'>
-            <b>Key Executive / CEO:</b> {ceo_name}<br>
-            <b>Management Quality:</b> Seasoned leadership team with stable operational tenure.<br>
-            <b>Board Oversight:</b> Active board oversight ensuring capital allocation compliance.
-        </div>
-        """)
+        if officers:
+            rows = []
+            for o in officers:
+                rows.append({
+                    "Name": o.get('name', 'N/A'),
+                    "Position": o.get('title', 'N/A'),
+                    "Age": o.get('age', 'N/A'),
+                    "Total Pay": fmt_indian_currency(o.get('totalPay'), "₹"),
+                    "Ownership %": f"{(o.get('exercisedValue', 0) or 0):.2f}%" if 'exercisedValue' in o else "N/A"
+                })
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        else:
+            card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management data is not available via this data source.</div>")
         card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
 
     # ---------- 7. OWNERSHIP ----------
