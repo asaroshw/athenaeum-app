@@ -23,7 +23,6 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 st.set_page_config(page_title="ASW Stock Ideas - Financial Intelligence Dashboard", layout="wide")
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
-ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "WjBiiHX1")
 
 GOLD = "#EAB308"
 BG = "#0D1117"
@@ -61,7 +60,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 2. HELPERS & DATA CASCADE
+# 2. DATA SCRAPERS & HELPERS
 # ============================================================
 def to_float(val):
     if val in [None, "N/A", ""]: return None
@@ -89,35 +88,39 @@ def calculate_rsi(df, window=14):
     rsi = 100 - (100 / (1 + rs))
     return round(rsi.iloc[-1], 2)
 
-def fetch_google_finance_fallback(ticker, metric_type):
-    try:
-        url = f"https://www.google.com/finance/quote/{ticker}"
-        res = requests.get(url, headers={'User-Agent': 'Mozilla/5.0'}, timeout=3)
-        if res.status_code == 200:
-            soup = BeautifulSoup(res.text, 'html.parser')
-            if metric_type == "pe_ratio":
-                pe_div = soup.find('div', string='P/E ratio')
-                if pe_div: return pe_div.find_next_sibling('div').text.strip()
-            if metric_type == "dividend_yield":
-                dy_div = soup.find('div', string='Dividend yield')
-                if dy_div: return dy_div.find_next_sibling('div').text.replace('%','').strip()
-    except Exception: pass
-    return "N/A"
-
-def fetch_angel_one_fallback(ticker, metric_type):
-    try:
-        headers = {"Authorization": f"Bearer {ANGEL_KEY}", "Accept": "application/json"}
-        pass
-    except Exception: pass
-    return "N/A"
-
-def fetch_metric_cascade(y_val, ticker, metric_type):
-    if y_val not in [None, "N/A", "", 0, 0.0]: return y_val
-    g_val = fetch_google_finance_fallback(ticker, metric_type)
-    if g_val not in [None, "N/A", ""]: return g_val
-    a_val = fetch_angel_one_fallback(ticker, metric_type)
-    if a_val not in [None, "N/A", ""]: return a_val
-    return "N/A"
+def fetch_screener_fundamentals(ticker):
+    """Scrapes Screener.in for highly accurate Indian stock fundamentals."""
+    clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
+    urls = [f"https://www.screener.in/company/{clean_ticker}/consolidated/", f"https://www.screener.in/company/{clean_ticker}/"]
+    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'}
+    
+    html_content = None
+    for url in urls:
+        try:
+            res = requests.get(url, headers=headers, timeout=5)
+            if res.status_code == 200:
+                html_content = res.text
+                break
+        except Exception: continue
+            
+    if not html_content: return {}
+        
+    soup = BeautifulSoup(html_content, 'html.parser')
+    metrics = {}
+    ratios_ul = soup.find('ul', id='top-ratios')
+    if ratios_ul:
+        for li in ratios_ul.find_all('li'):
+            name_span = li.find('span', class_='name')
+            num_span = li.find('span', class_='number')
+            if name_span and num_span:
+                name = name_span.text.strip().lower()
+                val = num_span.text.strip().replace(',', '')
+                if 'market cap' in name: metrics['market_cap'] = val
+                elif 'stock p/e' in name: metrics['pe_ratio'] = val
+                elif 'roce' in name: metrics['roce_roa'] = val
+                elif 'roe' in name: metrics['roe'] = val
+                elif 'dividend yield' in name: metrics['dividend_yield'] = val
+    return metrics
 
 def fetch_google_news(query_term):
     try:
@@ -146,18 +149,33 @@ def resolve_name_to_ticker(stock_input):
     return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
 
 # ============================================================
-# 3. DATA FETCHING
+# 3. DATA FETCHING (Yahoo + Screener Integration)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
     stock = yf.Ticker(resolved_ticker)
     hist = stock.history(period="1y")
-    if hist.empty: raise ValueError(f"Could not find '{raw_input}'.")
+    if hist.empty: raise ValueError(f"Could not find historical data for '{raw_input}'.")
     info = stock.info
 
-    pe_raw = fetch_metric_cascade(info.get("trailingPE", "N/A"), resolved_ticker, "pe_ratio")
-    dy_raw = fetch_metric_cascade(info.get("dividendYield", "N/A"), resolved_ticker, "dividend_yield")
-    if dy_raw != "N/A" and isinstance(dy_raw, (int, float)): dy_raw = round(float(dy_raw) * 100, 2)
+    # 1. Fetch Highly Accurate Fundamentals from Screener.in
+    scr_data = fetch_screener_fundamentals(resolved_ticker)
+    
+    # 2. Map Data (Screener gets priority, Yahoo is the backup)
+    pe_raw = scr_data.get('pe_ratio') or info.get("trailingPE", "N/A")
+    dy_raw = scr_data.get('dividend_yield') or info.get("dividendYield", "N/A")
+    if dy_raw != "N/A" and isinstance(dy_raw, (int, float)): 
+        dy_raw = round(float(dy_raw) * 100, 2)
+
+    roe_val = scr_data.get('roe') or info.get("returnOnEquity")
+    if isinstance(roe_val, (int, float)): roe_val = f"{round(roe_val * 100, 2)}%"
+    elif roe_val and str(roe_val) != "N/A" and "%" not in str(roe_val): roe_val = f"{roe_val}%"
+
+    roa_val = scr_data.get('roce_roa') or info.get("returnOnAssets")
+    if isinstance(roa_val, (int, float)): roa_val = f"{round(roa_val * 100, 2)}%"
+    elif roa_val and str(roa_val) != "N/A" and "%" not in str(roa_val): roa_val = f"{roa_val}%"
+
+    mcap_val = scr_data.get('market_cap') or info.get("marketCap", "N/A")
 
     pat_qoq, pat_yoy = "N/A", "N/A"
     try:
@@ -168,8 +186,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
             if len(net_inc) >= 5 and net_inc.iloc[4] != 0: pat_yoy = round(((net_inc.iloc[0] - net_inc.iloc[4]) / abs(net_inc.iloc[4])) * 100, 2)
     except Exception: pass
 
-    roe_val = info.get("returnOnEquity")
-    roa_val = info.get("returnOnAssets")
     de_val = info.get("debtToEquity")
 
     recent_news = ""
@@ -192,14 +208,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "price": info.get("currentPrice", round(hist['Close'].iloc[-1], 2)),
         "pe_ratio": pe_raw,
         "peg_ratio": info.get("pegRatio", "N/A"),
-        "roe": f"{round(roe_val * 100, 2)}%" if isinstance(roe_val, (int, float)) else "N/A",
-        "roce_roa": f"{round(roa_val * 100, 2)}%" if isinstance(roa_val, (int, float)) else "N/A",
+        "roe": roe_val if roe_val else "N/A",
+        "roce_roa": roa_val if roa_val else "N/A",
         "dividend_yield": f"{dy_raw}%" if dy_raw != "N/A" else "N/A",
         "pat_qoq": f"{pat_qoq}%" if pat_qoq != "N/A" else "N/A",
         "pat_yoy": f"{pat_yoy}%" if pat_yoy != "N/A" else "N/A",
         "rsi": calculate_rsi(hist, 14),
         "debt_to_equity": round(de_val / 100, 2) if isinstance(de_val, (int, float)) else "N/A",
-        "market_cap": info.get("marketCap", "N/A"),
+        "market_cap": mcap_val,
         "industry": info.get("industry", "N/A"),
         "sector": info.get("sector", "N/A"),
         "currency": info.get("currency", "INR"),
@@ -328,10 +344,10 @@ def valuation_checks(m):
     tgt = m.get('target_mean_price')
     checks = []
     if fv and price is not None:
-        checks.append(("Below Fair Value", price < fv, f"Price {currency} {price} vs an estimated fair value of {currency} {fv}"))
-        checks.append(("Significantly Undervalued (20%+ below)", price < fv * 0.8, "Price is more than 20% below the fair value estimate"))
+        checks.append(("Valuation Discount", price < fv, f"Price {currency} {price} vs an estimated fair value of {currency} {fv}"))
+        checks.append(("Significantly Undervalued", price < fv * 0.8, "Price is more than 20% below the fair value estimate"))
     else:
-        checks.append(("Below Fair Value", None, "Insufficient data to estimate fair value"))
+        checks.append(("Valuation Discount", None, "Insufficient data to estimate fair value"))
         checks.append(("Significantly Undervalued", None, "Insufficient data"))
     checks.append(("Reasonable P/E (<25x)", None if pe is None else pe < 25, f"Trailing P/E of {pe}x" if pe is not None else "P/E not available"))
     checks.append(("Attractive PEG (<1.5)", None if peg is None else peg < 1.5, f"PEG ratio of {peg}" if peg is not None else "PEG not available"))
@@ -521,8 +537,12 @@ if generate_clicked:
                 
                 rating_match = re.search(r'DYNAMIC_RATING:\s*(.*)', ai_text)
                 rating = rating_match.group(1).strip().upper() if rating_match else "EVALUATED"
+                
+                # Slices the text properly even if the AI adds bolding, extra spaces, or weird formatting
                 raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
-                sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
+                sections_list = [s.strip() for s in re.split(r'\n+(?=(?:\*\*|__)?\d+\.\s)', raw_ai_text) if s.strip()]
+                if len(sections_list) > 8:
+                    sections_list = sections_list[-8:]
                 
                 st.session_state.report_data = {"metrics": m, "ai_text": ai_text, "narrative_sections": sections_list, "ticker": final_ticker, "rating": rating}
                 st.session_state.active_section = "Company Overview"
