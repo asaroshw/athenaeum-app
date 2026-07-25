@@ -16,7 +16,7 @@ from google.genai import types
 
 # 1. Setup & Configuration
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-st.set_page_config(page_title="Gatekeeper - Institutional Terminal & Screener", layout="wide")
+st.set_page_config(page_title="ASW Stock Ideas - Financial Intelligence Dashboard", layout="wide")
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "WjBiiHX1")
@@ -211,7 +211,7 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
         elif line_str: clean_lines.append(line_str)
                 
     story = [
-        Paragraph("Gatekeeper Institutional Research", title_style), 
+        Paragraph("ASW Stock Ideas — Research Division", title_style), 
         Paragraph(f"Comprehensive Terminal Dossier — {metrics['name']} ({ticker})", subtitle_style),
         Spacer(1, 6)
     ]
@@ -259,8 +259,8 @@ def build_pdf_report(pdf_buffer, metrics, ai_text, ticker):
 if 'report_data' not in st.session_state:
     st.session_state.report_data = None
 
-st.title("🛡️ Gatekeeper - Institutional Terminal & Screener")
-st.caption("SimplyWallSt Modular Multi-Angle Financial Intelligence Dashboard")
+st.title("ASW Stock Ideas")
+st.caption("Financial Intelligence Dashboard")
 
 stock_input = st.text_input("Enter Stock Name or Ticker (e.g., Reliance, Tata Motors, HBL):")
 
@@ -307,7 +307,7 @@ if st.session_state.report_data:
     st.markdown("---")
     
     # --- SNOWFLAKE SUMMARY COMPONENT ---
-    st.markdown("### ❄️ Gatekeeper Health & Snowflake Criteria Checks")
+    st.markdown("### ❄️ Health & Snowflake Criteria Checks")
     col_r, col_risk = st.columns(2)
     with col_r:
         st.markdown("**🟢 Key Rewards / Strengths Checked**")
@@ -331,10 +331,12 @@ if st.session_state.report_data:
 
     st.markdown("---")
     
-    # --- MODULAR VISUALS ---
+    # --- MULTIPLE VISUAL GRAPHS ---
+    st.markdown("### 📊 Multi-Angle Financial Visualizations")
     col_v1, col_v2 = st.columns(2)
+    
     with col_v1:
-        st.markdown("### 🍰 Ownership Distribution")
+        st.markdown("#### Ownership Distribution")
         sh_data = m['shareholding']
         if sum(sh_data.values()) > 0:
             fig_pie = px.pie(names=list(sh_data.keys()), values=list(sh_data.values()), hole=0.45, color_discrete_sequence=px.colors.qualitative.Bold)
@@ -344,7 +346,7 @@ if st.session_state.report_data:
             st.info("Shareholding breakdown unavailable.")
 
     with col_v2:
-        st.markdown(f"### 📈 Valuation Multiples ({m['industry']})")
+        st.markdown("#### Valuation Multiples Benchmark")
         pe_num = float(m['pe_ratio']) if m['pe_ratio'] != "N/A" else 0
         peg_num = float(m['peg_ratio']) if m['peg_ratio'] != "N/A" else 0
         fig_bar = go.Figure(data=[
@@ -354,62 +356,58 @@ if st.session_state.report_data:
         fig_bar.update_layout(barmode='group', margin=dict(t=10, b=10, l=10, r=10))
         st.plotly_chart(fig_bar, use_container_width=True)
 
+    col_v3, col_v4 = st.columns(2)
+    with col_v3:
+        st.markdown("#### Profitability Returns (ROE vs ROA)")
+        roe_val = float(m['roe'].replace('%','')) if m['roe'] != "N/A" else 0
+        roa_val = float(m['roce_roa'].replace('%','')) if m['roce_roa'] != "N/A" else 0
+        fig_ret = px.bar(x=['ROE', 'ROA / ROCE Proxy'], y=[roe_val, roa_val], color=['ROE', 'ROA'], text_auto=True)
+        fig_ret.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+        st.plotly_chart(fig_ret, use_container_width=True)
+
+    with col_v4:
+        st.markdown("#### Earnings Momentum (YoY vs QoQ Growth)")
+        yoy_val = float(m['pat_yoy'].replace('%','')) if m['pat_yoy'] != "N/A" else 0
+        qoq_val = float(m['pat_qoq'].replace('%','')) if m['pat_qoq'] != "N/A" else 0
+        fig_mom = px.bar(x=['PAT YoY Growth', 'PAT QoQ Growth'], y=[yoy_val, qoq_val], color=['YoY', 'QoQ'], text_auto=True)
+        fig_mom.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
+        st.plotly_chart(fig_mom, use_container_width=True)
+
     st.markdown("---")
     
-    # --- ORGANIZED TABS FOR EXHAUSTIVE MODULAR REPORT ---
-    st.markdown("### 📑 Exhaustive Modular Terminal Sections")
+    # --- SEQUENTIAL EXHAUSTIVE REPORT SECTIONS ---
+    st.markdown("### 📑 Exhaustive Terminal Sections (Sequential Report)")
     
     raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
     sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
     
-    tab1, tab2, tab3, tab4, tab5, tab6, tab7, tab8 = st.tabs([
-        "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health",
-        "5. Dividend", "6. Management", "7. Ownership", "8. Verdict & Risks"
-    ])
+    # Display each section sequentially like a report document
+    section_titles = [
+        "1. VALUATION & FAIR VALUE", 
+        "2. FUTURE GROWTH & OUTLOOK", 
+        "3. PAST PERFORMANCE & EARNINGS QUALITY", 
+        "4. FINANCIAL HEALTH & BALANCE SHEET", 
+        "5. DIVIDEND & CAPITAL ALLOCATION", 
+        "6. MANAGEMENT & COMPENSATION", 
+        "7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT", 
+        "8. SUMMARY VERDICT & KEY RISKS"
+    ]
     
-    with tab1:
-        st.markdown("### 🏷️ 1. Valuation & Fair Value Analysis")
-        st.write(sections_list[0] if len(sections_list) > 0 else raw_ai_text)
-        
-    with tab2:
-        st.markdown("### 🚀 2. Future Growth & Outlook")
-        st.write(sections_list[1] if len(sections_list) > 1 else "Module compilation pending...")
-        
-    with tab3:
-        st.markdown("### 📊 3. Past Performance & Earnings Quality")
-        st.write(sections_list[2] if len(sections_list) > 2 else "Module compilation pending...")
-        
-    with tab4:
-        st.markdown("### 🛡️ 4. Financial Health & Balance Sheet")
-        st.write(sections_list[3] if len(sections_list) > 3 else "Module compilation pending...")
-        
-    with tab5:
-        st.markdown("### 💰 5. Dividend & Capital Allocation")
-        st.write(sections_list[4] if len(sections_list) > 4 else "Module compilation pending...")
-        
-    with tab6:
-        st.markdown("### 👔 6. Management & Leadership")
-        st.write(sections_list[5] if len(sections_list) > 5 else "Module compilation pending...")
-        
-    with tab7:
-        st.markdown("### 👥 7. Ownership Structure & Insider Sentiment")
-        st.write(sections_list[6] if len(sections_list) > 6 else "Module compilation pending...")
-        
-    with tab8:
-        st.markdown("### 📋 8. Summary Verdict & Key Risks")
-        st.write(sections_list[7] if len(sections_list) > 7 else "Module compilation pending...")
+    for i, title in enumerate(section_titles):
+        st.markdown(f"## {title}")
+        content = sections_list[i] if i < len(sections_list) else "Detailed qualitative breakdown compiling..."
+        st.write(content)
+        st.markdown("---")
 
-    st.markdown("---")
-    
     # --- PDF EXPORT ---
     pdf_buffer = io.BytesIO()
     build_pdf_report(pdf_buffer, m, data['ai_text'], data['ticker'])
     pdf_buffer.seek(0)
     
     st.download_button(
-        label="📥 Download Complete PDF Dossier (Full Layout Match)", 
+        label="📥 Download Official PDF Dossier (Full Layout Match)", 
         data=pdf_buffer, 
-        file_name=f"{data['ticker']}_Gatekeeper_Exhaustive_Dossier.pdf", 
+        file_name=f"{data['ticker']}_ASW_Stock_Ideas_Dossier.pdf", 
         mime="application/pdf",
         type="primary"
     )
