@@ -205,7 +205,7 @@ def run_predictive_pipeline(info, hist, fcf_history):
 # 3. MASTER DATA PIPELINE (yfinance + Ratios + Projections)
 # ============================================================
 @st.cache_data(ttl=1800)
-def fetch_stock_data(resolved_ticker, raw_input, uploaded_csv=None):
+def fetch_stock_data(resolved_ticker, raw_input):
     stock = yf.Ticker(resolved_ticker)
     hist = stock.history(period="1y")
     if hist.empty: raise ValueError(f"Could not find '{raw_input}'.")
@@ -227,67 +227,54 @@ def fetch_stock_data(resolved_ticker, raw_input, uploaded_csv=None):
 
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     fcf_hist = None
-    
-    if uploaded_csv is not None:
-        try:
-            csv_data = pd.read_csv(uploaded_csv)
-            if len(csv_data) >= 42: 
-                pnl_df = csv_data.iloc[7:19].dropna(how='all')
-                bs_df = csv_data.iloc[21:35].dropna(how='all')
-                cf_df = csv_data.iloc[35:43].dropna(how='all')
-                pnl_df.columns = ["Particulars", "Amount (₹ Cr)"]
-                bs_df.columns = ["Particulars", "Amount (₹ Cr)"]
-                cf_df.columns = ["Particulars", "Amount (₹ Cr)"]
-        except Exception: pass
 
-    if pnl_df.empty:
-        pnl_data, bs_data, cf_data = [], [], []
-        try:
-            fin = stock.financials
-            if fin is not None and not fin.empty:
-                col = fin.columns[0]
-                def get_f(keys):
-                    for k in keys:
-                        if k in fin.index and pd.notna(fin.loc[k, col]): return round(fin.loc[k, col] / 10000000, 2)
-                    return "—"
-                pnl_data = [
-                    {"Particulars": "Net Sales", "Amount (₹ Cr)": get_f(['Total Revenue', 'Operating Revenue'])},
-                    {"Particulars": "Total Expenditure", "Amount (₹ Cr)": get_f(['Total Expenses', 'Operating Expense'])},
-                    {"Particulars": "Operating Profit", "Amount (₹ Cr)": get_f(['Operating Income', 'EBIT'])},
-                    {"Particulars": "Net Profit", "Amount (₹ Cr)": get_f(['Net Income'])}
-                ]
-                pnl_df = pd.DataFrame(pnl_data)
+    pnl_data, bs_data, cf_data = [], [], []
+    try:
+        fin = stock.financials
+        if fin is not None and not fin.empty:
+            col = fin.columns[0]
+            def get_f(keys):
+                for k in keys:
+                    if k in fin.index and pd.notna(fin.loc[k, col]): return round(fin.loc[k, col] / 10000000, 2)
+                return "—"
+            pnl_data = [
+                {"Particulars": "Net Sales", "Amount (₹ Cr)": get_f(['Total Revenue', 'Operating Revenue'])},
+                {"Particulars": "Total Expenditure", "Amount (₹ Cr)": get_f(['Total Expenses', 'Operating Expense'])},
+                {"Particulars": "Operating Profit", "Amount (₹ Cr)": get_f(['Operating Income', 'EBIT'])},
+                {"Particulars": "Net Profit", "Amount (₹ Cr)": get_f(['Net Income'])}
+            ]
+            pnl_df = pd.DataFrame(pnl_data)
 
-            bs = stock.balance_sheet
-            if bs is not None and not bs.empty:
-                col = bs.columns[0]
-                def get_b(keys):
-                    for k in keys:
-                        if k in bs.index and pd.notna(bs.loc[k, col]): return round(bs.loc[k, col] / 10000000, 2)
-                    return "—"
-                bs_data = [
-                    {"Particulars": "Share Capital", "Amount (₹ Cr)": get_b(['Common Stock', 'Capital Stock'])},
-                    {"Particulars": "Total Reserves", "Amount (₹ Cr)": get_b(['Retained Earnings', 'Total Stockholder Equity'])},
-                    {"Particulars": "Borrowings", "Amount (₹ Cr)": get_b(['Long Term Debt', 'Total Debt'])},
-                    {"Particulars": "Total Liabilities", "Amount (₹ Cr)": get_b(['Total Liabilities Net Minority Interest'])},
-                    {"Particulars": "Total Assets", "Amount (₹ Cr)": get_b(['Total Assets'])}
-                ]
-                bs_df = pd.DataFrame(bs_data)
+        bs = stock.balance_sheet
+        if bs is not None and not bs.empty:
+            col = bs.columns[0]
+            def get_b(keys):
+                for k in keys:
+                    if k in bs.index and pd.notna(bs.loc[k, col]): return round(bs.loc[k, col] / 10000000, 2)
+                return "—"
+            bs_data = [
+                {"Particulars": "Share Capital", "Amount (₹ Cr)": get_b(['Common Stock', 'Capital Stock'])},
+                {"Particulars": "Total Reserves", "Amount (₹ Cr)": get_b(['Retained Earnings', 'Total Stockholder Equity'])},
+                {"Particulars": "Borrowings", "Amount (₹ Cr)": get_b(['Long Term Debt', 'Total Debt'])},
+                {"Particulars": "Total Liabilities", "Amount (₹ Cr)": get_b(['Total Liabilities Net Minority Interest'])},
+                {"Particulars": "Total Assets", "Amount (₹ Cr)": get_b(['Total Assets'])}
+            ]
+            bs_df = pd.DataFrame(bs_data)
 
-            cf = stock.cashflow
-            if cf is not None and not cf.empty:
-                col = cf.columns[0]
-                def get_c(keys):
-                    for k in keys:
-                        if k in cf.index and pd.notna(cf.loc[k, col]): return round(cf.loc[k, col] / 10000000, 2)
-                    return "—"
-                cf_data = [
-                    {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": get_c(['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])},
-                    {"Particulars": "Net Cash Flow", "Amount (₹ Cr)": get_c(['Changes In Cash', 'End Cash Position'])}
-                ]
-                cf_df = pd.DataFrame(cf_data)
-                if 'Free Cash Flow' in cf.index: fcf_hist = cf.loc['Free Cash Flow'].dropna()
-        except Exception: pass
+        cf = stock.cashflow
+        if cf is not None and not cf.empty:
+            col = cf.columns[0]
+            def get_c(keys):
+                for k in keys:
+                    if k in cf.index and pd.notna(cf.loc[k, col]): return round(cf.loc[k, col] / 10000000, 2)
+                return "—"
+            cf_data = [
+                {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": get_c(['Operating Cash Flow', 'Cash Flow From Continuing Operating Activities'])},
+                {"Particulars": "Net Cash Flow", "Amount (₹ Cr)": get_c(['Changes In Cash', 'End Cash Position'])}
+            ]
+            cf_df = pd.DataFrame(cf_data)
+            if 'Free Cash Flow' in cf.index: fcf_hist = cf.loc['Free Cash Flow'].dropna()
+    except Exception: pass
 
     pat_qoq, pat_yoy, net_margin_final = "N/A", "N/A", "N/A"
     rev_cagr, earn_cagr = 0.12, 0.15 
@@ -391,6 +378,12 @@ def fetch_stock_data(resolved_ticker, raw_input, uploaded_csv=None):
 # ============================================================
 # 4. VISUAL CHARTS & CHECKLISTS
 # ============================================================
+def price_history_chart(hist_df, currency):
+    fig = go.Figure()
+    fig.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', line=dict(color=BLUE, width=1.5), fill='tozeroy', fillcolor='rgba(56,189,248,0.08)', name='Price'))
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=20, l=10, r=10), xaxis=dict(showgrid=False, title=None), yaxis=dict(showgrid=False, title=currency))
+    return fig
+
 def projection_chart(hist_df, target_price):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', line=dict(color=BLUE, width=2), name='Historical Price'))
@@ -569,6 +562,27 @@ def generate_comprehensive_report(metrics, ticker):
     pmt = f"Target: {metrics['name']} ({ticker}). Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. System Verdict: {metrics['predictive']['verdict']}."
     return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
+def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor('#2B6CB0'))
+    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
+    
+    clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_")]
+    rating_color = GREEN if "BUY" in rating_val else ORANGE if "OBSERVE" in rating_val else RED
+    
+    story = [
+        Paragraph("Financial Intelligence App — Research Division", title_style),
+        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Verdict: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
+        Spacer(1, 10)
+    ]
+
+    for line in clean_lines:
+        story.append(Paragraph(line, body_style))
+        story.append(Spacer(1, 3))
+
+    doc.build(story)
+
 # ============================================================
 # 6. APP UI & NAVIGATION
 # ============================================================
@@ -582,14 +596,13 @@ col_input, col_btn = st.columns([4, 1])
 with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
-uploaded_csv = None
 if generate_clicked and stock_input.strip():
     with st.spinner('Compiling cascade metrics and quantitative models...'):
         try:
             rt = resolve_name_to_ticker(stock_input)
             
             # Fetch the data
-            metrics = fetch_stock_data(rt, stock_input, uploaded_csv)
+            metrics = fetch_stock_data(rt, stock_input)
             final_ticker = metrics.pop('working_ticker')
             
             # Generate the AI report
@@ -598,7 +611,7 @@ if generate_clicked and stock_input.strip():
             sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
             if len(sections_list) > 8: sections_list = sections_list[-8:]
             
-            # Save to State properly mapping "metrics", "ai_text", etc.
+            # Save to State
             st.session_state.report_data = {
                 "metrics": metrics,
                 "ai_text": ai_text,
@@ -812,3 +825,18 @@ if st.session_state.report_data:
         styled_verdict = narrative_for(7)
         for w, c in [("STRONG BUY", GREEN), ("BUY", GREEN), ("OBSERVE", ORANGE), ("DON'T BUY", RED)]: styled_verdict = re.sub(rf'(?i)(?<!STRONG )\b{w}\b', f'<span style="color:{c}; font-weight:bold;">{w}</span>', styled_verdict)
         st.markdown(f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled_verdict}</p>", unsafe_allow_html=True)
+        
+    st.markdown("---")
+
+    # ---------- PDF EXPORT ----------
+    pdf_buffer = io.BytesIO()
+    build_pdf_report(pdf_buffer, m, data['ai_text'], ticker, current_rating)
+    pdf_buffer.seek(0)
+
+    st.download_button(
+        label="📥 Download Official PDF Dossier",
+        data=pdf_buffer,
+        file_name=f"{ticker}_Terminal_Dossier.pdf",
+        mime="application/pdf",
+        type="primary"
+    )
