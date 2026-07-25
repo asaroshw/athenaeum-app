@@ -280,10 +280,21 @@ def fetch_stock_data(resolved_ticker, raw_input):
     info = stock.info
     current_price = info.get("currentPrice", round(hist['Close'].iloc[-1], 2))
 
+    # Define exchange string
+    exchange_str = "NSE" if resolved_ticker.endswith('.NS') else "BSE" if resolved_ticker.endswith('.BO') else "N/A"
+
     screener = fetch_screener(resolved_ticker)
     finology = fetch_finology(resolved_ticker)
     google = fetch_google_finance(resolved_ticker)
-    yahoo = {"pe_ratio": info.get("trailingPE"), "dividend_yield": info.get("dividendYield"), "roe": info.get("returnOnEquity"), "roce_roa": info.get("returnOnAssets"), "market_cap": info.get("marketCap"), "book_value": info.get("bookValue"), "face_value": info.get("faceValue")}
+    yahoo = {
+        "pe_ratio": info.get("trailingPE"), 
+        "dividend_yield": info.get("dividendYield"), 
+        "roe": info.get("returnOnEquity"), 
+        "roce_roa": info.get("returnOnAssets"), 
+        "market_cap": info.get("marketCap"), 
+        "book_value": info.get("bookValue"), 
+        "face_value": info.get("faceValue")
+    }
 
     def get_val(key):
         for s in [screener, finology, google, yahoo]:
@@ -404,7 +415,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "pnl_df": pd.DataFrame(pnl_data), "bs_df": pd.DataFrame(bs_data), "cf_df": pd.DataFrame(cf_data),
         "predictive": pred_data, "fair_value": pred_data['target_price']
     }
-
 # ============================================================
 # 5. CHARTS & UI
 # ============================================================
