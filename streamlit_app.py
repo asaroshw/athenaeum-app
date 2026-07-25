@@ -380,9 +380,12 @@ if st.session_state.report_data:
     d = st.session_state.report_data
     m = d['metrics']
     
-    rc = GREEN if "BUY" in d['rating'] else ORANGE if "OBSERVE" in d['rating'] else RED
+    # Safely fetch the rating, defaulting to "EVALUATED" if it's an old session
+    current_rating = d.get('rating', 'EVALUATED')
+    
+    rc = GREEN if "BUY" in current_rating else ORANGE if "OBSERVE" in current_rating else RED
     st.markdown(f"## {m['name']} ({d['ticker']})")
-    st.markdown(f"#### AI Rating: <span style='color:{rc}; font-weight:bold;'>{d['rating']}</span>", unsafe_allow_html=True)
+    st.markdown(f"#### AI Rating: <span style='color:{rc}; font-weight:bold;'>{current_rating}</span>", unsafe_allow_html=True)
     st.markdown("---")
     
     c1, c2 = st.columns([2, 1])
