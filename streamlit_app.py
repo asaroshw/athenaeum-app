@@ -467,7 +467,7 @@ def generate_comprehensive_report(metrics, ticker):
     """
 
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
+        model='gemini-3.5-flash-lite',
         contents=user_prompt,
         config=types.GenerateContentConfig(system_instruction=system_instruction, temperature=0.2)
     )
