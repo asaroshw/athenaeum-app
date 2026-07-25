@@ -364,46 +364,39 @@ def fetch_stock_data(resolved_ticker, raw_input):
     pat_qoq, pat_yoy = "N/A", "N/A"
     net_margin_calculated = None
     net_income_latest = None
-    shares_out = info.get("sharesOutstanding")
     fcf_history = None
 
-    pnl_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
-    bs_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
-    cf_df_clean = pd.DataFrame(columns=["Particulars", "Amount (₹ Cr)"])
+    pnl_data = []
+    bs_data = []
+    cf_data = []
 
     try:
         fin = stock.financials
         if fin is not None and not fin.empty:
             col_latest = fin.columns[0]
-            pnl_rows = []
             for row_name in ['Total Revenue', 'Operating Income', 'Gross Profit', 'Operating Expense', 'EBIT', 'Interest Expense', 'Tax Provision', 'Net Income']:
                 if row_name in fin.index:
                     val = fin.loc[row_name, col_latest]
                     if pd.notna(val):
-                        pnl_rows.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-            if pnl_rows: pnl_df_clean = pd.DataFrame(pnl_rows)
+                        pnl_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
 
         bs = stock.balance_sheet
         if bs is not None and not bs.empty:
             col_latest = bs.columns[0]
-            bs_rows = []
             for row_name in ['Common Stock Equity', 'Retained Earnings', 'Total Debt', 'Current Liabilities', 'Total Liabilities', 'Cash And Cash Equivalents', 'Inventory', 'Current Assets', 'Total Assets']:
                 if row_name in bs.index:
                     val = bs.loc[row_name, col_latest]
                     if pd.notna(val):
-                        bs_rows.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-            if bs_rows: bs_df_clean = pd.DataFrame(bs_rows)
+                        bs_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
 
         cf = stock.cashflow
         if cf is not None and not cf.empty:
             col_latest = cf.columns[0]
-            cf_rows = []
             for row_name in ['Operating Cash Flow', 'Investing Cash Flow', 'Financing Cash Flow', 'Free Cash Flow']:
                 if row_name in cf.index:
                     val = cf.loc[row_name, col_latest]
                     if pd.notna(val):
-                        cf_rows.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
-            if cf_rows: cf_df_clean = pd.DataFrame(cf_rows)
+                        cf_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2)})
             
             if 'Free Cash Flow' in cf.index:
                 fcf_history = cf.loc['Free Cash Flow'].dropna()
@@ -426,13 +419,20 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else: net_margin_final = "N/A"
 
     mcap_float = to_float(mcap_raw)
+    
+    # ROBUST P/E CALCULATION FALLBACK
     if not is_valid_metric(pe_raw):
         eps = info.get("trailingEps") or info.get("forwardEps")
-        if not eps and net_income_latest and shares_out and shares_out > 0:
-            eps = net_income_latest / shares_out
-        if eps and eps > 0 and current_price: pe_raw = round(current_price / eps, 2)
-        elif mcap_float and net_income_latest and net_income_latest > 0: pe_raw = round(mcap_float / net_income_latest, 2)
-        else: pe_raw = "N/A"
+        if eps and eps > 0: 
+            pe_raw = round(current_price / eps, 2)
+        elif mcap_float and pnl_data:
+            try:
+                np_val = next((to_float(item['Amount (₹ Cr)']) for item in pnl_data if 'Net Profit' in item['Particulars'] or 'Net Income' in item['Particulars']), None)
+                if np_val and np_val > 0:
+                    pe_raw = round((mcap_float / 10000000) / np_val, 2)
+            except Exception: pass
+        if not is_valid_metric(pe_raw): 
+            pe_raw = "N/A"
 
     if not is_valid_metric(dy_raw):
         div_rate = info.get("dividendRate")
@@ -441,6 +441,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     if not is_valid_metric(bv_raw):
         total_eq = info.get("bookValue")
+        shares_out = info.get("sharesOutstanding")
         if not total_eq:
             try:
                 bs = stock.balance_sheet
@@ -484,8 +485,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "dividend_yield": dividend_formatted,
         "pat_qoq": f"{pat_qoq}%" if is_valid_metric(pat_qoq) else "N/A",
         "pat_yoy": f"{pat_yoy}%" if is_valid_metric(pat_yoy) else "N/A",
+        "earnings_growth_est": f"{round(info.get('earningsGrowth', 0) * 100, 2)}%" if info.get('earningsGrowth') else "N/A",
+        "revenue_growth_est": f"{round(info.get('revenueGrowth', 0) * 100, 2)}%" if info.get('revenueGrowth') else "N/A",
         "rsi": calculate_rsi(hist, 14),
-        "debt_to_equity": round(info["debtToEquity"]/100, 2) if info.get("debtToEquity") else "N/A",
+        "debt_to_equity": round(info.get("debtToEquity", 0)/100, 2) if info.get("debtToEquity") else "N/A",
         "net_margin": net_margin_final,
         "market_cap": mcap_raw,
         "book_value": bv_raw,
@@ -506,9 +509,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": "₹",
         "history": hist.reset_index()[["Date", "Close"]],
         "shareholding": {"Promoters": round(insider_h, 2), "Institutions": round(inst_h, 2), "Public": round(public_h, 2)},
-        "pnl_df": pnl_df_clean,
-        "bs_df": bs_df_clean,
-        "cf_df": cf_df_clean,
+        "pnl_df": pd.DataFrame(pnl_data),
+        "bs_df": pd.DataFrame(bs_data),
+        "cf_df": pd.DataFrame(cf_data),
         "predictive": predictive_data
     }
     
@@ -534,10 +537,11 @@ def price_history_chart(hist_df, currency):
 
 def fair_value_bar(price, fv, currency):
     fig = go.Figure()
-    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
-    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
+    # Updated to vertical orientation based on prompt request
+    fig.add_trace(go.Bar(x=['Current Price'], y=[price], orientation='v', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
+    fig.add_trace(go.Bar(x=['Fair Value'], y=[fv], orientation='v', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
     diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
-    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=170, margin=dict(t=10, b=10, l=10, r=10), showlegend=False, xaxis=dict(showgrid=False, title=currency))
+    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=350, margin=dict(t=20, b=20, l=10, r=10), showlegend=False, yaxis=dict(showgrid=False, title=currency))
     return fig, diff_pct
 
 def ownership_donut(shareholding):
@@ -709,7 +713,6 @@ col_input, col_btn = st.columns([4, 1])
 with col_input:
     stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn:
-    # Action button changed to "Analyse" per user request
     generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
 if generate_clicked:
@@ -880,6 +883,21 @@ if st.session_state.report_data:
     # ---------- 2. FUTURE GROWTH ----------
     elif section == "2. Future Growth":
         st.markdown("### 2. Future Growth & Outlook")
+        
+        # New columns representing missing Future Growth data based on typical analyst parameters
+        fg1, fg2, fg3, fg4 = st.columns(4)
+        with fg1:
+            custom_metric("Projected Target", f"₹ {pred['target_price']}" if 'target_price' in pred else "N/A")
+        with fg2:
+            custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
+        with fg3:
+            custom_metric("Est. Earnings Growth", m.get('earnings_growth_est', 'N/A'))
+        with fg4:
+            custom_metric("Est. Revenue Growth", m.get('revenue_growth_est', 'N/A'))
+            
+        st.plotly_chart(projection_chart(m['history'], pred['target_price']), use_container_width=True)
+        st.caption("Dashed line represents DCF intrinsic value target over time horizon.")
+        
         card("Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     # ---------- 3. PAST PERFORMANCE ----------
