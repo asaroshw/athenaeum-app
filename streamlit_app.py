@@ -70,7 +70,7 @@ st.markdown(f"""
 # 2. HELPERS & INDIAN CURRENCY FORMATTER
 # ============================================================
 def to_float(val):
-    if val in [None, "N/A", "", "None"]: return None
+    if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
     if isinstance(val, (int, float)): return float(val)
     try: return float(str(val).replace('%', '').replace('x', '').replace('₹', '').replace(',', '').strip())
     except Exception: return None
@@ -121,7 +121,8 @@ def fetch_screener(ticker):
     urls = [f"https://www.screener.in/company/{clean_ticker}/consolidated/", f"https://www.screener.in/company/{clean_ticker}/"]
     headers = {
         'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5'
     }
     metrics = {}
     for url in urls:
@@ -142,6 +143,8 @@ def fetch_screener(ticker):
                             elif 'roce' in n: metrics['roce_roa'] = v
                             elif 'roe' in n: metrics['roe'] = v
                             elif 'dividend yield' in n: metrics['dividend_yield'] = v
+                            elif 'book value' in n: metrics['book_value'] = v
+                            elif 'face value' in n: metrics['face_value'] = v
                 break
         except Exception: continue
     return metrics
@@ -190,7 +193,7 @@ def resolve_cascade_metric(key, screener, angel, google, yahoo, default="N/A"):
     return default
 
 # ============================================================
-# 4. DATA FETCHING (Master Fetcher with Short-Circuiting Cascade)
+# 4. DATA FETCHING (Master Fetcher with Backend Calculated Fallbacks)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -210,7 +213,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "dividend_yield": info.get("dividendYield"),
         "roe": info.get("returnOnEquity"),
         "roce_roa": info.get("returnOnAssets"),
-        "market_cap": info.get("marketCap")
+        "market_cap": info.get("marketCap"),
+        "book_value": info.get("bookValue"),
+        "face_value": info.get("faceValue")
     }
 
     # 2. Resolve Cascade (Screener -> Angel -> Google -> Yahoo)
@@ -219,6 +224,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     roe_raw = resolve_cascade_metric('roe', screener_data, angel_data, google_data, yahoo_data)
     roa_raw = resolve_cascade_metric('roce_roa', screener_data, angel_data, google_data, yahoo_data)
     mcap_raw = resolve_cascade_metric('market_cap', screener_data, angel_data, google_data, yahoo_data)
+    bv_raw = resolve_cascade_metric('book_value', screener_data, angel_data, google_data, yahoo_data)
+    fv_raw = resolve_cascade_metric('face_value', screener_data, angel_data, google_data, yahoo_data)
 
     if dy_raw != "N/A" and isinstance(dy_raw, float): dy_raw = round(dy_raw * 100, 2)
     if roe_raw != "N/A" and isinstance(roe_raw, float): roe_raw = round(roe_raw * 100, 2)
@@ -226,16 +233,23 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     pat_qoq, pat_yoy = "N/A", "N/A"
     net_margin_calculated = None
+    net_income_latest = None
+    total_rev_latest = None
+    shares_out = info.get("sharesOutstanding")
+
     try:
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             net_inc = q_fin.loc['Net Income'].dropna()
+            if len(net_inc) > 0:
+                net_income_latest = net_inc.iloc[0]
             if len(net_inc) >= 2 and net_inc.iloc[1] != 0: pat_qoq = round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)
             if len(net_inc) >= 5 and net_inc.iloc[4] != 0: pat_yoy = round(((net_inc.iloc[0] - net_inc.iloc[4]) / abs(net_inc.iloc[4])) * 100, 2)
             
             if 'Total Revenue' in q_fin.index and len(net_inc) > 0:
                 tot_rev = q_fin.loc['Total Revenue'].dropna()
                 if len(tot_rev) > 0 and tot_rev.iloc[0] != 0:
+                    total_rev_latest = tot_rev.iloc[0]
                     net_margin_calculated = round((net_inc.iloc[0] / tot_rev.iloc[0]) * 100, 2)
     except Exception: pass
 
@@ -247,21 +261,47 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
+    # Backend Calculated Fallbacks for missing ratios using raw quantities
+    mcap_float = to_float(mcap_raw)
     if pe_raw in ["N/A", None, ""]:
         eps = info.get("trailingEps") or info.get("forwardEps")
+        if not eps and net_income_latest and shares_out and shares_out > 0:
+            eps = net_income_latest / shares_out
+        
         if eps and eps > 0 and current_price:
             pe_raw = round(current_price / eps, 2)
+        elif mcap_float and net_income_latest and net_income_latest > 0:
+            pe_raw = round(mcap_float / net_income_latest, 2)
 
     if dy_raw in ["N/A", None, ""]:
         div_rate = info.get("dividendRate")
         if div_rate and current_price:
             dy_raw = round((div_rate / current_price) * 100, 2)
+
+    if bv_raw in ["N/A", None, ""]:
+        total_eq = info.get("bookValue")
+        if not total_eq:
+            try:
+                bs = stock.balance_sheet
+                if bs is not None and not bs.empty:
+                    col = bs.columns[0]
+                    total_eq = bs.loc['Common Stock Equity', col] if 'Common Stock Equity' in bs.index else None
+            except Exception: pass
+        if total_eq and shares_out and shares_out > 0:
+            bv_raw = round(total_eq / shares_out, 2)
             
     peg_raw = info.get("pegRatio", "N/A")
     if peg_raw in ["N/A", None, ""] and pe_raw not in ["N/A", None] and pat_yoy != "N/A":
         pat_yoy_flt = to_float(pat_yoy)
         if pat_yoy_flt and pat_yoy_flt > 0:
             peg_raw = round(to_float(pe_raw) / pat_yoy_flt, 2)
+
+    # Dividend formatting string rule (Normal casing, no contradiction)
+    dy_float = to_float(dy_raw)
+    if dy_float is None or dy_float <= 0:
+        dividend_formatted = "Stock doesn't pay dividends"
+    else:
+        dividend_formatted = f"{dy_float}%"
 
     if resolved_ticker.endswith('.NS'): exchange_str = "NSE & BSE"
     elif resolved_ticker.endswith('.BO'): exchange_str = "BSE"
@@ -281,13 +321,17 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "peg_ratio": peg_raw,
         "roe": f"{roe_raw}%" if str(roe_raw).replace('.','',1).isdigit() else roe_raw,
         "roce_roa": f"{roa_raw}%" if str(roa_raw).replace('.','',1).isdigit() else roa_raw,
-        "dividend_yield": f"{dy_raw}%" if dy_raw != "N/A" and str(dy_raw) not in ["0", "0.0", "0.00"] else "STOCK DOESN'T PAY DIVIDENDS",
+        "dividend_yield": dividend_formatted,
         "pat_qoq": f"{pat_qoq}%" if pat_qoq != "N/A" else "N/A",
         "pat_yoy": f"{pat_yoy}%" if pat_yoy != "N/A" else "N/A",
         "rsi": calculate_rsi(hist, 14),
         "debt_to_equity": round(info["debtToEquity"]/100, 2) if info.get("debtToEquity") else "N/A",
         "net_margin": net_margin_final,
         "market_cap": mcap_raw,
+        "book_value": bv_raw,
+        "face_value": fv_raw,
+        "fifty_two_high": info.get("fiftyTwoWeekHigh", "N/A"),
+        "fifty_two_low": info.get("fiftyTwoWeekLow", "N/A"),
         "industry": info.get("industry", "N/A"),
         "sector": info.get("sector", "N/A"),
         "website": info.get("website"),
@@ -440,10 +484,13 @@ def financial_health_checks(m):
 
 def dividend_checks(m):
     dy_str = str(m.get('dividend_yield', ''))
-    is_paying = "DOESN'T PAY" not in dy_str.upper() and dy_str != "N/A"
+    is_paying = "doesn't pay" not in dy_str.lower() and dy_str != "N/A"
     dy = to_float(dy_str) if is_paying else 0.0
     
-    checks = [("Pays a Notable Dividend (>1.5%)", None if not is_paying else dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
+    if not is_paying:
+        checks = [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
+    else:
+        checks = [("Notable Dividend (>1.5%)", dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
     return checks
 
 def score_from_checks(checks):
@@ -719,6 +766,13 @@ if st.session_state.report_data:
         c3.metric("Dividend Yield", f"{m.get('dividend_yield')}")
         c4.metric("PAT Growth (YoY)", f"{m.get('pat_yoy')}")
         c4.metric("PAT Growth (QoQ)", f"{m.get('pat_qoq')}")
+
+        # Extra Overview Row (Book Value, High/Low, Face Value)
+        sc1, sc2, sc3, sc4 = st.columns(4)
+        sc1.metric("Book Value", f"{m.get('currency','INR')} {m.get('book_value')}" if m.get('book_value') not in [None, "N/A"] else "N/A")
+        sc2.metric("52W High / Low", f"{m.get('currency','INR')} {m.get('fifty_two_high')} / {m.get('fifty_two_low')}" if m.get('fifty_two_high') != "N/A" else "N/A")
+        sc3.metric("Face Value", f"{m.get('currency','INR')} {m.get('face_value')}" if m.get('face_value') not in [None, "N/A"] else "N/A")
+        sc4.metric("Exchange", f"{m.get('exchange', 'N/A')}")
 
         summary = m.get('business_summary') or "Business summary not available for this ticker."
         card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>"
