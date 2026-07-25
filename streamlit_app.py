@@ -1,5 +1,8 @@
 import streamlit as st
 import yfinance as yf
+import pandas as pd
+import plotly.express as px
+import plotly.graph_objects as go
 import logging
 import re
 import io
@@ -11,31 +14,49 @@ from reportlab.lib import colors
 from google import genai
 from google.genai import types
 
-# 1. Setup
+# 1. Setup & Configuration
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-st.set_page_config(page_title="ASW Stock Ideas", layout="wide")
+st.set_page_config(page_title="Gatekeeper - Stock Ideas & Screener", layout="wide")
 
-# 2. CORE LOGIC FUNCTIONS
+# API Keys from Secrets
+GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
+ANGEL_KEY = st.secrets.get("ANGEL_API_KEY", "WjBiiHX1")
+
+# 2. HELPER CALCULATIONS
+
+def calculate_rsi(df, window=14):
+    """Calculates 14-day Relative Strength Index (RSI)."""
+    if len(df) < window:
+        return "N/A"
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
+    
+    # Avoid division by zero
+    loss = loss.replace(0, 1e-10)
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return round(rsi.iloc[-1], 2)
+
+# 3. CORE LOGIC FUNCTIONS
 
 def resolve_name_to_ticker(stock_input):
     """Uses Yahoo's native search API, strictly filtering for Indian Stocks."""
     stock_str = str(stock_input).strip()
     
-    # Catch pure numeric inputs (e.g., 505685 for Taparia Tools)
     if stock_str.isdigit():
         return stock_str + '.BO'
         
     try:
         url = f"https://query2.finance.yahoo.com/v1/finance/search?q={stock_str}"
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
             'Accept': 'application/json'
         }
         res = requests.get(url, headers=headers, timeout=5)
         if res.status_code == 200:
             data = res.json()
             if 'quotes' in data:
-                # STRICT FILTER: Only grab the first result that is specifically on the NSE or BSE
                 for q in data['quotes']:
                     sym = q.get('symbol', '').upper()
                     if sym.endswith('.NS') or sym.endswith('.BO'):
@@ -43,38 +64,80 @@ def resolve_name_to_ticker(stock_input):
     except Exception:
         pass
         
-    # Fallback: Strip spaces and guess it's an Indian stock (NSE)
     upper_input = stock_str.upper().replace(" ", "")
     if not upper_input.endswith(('.NS', '.BO')):
          return upper_input + '.NS'
     return upper_input
 
+@st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
+    """Fetches full stock profile, price history, ratios, and news."""
     stock = yf.Ticker(resolved_ticker)
     
-    # ROBUST CHECK: Use historical data to verify the stock actually exists on the exchange
-    hist = stock.history(period="1d")
+    # Fetch 1 year historical data for RSI and price checks
+    hist = stock.history(period="1y")
     if hist.empty:
         raise ValueError(f"Could not find '{raw_input}' on the NSE or BSE. Please check the spelling.")
         
     info = stock.info
-    
-    # Fallback for price if Yahoo's info dictionary randomly fails
     price = info.get("currentPrice")
     if price is None:
         price = round(hist['Close'].iloc[-1], 2)
         
+    # Valuation & Technical Indicators
+    rsi_val = calculate_rsi(hist, 14)
+    peg_ratio = info.get("pegRatio", "N/A")
+    roe = info.get("returnOnEquity", "N/A")
+    if roe != "N/A": roe = f"{round(roe * 100, 2)}%"
+    
+    roa = info.get("returnOnAssets", "N/A")
+    if roa != "N/A": roa = f"{round(roa * 100, 2)}%"
+    
+    # Quarterly PAT (Net Income) Growth: QoQ & YoY
+    pat_qoq, pat_yoy = "N/A", "N/A"
+    try:
+        q_fin = stock.quarterly_financials
+        if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
+            net_inc = q_fin.loc['Net Income'].dropna()
+            if len(net_inc) >= 2 and net_inc.iloc[1] != 0:
+                pat_qoq = f"{round(((net_inc.iloc[0] - net_inc.iloc[1]) / abs(net_inc.iloc[1])) * 100, 2)}%"
+            if len(net_inc) >= 4 and net_inc.iloc[3] != 0:
+                pat_yoy = f"{round(((net_inc.iloc[0] - net_inc.iloc[3]) / abs(net_inc.iloc[3])) * 100, 2)}%"
+    except Exception:
+        pass
+
+    # Shareholding Breakdown
+    insider_h = (info.get("heldPercentInsiders") or 0) * 100
+    inst_h = (info.get("heldPercentInstitutions") or 0) * 100
+    public_h = max(0, 100 - (insider_h + inst_h))
+    
+    shareholding = {
+        "Promoters/Insiders": round(insider_h, 2),
+        "Institutions (FII/DII)": round(inst_h, 2),
+        "Public": round(public_h, 2)
+    }
+
+    # Core Metrics Dictionary
     metrics = {
         "name": info.get("longName", resolved_ticker),
         "price": price,
         "pe_ratio": info.get("trailingPE", "N/A"),
+        "peg_ratio": peg_ratio,
+        "roe": roe,
+        "roce_roa": roa,
+        "pat_qoq": pat_qoq,
+        "pat_yoy": pat_yoy,
+        "rsi": rsi_val,
         "debt_to_equity": info.get("debtToEquity", "N/A"),
         "net_margin": info.get("profitMargins", "N/A"),
         "market_cap": info.get("marketCap", "N/A"),
+        "industry": info.get("industry", "N/A"),
+        "shareholding": shareholding,
         "recent_news": "",
         "working_ticker": resolved_ticker
     }
     
+    # News Headlines
     try:
         news_items = stock.news
         if news_items:
@@ -85,6 +148,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     except Exception:
         metrics["recent_news"] = "News fetching unavailable."
     
+    # Format Debt and Margin
     if metrics["debt_to_equity"] != "N/A": 
         try: metrics["debt_to_equity"] = round(metrics["debt_to_equity"] / 100, 2)
         except: metrics["debt_to_equity"] = "N/A"
@@ -92,7 +156,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if metrics["net_margin"] != "N/A": 
         try: metrics["net_margin"] = f"{round(metrics['net_margin'] * 100, 2)}%"
         except: metrics["net_margin"] = "N/A"
-    
+        
+    # Net Income and Debt Trends
     try:
         fin = stock.financials
         if fin is not None and not fin.empty and 'Net Income' in fin.index:
@@ -114,7 +179,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     return metrics
 
 def generate_report_content(stock_name, metrics, ticker):
-    client = genai.Client(api_key=st.secrets["API_KEY"])
+    """Generates institutional qualitative AI analysis using Gemini."""
+    client = genai.Client(api_key=GEMINI_KEY)
     
     system_instruction = """
     Act as an automated, professional-grade equity research assistant built in the style of an institutional advisory report. You are a ruthless analyst evaluating 360-degree risk.
@@ -134,13 +200,13 @@ def generate_report_content(stock_name, metrics, ticker):
     ACTIONABLE VERDICT
     
     ANALYST RULES (MACRO & RISKS):
-    1. Read the provided "Recent Headlines" parameter. If the news shows macro headwinds, supply chain risks, regulatory threats, or commodity shocks, you MUST explicitly evaluate them.
-    2. OVERRIDE RULE: If severe external threats exist in the headlines or margins are razor-thin, you MUST downgrade the rating (e.g., to HOLD, DON'T BUY, or SELL), even if historical financial momentum looks excellent.
+    1. Read the provided parameters including PEG ratio, RSI, and Recent Headlines. Evaluate technical entry points and financial valuations against macro headwinds.
+    2. OVERRIDE RULE: If severe external threats exist in headlines or margins are razor-thin, downgrade the rating (e.g., to HOLD, DON'T BUY, or SELL), even if historical momentum looks good.
     
     VERDICT FORMATTING RULE:
-    Under the ACTIONABLE VERDICT header, you must output exactly two things:
+    Under the ACTIONABLE VERDICT header, output exactly two things:
     Line 1: The DYNAMIC_RATING itself in all caps (e.g., HOLD).
-    Line 2: The detailed explanation of the verdict, explicitly weighing the financials against the recent headlines.
+    Line 2: The detailed explanation of the verdict, explicitly weighing quantitative numbers against recent news.
     """
     
     user_prompt = f"""
@@ -149,11 +215,15 @@ def generate_report_content(stock_name, metrics, ticker):
     Ticker: {ticker}
     Current Price: INR {metrics['price']}
     TTM P/E Ratio: {metrics['pe_ratio']}
+    PEG Ratio: {metrics['peg_ratio']}
+    ROE: {metrics['roe']} | ROA/ROCE Proxy: {metrics['roce_roa']}
+    14-Day RSI: {metrics['rsi']}
+    PAT Growth YoY: {metrics['pat_yoy']} | QoQ: {metrics['pat_qoq']}
     Debt-to-Equity Ratio: {metrics['debt_to_equity']}
     Net Profit Margin: {metrics['net_margin']}
     Market Cap: INR {metrics['market_cap']}
     
-    HISTORICAL MOMENTUM METRICS:
+    HISTORICAL TRENDS:
     Net Income Trend: {metrics['net_income_trend']}
     Debt Trend: {metrics['debt_trend']}
     
@@ -162,7 +232,7 @@ def generate_report_content(stock_name, metrics, ticker):
     """
     
     response = client.models.generate_content(
-        model='gemini-3.1-flash-lite', 
+        model='gemini-2.5-flash', 
         contents=user_prompt, 
         config=types.GenerateContentConfig(
             system_instruction=system_instruction, 
@@ -172,6 +242,7 @@ def generate_report_content(stock_name, metrics, ticker):
     return response.text
 
 def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
+    """Builds formal institutional PDF using ReportLab."""
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=45, leftMargin=45, topMargin=45, bottomMargin=45)
     styles = getSampleStyleSheet()
     
@@ -197,8 +268,8 @@ def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
         elif line_str: clean_lines.append(line_str)
                 
     story = [
-        Paragraph("ASW Stock Ideas", title_style), 
-        Paragraph("Automated Equity Research Report — Institutional Series", subtitle_style),
+        Paragraph("Gatekeeper Research", title_style), 
+        Paragraph("Automated Equity & Quantitative Report — Institutional Series", subtitle_style),
         Spacer(1, 15)
     ]
     
@@ -208,9 +279,9 @@ def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
     
     data = [
         [Paragraph("<b>Company:</b>", table_text), Paragraph(str(metrics['name']), table_val), Paragraph("<b>Category:</b>", table_text), Paragraph(sector_val, table_val)],
-        [Paragraph("<b>Current Price:</b>", table_text), Paragraph(f"INR {metrics['price']}", table_val), Paragraph("<b>Time Horizon:</b>", table_text), Paragraph(duration_val, table_val)],
-        [Paragraph("<b>TTM P/E Ratio:</b>", table_text), Paragraph(f"{metrics['pe_ratio']}x", table_val), Paragraph("<b>Debt-to-Equity:</b>", table_text), Paragraph(str(metrics['debt_to_equity']), table_val)],
-        [Paragraph("<b>Net Margin:</b>", table_text), Paragraph(str(metrics['net_margin']), table_val), Paragraph("<b>Verdict Rating:</b>", table_text), Paragraph(grid_rating_display, table_val)]
+        [Paragraph("<b>Price:</b>", table_text), Paragraph(f"INR {metrics['price']}", table_val), Paragraph("<b>Time Horizon:</b>", table_text), Paragraph(duration_val, table_val)],
+        [Paragraph("<b>P/E | PEG:</b>", table_text), Paragraph(f"{metrics['pe_ratio']}x | {metrics['peg_ratio']}", table_val), Paragraph("<b>ROE | ROA:</b>", table_text), Paragraph(f"{metrics['roe']} | {metrics['roce_roa']}", table_val)],
+        [Paragraph("<b>PAT YoY Growth:</b>", table_text), Paragraph(str(metrics['pat_yoy']), table_val), Paragraph("<b>Verdict Rating:</b>", table_text), Paragraph(grid_rating_display, table_val)]
     ]
     
     t = Table(data, colWidths=[100, 160, 100, 160])
@@ -241,56 +312,113 @@ def build_pdf_report(pdf_buffer, stock_name, metrics, ai_text, ticker):
             
     doc.build(story)
 
-# 3. STREAMLIT INTERFACE
+# 4. STREAMLIT INTERFACE
+
 if 'report_data' not in st.session_state:
     st.session_state.report_data = None
 
-st.title("ASW Stock Ideas")
-stock_input = st.text_input("Enter Stock Name:")
+st.title("🛡️ Gatekeeper - Stock Screener & Research")
+st.caption("Quantitative Dashboard & Institutional AI Intelligence for NSE/BSE Stocks")
 
-if st.button("Generate Report"):
-    with st.spinner('Fetching Data & Analyzing Live News...'):
-        try:
-            # Look up the ticker invisibly using Yahoo's search bar
-            resolved_ticker = resolve_name_to_ticker(stock_input)
-            
-            # Fetch the data and the recent news
-            metrics = fetch_stock_data(resolved_ticker, stock_input)
-            
-            # Grab the final working ticker
-            final_ticker = metrics.pop('working_ticker')
-            
-            # Generate the report
-            ai_text = generate_report_content(stock_input, metrics, final_ticker)
-            st.session_state.report_data = {"metrics": metrics, "ai_text": ai_text, "stock": stock_input, "ticker": final_ticker}
-        except Exception as e:
-            st.error(f"Error: {e}")
+stock_input = st.text_input("Enter Stock Name or Ticker (e.g., Reliance, Tata Motors, 505685):")
+
+if st.button("Analyze Stock", type="primary"):
+    if not stock_input.strip():
+        st.warning("Please enter a valid stock name.")
+    else:
+        with st.spinner('Fetching quantitative metrics & analyzing live headlines...'):
+            try:
+                resolved_ticker = resolve_name_to_ticker(stock_input)
+                metrics = fetch_stock_data(resolved_ticker, stock_input)
+                final_ticker = metrics.pop('working_ticker')
+                
+                ai_text = generate_report_content(stock_input, metrics, final_ticker)
+                st.session_state.report_data = {
+                    "metrics": metrics, 
+                    "ai_text": ai_text, 
+                    "stock": stock_input, 
+                    "ticker": final_ticker
+                }
+            except Exception as e:
+                st.error(f"Error analyzing stock: {e}")
+
+# 5. DASHBOARD & DISPLAY
 
 if st.session_state.report_data:
     data = st.session_state.report_data
+    m = data['metrics']
     
-    st.success(f"Generated report for: **{data['ticker']}**")
+    st.success(f"Analysis Complete for: **{m['name']} ({data['ticker']})**")
     
-    st.subheader("Market Metrics")
-    st.table({
-        "Metric": ["Price", "P/E Ratio", "Debt/Equity", "Net Margin", "Market Cap"], 
-        "Value": [data['metrics']['price'], data['metrics']['pe_ratio'], data['metrics']['debt_to_equity'], data['metrics']['net_margin'], data['metrics']['market_cap']]
-    })
+    # --- QUANTITATIVE METRICS CARDS ---
+    st.subheader("📊 Quantitative Financial Dashboard")
+    
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Current Price", f"₹{m['price']}")
+    c1.metric("P/E Ratio", f"{m['pe_ratio']}x")
+    
+    c2.metric("PEG Ratio", f"{m['peg_ratio']}")
+    c2.metric("14-Day RSI", f"{m['rsi']}")
+    
+    c3.metric("ROE", f"{m['roe']}")
+    c3.metric("ROA / ROCE Proxy", f"{m['roce_roa']}")
+    
+    c4.metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
+    c4.metric("PAT Growth (QoQ)", f"{m['pat_qoq']}")
+
+    st.markdown("---")
+    
+    # --- CHARTS SECTION (SimplyWallSt / Finology Style) ---
+    col_chart1, col_chart2 = st.columns(2)
+    
+    with col_chart1:
+        st.markdown("### 🍰 Shareholding Pattern Split")
+        sh_data = m['shareholding']
+        if sum(sh_data.values()) > 0:
+            fig_pie = px.pie(
+                names=list(sh_data.keys()), 
+                values=list(sh_data.values()), 
+                hole=0.45,
+                color_discrete_sequence=px.colors.qualitative.Bold
+            )
+            fig_pie.update_layout(margin=dict(t=20, b=20, l=20, r=20))
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("Detailed shareholding breakdown unavailable for this stock.")
+
+    with col_chart2:
+        st.markdown(f"### 📈 Sector Valuation Benchmark ({m['industry']})")
+        pe_num = float(m['pe_ratio']) if m['pe_ratio'] != "N/A" else 0
+        peg_num = float(m['peg_ratio']) if m['peg_ratio'] != "N/A" else 0
+        
+        fig_bar = go.Figure(data=[
+            go.Bar(name='P/E Ratio', x=['Valuation Metrics'], y=[pe_num], marker_color='#2B6CB0'),
+            go.Bar(name='PEG Ratio (x10)', x=['Valuation Metrics'], y=[peg_num * 10], marker_color='#4299E1')
+        ])
+        fig_bar.update_layout(barmode='group', margin=dict(t=20, b=20, l=20, r=20))
+        st.plotly_chart(fig_bar, use_container_width=True)
+
+    st.markdown("---")
+    
+    # --- QUALITATIVE AI REPORT ---
+    st.subheader("📑 Institutional Advisory Analysis")
     
     display_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
     for h in ["COMPANY OVERVIEW", "FUNDAMENTAL & MOMENTUM ANALYSIS", "MACRO AND SECTOR CATALYSTS", "KEY RISKS", "ACTIONABLE VERDICT"]:
         display_text = display_text.replace(h, f"\n### {h}")
-    st.markdown("---")
+        
     st.markdown(display_text)
     st.markdown("---")
     
+    # --- PDF GENERATION & DOWNLOAD ---
     pdf_buffer = io.BytesIO()
-    build_pdf_report(pdf_buffer, data['stock'], data['metrics'], data['ai_text'], data['ticker'])
+    build_pdf_report(pdf_buffer, data['stock'], m, data['ai_text'], data['ticker'])
     pdf_buffer.seek(0)
     
     st.download_button(
-        label="📥 Download Official PDF Report", 
+        label="📥 Download Official Institutional PDF Report", 
         data=pdf_buffer, 
-        file_name=f"{data['ticker']}_ASW_Report.pdf", 
-        mime="application/pdf"
+        file_name=f"{data['ticker']}_Gatekeeper_Report.pdf", 
+        mime="application/pdf",
+        type="primary"
     )
