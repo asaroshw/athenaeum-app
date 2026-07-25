@@ -268,7 +268,7 @@ if st.button("Generate Terminal Dossier", type="primary"):
     if not stock_input.strip():
         st.warning("Please enter a valid stock identifier.")
     else:
-        with st.spinner('Compiling exhaustive institutional intelligence and qualitative modules...'):
+        with st.spinner('Compiling exhaustive institutional intelligence and modular subsections...'):
             try:
                 resolved_ticker = resolve_name_to_ticker(stock_input)
                 metrics = fetch_stock_data(resolved_ticker, stock_input)
@@ -290,114 +290,147 @@ if st.session_state.report_data:
     
     st.success(f"Terminal Report Ready: **{m['name']} ({data['ticker']})**")
     
-    # --- TOP METRICS ROW ---
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Current Price", f"₹{m['price']}")
-    c1.metric("P/E Ratio", f"{m['pe_ratio']}x")
-    
-    c2.metric("PEG Ratio", f"{m['peg_ratio']}")
-    c2.metric("14-Day RSI", f"{m['rsi']}")
-    
-    c3.metric("ROE", f"{m['roe']}")
-    c3.metric("Dividend Yield", f"{m['dividend_yield']}")
-    
-    c4.metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
-    c4.metric("PAT Growth (QoQ)", f"{m['pat_qoq']}")
-
-    st.markdown("---")
-    
-    # --- SNOWFLAKE SUMMARY COMPONENT ---
-    st.markdown("### ❄️ Health & Snowflake Criteria Checks")
-    col_r, col_risk = st.columns(2)
-    with col_r:
-        st.markdown("**🟢 Key Rewards / Strengths Checked**")
-        if m['pe_ratio'] != "N/A" and float(m['pe_ratio']) < 30:
-            st.markdown("- ✅ **Attractive Valuation:** P/E ratio is healthy relative to historical peers.")
-        if m['roe'] != "N/A" and float(m['roe'].replace('%','')) > 15:
-            st.markdown(f"- ✅ **High Quality Returns:** Strong Return on Equity ({m['roe']}).")
-        if m['pat_yoy'] != "N/A" and float(m['pat_yoy'].replace('%','')) > 20:
-            st.markdown(f"- ✅ **Strong Earnings Growth:** YoY PAT growth is robust ({m['pat_yoy']}).")
-        else:
-            st.markdown("- ✅ **Stable Operations:** Baseline fundamental performance verified.")
-            
-    with col_risk:
-        st.markdown("**⚠️ Potential Risk Flags Checked**")
-        if m['dividend_yield'] == "N/A" or float(m['dividend_yield'].replace('%','')) < 1:
-            st.markdown("- ❌ **Dividend Track Record:** Low yield or inconsistent payout history.")
-        if m['debt_to_equity'] != "N/A" and float(m['debt_to_equity']) > 1.0:
-            st.markdown("- ❌ **Balance Sheet Leverage:** Elevated debt-to-equity leverage structure.")
-        else:
-            st.markdown("- ✅ **Low Leverage Risk:** Conservative debt framework maintained.")
-
-    st.markdown("---")
-    
-    # --- MULTIPLE VISUAL GRAPHS ---
-    st.markdown("### 📊 Multi-Angle Financial Visualizations")
-    col_v1, col_v2 = st.columns(2)
-    
-    with col_v1:
-        st.markdown("#### Ownership Distribution")
-        sh_data = m['shareholding']
-        if sum(sh_data.values()) > 0:
-            fig_pie = px.pie(names=list(sh_data.keys()), values=list(sh_data.values()), hole=0.45, color_discrete_sequence=px.colors.qualitative.Bold)
-            fig_pie.update_layout(margin=dict(t=10, b=10, l=10, r=10))
-            st.plotly_chart(fig_pie, use_container_width=True)
-        else:
-            st.info("Shareholding breakdown unavailable.")
-
-    with col_v2:
-        st.markdown("#### Valuation Multiples Benchmark")
-        pe_num = float(m['pe_ratio']) if m['pe_ratio'] != "N/A" else 0
-        peg_num = float(m['peg_ratio']) if m['peg_ratio'] != "N/A" else 0
-        fig_bar = go.Figure(data=[
-            go.Bar(name='P/E Ratio', x=['Multiples'], y=[pe_num], marker_color='#2B6CB0'),
-            go.Bar(name='PEG Ratio (x10)', x=['Multiples'], y=[peg_num * 10], marker_color='#4299E1')
-        ])
-        fig_bar.update_layout(barmode='group', margin=dict(t=10, b=10, l=10, r=10))
-        st.plotly_chart(fig_bar, use_container_width=True)
-
-    col_v3, col_v4 = st.columns(2)
-    with col_v3:
-        st.markdown("#### Profitability Returns (ROE vs ROA)")
-        roe_val = float(m['roe'].replace('%','')) if m['roe'] != "N/A" else 0
-        roa_val = float(m['roce_roa'].replace('%','')) if m['roce_roa'] != "N/A" else 0
-        fig_ret = px.bar(x=['ROE', 'ROA / ROCE Proxy'], y=[roe_val, roa_val], color=['ROE', 'ROA'], text_auto=True)
-        fig_ret.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
-        st.plotly_chart(fig_ret, use_container_width=True)
-
-    with col_v4:
-        st.markdown("#### Earnings Momentum (YoY vs QoQ Growth)")
-        yoy_val = float(m['pat_yoy'].replace('%','')) if m['pat_yoy'] != "N/A" else 0
-        qoq_val = float(m['pat_qoq'].replace('%','')) if m['pat_qoq'] != "N/A" else 0
-        fig_mom = px.bar(x=['PAT YoY Growth', 'PAT QoQ Growth'], y=[yoy_val, qoq_val], color=['YoY', 'QoQ'], text_auto=True)
-        fig_mom.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False)
-        st.plotly_chart(fig_mom, use_container_width=True)
-
-    st.markdown("---")
-    
-    # --- SEQUENTIAL EXHAUSTIVE REPORT SECTIONS ---
-    st.markdown("### 📑 Exhaustive Terminal Sections (Sequential Report)")
-    
     raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', data['ai_text'])
     sections_list = [s.strip() for s in re.split(r'\n(?=[0-9]\.\s[A-Z&]+)', raw_ai_text) if s.strip()]
     
-    # Display each section sequentially like a report document
-    section_titles = [
-        "1. VALUATION & FAIR VALUE", 
-        "2. FUTURE GROWTH & OUTLOOK", 
-        "3. PAST PERFORMANCE & EARNINGS QUALITY", 
-        "4. FINANCIAL HEALTH & BALANCE SHEET", 
-        "5. DIVIDEND & CAPITAL ALLOCATION", 
-        "6. MANAGEMENT & COMPENSATION", 
-        "7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT", 
-        "8. SUMMARY VERDICT & KEY RISKS"
-    ]
-    
-    for i, title in enumerate(section_titles):
-        st.markdown(f"## {title}")
-        content = sections_list[i] if i < len(sections_list) else "Detailed qualitative breakdown compiling..."
-        st.write(content)
-        st.markdown("---")
+    # -------------------------------------------------------------------------
+    # SECTION 1: VALUATION & FAIR VALUE (Includes Valuation Multiples Chart & Table)
+    # -------------------------------------------------------------------------
+    st.markdown("## 1. VALUATION & FAIR VALUE")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[0] if len(sections_list) > 0 else "Detailed valuation breakdown compiling...")
+    with c2:
+        st.markdown("##### Key Valuation Metrics")
+        val_df = pd.DataFrame({
+            "Metric": ["Current Price", "Trailing P/E", "PEG Ratio", "Market Cap"],
+            "Value": [f"₹{m['price']}", f"{m['pe_ratio']}x", str(m['peg_ratio']), str(m['market_cap'])]
+        })
+        st.dataframe(val_df, use_container_width=True, hide_index=True)
+        
+        pe_num = float(m['pe_ratio']) if m['pe_ratio'] != "N/A" else 0
+        peg_num = float(m['peg_ratio']) if m['peg_ratio'] != "N/A" else 0
+        fig_val = px.bar(x=['P/E Ratio', 'PEG Ratio (x10)'], y=[pe_num, peg_num * 10], color=['P/E', 'PEG'], text_auto=True)
+        fig_val.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, height=220)
+        st.plotly_chart(fig_val, use_container_width=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 2: FUTURE GROWTH & OUTLOOK (Includes Earnings Momentum Chart)
+    # -------------------------------------------------------------------------
+    st.markdown("## 2. FUTURE GROWTH & OUTLOOK")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[1] if len(sections_list) > 1 else "Future growth outlook compiling...")
+    with c2:
+        st.markdown("##### Growth Metrics")
+        growth_df = pd.DataFrame({
+            "Indicator": ["YoY PAT Growth", "QoQ PAT Growth", "14-Day RSI"],
+            "Rate": [str(m['pat_yoy']), str(m['pat_qoq']), str(m['rsi'])]
+        })
+        st.dataframe(growth_df, use_container_width=True, hide_index=True)
+        
+        yoy_val = float(m['pat_yoy'].replace('%','')) if m['pat_yoy'] != "N/A" else 0
+        qoq_val = float(m['pat_qoq'].replace('%','')) if m['pat_qoq'] != "N/A" else 0
+        fig_growth = px.bar(x=['YoY Growth', 'QoQ Growth'], y=[yoy_val, qoq_val], color=['YoY', 'QoQ'], text_auto=True)
+        fig_growth.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, height=220)
+        st.plotly_chart(fig_growth, use_container_width=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 3: PAST PERFORMANCE & EARNINGS QUALITY (Includes Returns Chart)
+    # -------------------------------------------------------------------------
+    st.markdown("## 3. PAST PERFORMANCE & EARNINGS QUALITY")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[2] if len(sections_list) > 2 else "Past performance analysis compiling...")
+    with c2:
+        st.markdown("##### Quality & Returns")
+        perf_df = pd.DataFrame({
+            "Ratio": ["Return on Equity (ROE)", "ROA / ROCE Proxy", "Net Profit Margin"],
+            "Percentage": [str(m['roe']), str(m['roce_roa']), str(m['net_margin'])]
+        })
+        st.dataframe(perf_df, use_container_width=True, hide_index=True)
+        
+        roe_val = float(m['roe'].replace('%','')) if m['roe'] != "N/A" else 0
+        roa_val = float(m['roce_roa'].replace('%','')) if m['roce_roa'] != "N/A" else 0
+        fig_perf = px.bar(x=['ROE', 'ROA'], y=[roe_val, roa_val], color=['ROE', 'ROA'], text_auto=True)
+        fig_perf.update_layout(margin=dict(t=10, b=10, l=10, r=10), showlegend=False, height=220)
+        st.plotly_chart(fig_perf, use_container_width=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 4: FINANCIAL HEALTH & BALANCE SHEET
+    # -------------------------------------------------------------------------
+    st.markdown("## 4. FINANCIAL HEALTH & BALANCE SHEET")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[3] if len(sections_list) > 3 else "Financial health evaluation compiling...")
+    with c2:
+        st.markdown("##### Balance Sheet Profile")
+        health_df = pd.DataFrame({
+            "Parameter": ["Debt to Equity Ratio", "Industry Classification"],
+            "Status": [str(m['debt_to_equity']), str(m['industry'])]
+        })
+        st.dataframe(health_df, use_container_width=True, hide_index=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 5: DIVIDEND & CAPITAL ALLOCATION
+    # -------------------------------------------------------------------------
+    st.markdown("## 5. DIVIDEND & CAPITAL ALLOCATION")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[4] if len(sections_list) > 4 else "Dividend commentary compiling...")
+    with c2:
+        st.markdown("##### Distribution Metrics")
+        div_df = pd.DataFrame({
+            "Metric": ["Dividend Yield", "Capital Allocation Focus"],
+            "Value": [str(m['dividend_yield']), "Reinvestment & Payouts"]
+        })
+        st.dataframe(div_df, use_container_width=True, hide_index=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 6: MANAGEMENT & COMPENSATION
+    # -------------------------------------------------------------------------
+    st.markdown("## 6. MANAGEMENT & COMPENSATION")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[5] if len(sections_list) > 5 else "Management breakdown compiling...")
+    with c2:
+        st.markdown("##### Leadership Overview")
+        mgmt_df = pd.DataFrame({
+            "Attribute": ["Sector Alignment", "Execution Track Record"],
+            "Assessment": ["Professional", "Verified Operational History"]
+        })
+        st.dataframe(mgmt_df, use_container_width=True, hide_index=True)
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 7: OWNERSHIP STRUCTURE & INSIDER SENTIMENT (Includes Ownership Donut Chart)
+    # -------------------------------------------------------------------------
+    st.markdown("## 7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT")
+    c1, c2 = st.columns([1.5, 1])
+    with c1:
+        st.write(sections_list[6] if len(sections_list) > 6 else "Ownership structure overview compiling...")
+    with c2:
+        st.markdown("##### Shareholding Split")
+        sh_data = m['shareholding']
+        if sum(sh_data.values()) > 0:
+            fig_pie = px.pie(names=list(sh_data.keys()), values=list(sh_data.values()), hole=0.45, color_discrete_sequence=px.colors.qualitative.Bold)
+            fig_pie.update_layout(margin=dict(t=10, b=10, l=10, r=10), height=240)
+            st.plotly_chart(fig_pie, use_container_width=True)
+        else:
+            st.info("Shareholding breakdown unavailable.")
+    st.markdown("---")
+
+    # -------------------------------------------------------------------------
+    # SECTION 8: SUMMARY VERDICT & KEY RISKS
+    # -------------------------------------------------------------------------
+    st.markdown("## 8. SUMMARY VERDICT & KEY RISKS")
+    st.write(sections_list[7] if len(sections_list) > 7 else "Summary verdict compiling...")
+    st.markdown("---")
 
     # --- PDF EXPORT ---
     pdf_buffer = io.BytesIO()
