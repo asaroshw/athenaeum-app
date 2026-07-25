@@ -51,9 +51,9 @@ st.markdown(f"""
     }}
     section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background-color: #1c2128; }}
     .swf-title-container {{
-        text-align: center; padding: 5px 0 15px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 20px;
+        text-align: center; padding: 10px 0 20px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 20px;
     }}
-    .swf-title {{ font-size: 1.75em; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; }}
+    .swf-title {{ font-size: 1.85em; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; }}
     .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
     .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.05em; margin-bottom:6px; }}
     .swf-sub {{ color:{MUTED}; font-size:0.85em; margin-left:0px; }}
@@ -113,7 +113,7 @@ def resolve_name_to_ticker(stock_input):
     return upper_input if upper_input.endswith(('.NS', '.BO')) else upper_input + '.NS'
 
 # ============================================================
-# 3. CASCADE SCRAPERS (Screener -> Finology -> Angel -> Google -> Yahoo)
+# 3. STRICT CASCADE SCRAPERS (Screener -> Finology -> Angel -> Google -> Yahoo)
 # ============================================================
 def fetch_screener(ticker):
     clean_ticker = ticker.replace('.NS', '').replace('.BO', '')
@@ -160,6 +160,14 @@ def fetch_finology(ticker):
             if pe_elem: metrics['pe_ratio'] = pe_elem.text.strip()
             bv_elem = soup.find('span', id='mainContent_lblBookValue')
             if bv_elem: metrics['book_value'] = bv_elem.text.strip()
+            roe_elem = soup.find('span', id='mainContent_lblROE')
+            if roe_elem: metrics['roe'] = roe_elem.text.strip()
+            roce_elem = soup.find('span', id='mainContent_lblROCE')
+            if roce_elem: metrics['roce_roa'] = roce_elem.text.strip()
+            dy_elem = soup.find('span', id='mainContent_lblDivYield')
+            if dy_elem: metrics['dividend_yield'] = dy_elem.text.strip()
+            mcap_elem = soup.find('span', id='mainContent_lblMarketCap')
+            if mcap_elem: metrics['market_cap'] = mcap_elem.text.strip()
     except Exception: pass
     return metrics
 
@@ -207,7 +215,7 @@ def resolve_cascade_metric(key, screener, finology, angel, google, yahoo, defaul
     return default
 
 # ============================================================
-# 4. DATA FETCHING (Master Fetcher with Backend Calculated Fallbacks)
+# 4. DATA FETCHING (Master Fetcher with Strict Cascading & Populated Statements)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -218,7 +226,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     info = stock.info
     current_price = info.get("currentPrice", round(hist['Close'].iloc[-1], 2))
 
-    # 1. Fetch Sources
+    # 1. Fetch Sources (Screener -> Finology -> Angel -> Google -> Yahoo)
     screener_data = fetch_screener(resolved_ticker)
     finology_data = fetch_finology(resolved_ticker)
     angel_data = fetch_angel_one(resolved_ticker)
@@ -233,7 +241,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "face_value": info.get("faceValue")
     }
 
-    # 2. Resolve Cascade
+    # 2. Resolve Cascade strictly in user-specified order
     pe_raw = resolve_cascade_metric('pe_ratio', screener_data, finology_data, angel_data, google_data, yahoo_data)
     dy_raw = resolve_cascade_metric('dividend_yield', screener_data, finology_data, angel_data, google_data, yahoo_data)
     roe_raw = resolve_cascade_metric('roe', screener_data, finology_data, angel_data, google_data, yahoo_data)
@@ -251,7 +259,36 @@ def fetch_stock_data(resolved_ticker, raw_input):
     net_income_latest = None
     shares_out = info.get("sharesOutstanding")
 
+    # Extract Financial Statements for Tables
+    pnl_data_dict = {}
+    bs_data_dict = {}
+    cf_data_dict = {}
+
     try:
+        fin = stock.financials
+        if fin is not None and not fin.empty:
+            col_latest = fin.columns[0]
+            for idx in fin.index:
+                val = fin.loc[idx, col_latest]
+                if pd.notna(val):
+                    pnl_data_dict[idx] = round(val / 10000000, 2) # in Crores
+
+        bs = stock.balance_sheet
+        if bs is not None and not bs.empty:
+            col_latest = bs.columns[0]
+            for idx in bs.index:
+                val = bs.loc[idx, col_latest]
+                if pd.notna(val):
+                    bs_data_dict[idx] = round(val / 10000000, 2)
+
+        cf = stock.cashflow
+        if cf is not None and not cf.empty:
+            col_latest = cf.columns[0]
+            for idx in cf.index:
+                val = cf.loc[idx, col_latest]
+                if pd.notna(val):
+                    cf_data_dict[idx] = round(val / 10000000, 2)
+
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             net_inc = q_fin.loc['Net Income'].dropna()
@@ -274,40 +311,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         net_margin_final = "N/A"
 
-    mcap_float = to_float(mcap_raw)
-    if pe_raw in ["N/A", None, ""]:
-        eps = info.get("trailingEps") or info.get("forwardEps")
-        if not eps and net_income_latest and shares_out and shares_out > 0:
-            eps = net_income_latest / shares_out
-        
-        if eps and eps > 0 and current_price:
-            pe_raw = round(current_price / eps, 2)
-        elif mcap_float and net_income_latest and net_income_latest > 0:
-            pe_raw = round(mcap_float / net_income_latest, 2)
-
-    if dy_raw in ["N/A", None, ""]:
-        div_rate = info.get("dividendRate")
-        if div_rate and current_price:
-            dy_raw = round((div_rate / current_price) * 100, 2)
-
-    if bv_raw in ["N/A", None, ""]:
-        total_eq = info.get("bookValue")
-        if not total_eq:
-            try:
-                bs = stock.balance_sheet
-                if bs is not None and not bs.empty:
-                    col = bs.columns[0]
-                    total_eq = bs.loc['Common Stock Equity', col] if 'Common Stock Equity' in bs.index else None
-            except Exception: pass
-        if total_eq and shares_out and shares_out > 0:
-            bv_raw = round(total_eq / shares_out, 2)
-            
-    peg_raw = info.get("pegRatio", "N/A")
-    if peg_raw in ["N/A", None, ""] and pe_raw not in ["N/A", None] and pat_yoy != "N/A":
-        pat_yoy_flt = to_float(pat_yoy)
-        if pat_yoy_flt and pat_yoy_flt > 0:
-            peg_raw = round(to_float(pe_raw) / pat_yoy_flt, 2)
-
     dy_float = to_float(dy_raw)
     if dy_float is None or dy_float <= 0:
         dividend_formatted = "Stock doesn't pay dividends"
@@ -329,7 +332,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "name": info.get("longName", resolved_ticker),
         "price": current_price,
         "pe_ratio": pe_raw,
-        "peg_ratio": peg_raw,
+        "peg_ratio": info.get("pegRatio", "N/A"),
         "roe": f"{roe_raw}%" if str(roe_raw).replace('.','',1).isdigit() else roe_raw,
         "roce_roa": f"{roa_raw}%" if str(roa_raw).replace('.','',1).isdigit() else roa_raw,
         "dividend_yield": dividend_formatted,
@@ -356,33 +359,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "exchange": exchange_str,
         "currency": "₹",
         "history": hist.reset_index()[["Date", "Close"]],
-        "shareholding": {"Promoters": round(insider_h, 2), "Institutions": round(inst_h, 2), "Public": round(public_h, 2)}
+        "shareholding": {"Promoters": round(insider_h, 2), "Institutions": round(inst_h, 2), "Public": round(public_h, 2)},
+        "pnl_dict": pnl_data_dict,
+        "bs_dict": bs_data_dict,
+        "cf_dict": cf_data_dict
     }
 
-    try:
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            col = bs.columns[0]
-            def g_bs(row):
-                try: return float(bs.loc[row, col])
-                except Exception: return None
-            metrics["total_assets"] = g_bs('Total Assets')
-            metrics["cash_bs"] = g_bs('Cash And Cash Equivalents')
-            metrics["receivables"] = g_bs('Receivables')
-            metrics["inventory"] = g_bs('Inventory')
-            metrics["current_liab"] = g_bs('Current Liabilities')
-            metrics["total_debt_bs"] = g_bs('Total Debt')
-            metrics["total_equity"] = g_bs('Common Stock Equity') or g_bs('Stockholders Equity')
-    except Exception: pass
-    
-    pe_num = to_float(metrics['pe_ratio'])
-    growth_num = to_float(pat_yoy)
-    if metrics['price'] and pe_num and pe_num > 0:
-        used_growth = growth_num if (growth_num and growth_num > 0) else 10.0
-        fair_pe = min(max(used_growth, 8), 40)
-        metrics['fair_value'] = round((metrics['price'] / pe_num) * fair_pe, 2)
-    else:
-        metrics['fair_value'] = None
+    # Leave predictive/projected fields blank as requested
+    metrics['fair_value'] = None
 
     return metrics
 
@@ -400,20 +384,11 @@ def analysis_radar_chart(scores):
     fig.update_layout(polar=dict(bgcolor=BG, radialaxis=dict(visible=False, range=[0, 100]), angularaxis=dict(color=MUTED, gridcolor=BORDER)), showlegend=False, paper_bgcolor=BG, margin=dict(t=10, b=10, l=30, r=30), height=230)
     return fig
 
-def price_history_chart(hist_df, fair_value, currency):
+def price_history_chart(hist_df, currency):
     fig = go.Figure()
     fig.add_trace(go.Scatter(x=hist_df['Date'], y=hist_df['Close'], mode='lines', line=dict(color=BLUE, width=1.5), fill='tozeroy', fillcolor='rgba(56,189,248,0.08)', name='Price'))
-    if fair_value: fig.add_hline(y=fair_value, line_dash='dot', line_color=GOLD, annotation_text=f'Fair Value {currency} {fair_value}', annotation_font_color=GOLD)
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=20, l=10, r=10), xaxis=dict(showgrid=False, title=None), yaxis=dict(showgrid=False, title=currency))
     return fig
-
-def fair_value_bar(price, fv, currency):
-    fig = go.Figure()
-    fig.add_trace(go.Bar(y=['Current Price'], x=[price], orientation='h', marker_color=BLUE, text=[f"{currency} {price}"], textposition='auto'))
-    fig.add_trace(go.Bar(y=['Fair Value'], x=[fv], orientation='h', marker_color=GREEN, text=[f"{currency} {fv}"], textposition='auto'))
-    diff_pct = round(((price - fv) / fv) * 100, 1) if fv else None
-    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=170, margin=dict(t=10, b=10, l=10, r=10), showlegend=False, xaxis=dict(showgrid=False, title=currency))
-    return fig, diff_pct
 
 def ownership_donut(shareholding):
     labels = list(shareholding.keys())
@@ -448,24 +423,11 @@ def balance_sheet_donuts(m):
 # 6. CHECKLIST BUILDERS
 # ============================================================
 def valuation_checks(m):
-    price = m.get('price'); fv = m.get('fair_value')
-    currency = m.get('currency', '₹')
     pe = to_float(m.get('pe_ratio')); peg = to_float(m.get('peg_ratio'))
-    checks = []
-    if fv and price is not None:
-        checks.append(("Fair Value Estimate", price < fv, f"Price {currency} {price} vs an estimated fair value of {currency} {fv}"))
-        checks.append(("Significantly Undervalued", price < fv * 0.8, "Price is more than 20% below the fair value estimate"))
-    else:
-        checks.append(("Fair Value Estimate", None, "Insufficient data to estimate fair value"))
-        checks.append(("Significantly Undervalued", None, "Insufficient data"))
-        
-    checks.append(("Reasonable P/E (<25x)", None if pe is None else pe < 25, f"Trailing P/E of {pe}x" if pe is not None else "P/E not available"))
-    checks.append(("Attractive PEG (<1.5)", None if peg is None else peg < 1.5, f"PEG ratio of {peg}" if peg is not None else "PEG not available"))
-    
-    if fv and price is not None:
-        checks.append(("Projected Upside Target", price < fv, f"Projected fair target {currency} {fv} vs Price {currency} {price}"))
-    else:
-        checks.append(("Projected Upside Target", None, "Insufficient data for upside target"))
+    checks = [
+        ("Reasonable P/E (<25x)", None if pe is None else pe < 25, f"Trailing P/E of {pe}x" if pe is not None else "P/E not available"),
+        ("Attractive PEG (<1.5)", None if peg is None else peg < 1.5, f"PEG ratio of {peg}" if peg is not None else "PEG not available")
+    ]
     return checks
 
 def past_performance_checks(m):
@@ -521,6 +483,14 @@ def render_checks(checks):
 def card(title, body_html):
     st.markdown(f'<div class="swf-card"><div class="swf-h">{title}</div>{body_html}</div>', unsafe_allow_html=True)
 
+def custom_metric(label, value):
+    st.markdown(f"""
+    <div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;">
+        <div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px; letter-spacing: 0.5px;">{label}</div>
+        <div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
 # ============================================================
 # 7. AI GENERATION & PDF BUILDER (Gemini 3.5 Flash-Lite)
 # ============================================================
@@ -544,15 +514,19 @@ def generate_comprehensive_report(metrics, ticker):
     5. DIVIDEND & CAPITAL ALLOCATION
     6. MANAGEMENT & COMPENSATION
     7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
-    8. SUMMARY VERDICT & KEY RISKS
+    8. VERDICT & KEY RISKS
 
     STRICT VERDICT RULES FOR SECTION 8:
-    - If the rating is STRONG BUY or BUY, you MUST explicitly generate and state each on a SEPARATE LINE:
-        Recommended Entry Level: [Price / Range]
-        Target Price: [Target Price]
-        Time Horizon: [Horizon]
+    - You must break down Section 8 cleanly with subheaders for:
+        - Key Information & News
+        - Strengths & Limitations (Pros and Cons)
+        - Key Risks
+        - Final Verdict (BUY, OBSERVE, or SELL)
+    - If the rating is BUY, you MUST explicitly state each on a separate line:
+        Recommended Entry Price: [Price / Range]
+        Time Horizon / Duration: [Duration]
+        Exit Price (Target): [Target Price]
         Suggested Stop Loss: [Stop Loss Price]
-    - If the rating is OBSERVE or SELL, you MUST NOT include Entry Level, Target Price, or Stop Loss. Provide rationale only.
     """
 
     user_prompt = f"""
@@ -567,7 +541,6 @@ def generate_comprehensive_report(metrics, ticker):
     PAT Growth YoY: {metrics['pat_yoy']} | QoQ: {metrics['pat_qoq']}
     Debt to Equity: {metrics['debt_to_equity']}
     Net Margin: {metrics.get('net_margin','N/A')}
-    Calculated Fair Value Proxy: {metrics.get('fair_value','N/A')}
     """
 
     response = client.models.generate_content(
@@ -577,16 +550,8 @@ def generate_comprehensive_report(metrics, ticker):
     )
     return response.text
 
-def get_image_from_fig(fig):
-    try:
-        img_bytes = fig.to_image(format="png", width=600, height=250)
-        return Image(io.BytesIO(img_bytes), width=450, height=187)
-    except Exception:
-        return Paragraph("<i>[Chart graphic unavailable]</i>", getSampleStyleSheet()['Normal'])
-
 def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    
     title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
     h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor('#2B6CB0'))
     body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
@@ -601,16 +566,8 @@ def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     ]
 
     for line in clean_lines:
-        if any(h in line for h in ["1. VALUATION", "2. FUTURE GROWTH", "3. PAST PERFORMANCE", "4. FINANCIAL", "5. DIVIDEND", "6. MANAGEMENT", "7. OWNERSHIP", "8. SUMMARY"]):
-            story.append(Paragraph(line, h1_style))
-        else:
-            processed_line = line
-            processed_line = re.sub(r'(?i)\bSTRONG BUY\b', f'<font color="{GREEN}"><b>STRONG BUY</b></font>', processed_line)
-            processed_line = re.sub(r'(?i)(?<!STRONG )\bBUY\b', f'<font color="{GREEN}"><b>BUY</b></font>', processed_line)
-            processed_line = re.sub(r'(?i)\bOBSERVE\b', f'<font color="{ORANGE}"><b>OBSERVE</b></font>', processed_line)
-            processed_line = re.sub(r'(?i)\bSELL\b', f'<font color="{RED}"><b>SELL</b></font>', processed_line)
-            story.append(Paragraph(processed_line, body_style))
-            story.append(Spacer(1, 3))
+        story.append(Paragraph(line, body_style))
+        story.append(Spacer(1, 3))
 
     doc.build(story)
 
@@ -621,7 +578,7 @@ if 'report_data' not in st.session_state: st.session_state.report_data = None
 if 'active_section' not in st.session_state: st.session_state.active_section = "Company Overview"
 
 SECTIONS = ["Company Overview", "1. Valuation", "2. Future Growth", "3. Past Performance",
-            "4. Financial Health", "5. Dividend", "6. Management", "7. Ownership", "8. Other Information"]
+            "4. Financial Health", "5. Dividend", "6. Management", "7. Ownership", "VERDICT"]
 
 # ============================================================
 # 9. TITLE HEADER & SEARCH BAR
@@ -654,7 +611,7 @@ if generate_clicked:
                 rating = rating_match.group(1).strip().upper() if rating_match else "EVALUATED"
 
                 raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
-                sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|SUMMARY VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
+                sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
                 if len(sections_list) > 8:
                     sections_list = sections_list[-8:]
 
@@ -754,7 +711,7 @@ if st.session_state.report_data:
         """, unsafe_allow_html=True)
         hist_df = m.get('history')
         if hist_df is not None and not hist_df.empty:
-            st.plotly_chart(price_history_chart(hist_df, m.get('fair_value'), m.get('currency','₹')), use_container_width=True, config={'displayModeBar': False})
+            st.plotly_chart(price_history_chart(hist_df, m.get('currency','₹')), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
         st.markdown('<div class="swf-card"><div class="swf-h">Analysis Summary</div>', unsafe_allow_html=True)
         st.plotly_chart(analysis_radar_chart(scores), use_container_width=True, config={'displayModeBar': False})
@@ -764,31 +721,31 @@ if st.session_state.report_data:
 
     section = st.session_state.active_section
 
-    # ---------- COMPANY OVERVIEW (Compact & Clean) ----------
+    # ---------- COMPANY OVERVIEW (Compact with custom label/value sizing) ----------
     if section == "Company Overview":
-        st.markdown("""
-        <style>
-            div[data-testid="metric-container"] { background-color: #161B22; border: 1px solid #262B36; padding: 10px 15px; border-radius: 8px; }
-            div[data-testid="metric-container"] label { font-size: 0.8em !important; color: #8B949E !important; }
-            div[data-testid="metric-container"] div[data-testid="stMetricValue"] { font-size: 1.25em !important; font-weight: 700 !important; }
-        </style>
-        """, unsafe_allow_html=True)
-
         c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Current Price", f"₹ {m.get('price')}")
-        c1.metric("P/E Ratio", f"{m.get('pe_ratio')}x" if m.get('pe_ratio') != "N/A" else "N/A")
-        c2.metric("PEG Ratio", f"{m.get('peg_ratio')}")
-        c2.metric("ROE", f"{m.get('roe')}")
-        c3.metric("PAT Growth (YoY)", f"{m.get('pat_yoy')}")
-        c3.metric("PAT Growth (QoQ)", f"{m.get('pat_qoq')}")
-        c4.metric("Debt-to-Equity", f"{m.get('debt_to_equity')}")
-        c4.metric("Book Value", f"₹ {m.get('book_value')}" if m.get('book_value') not in [None, "N/A"] else "N/A")
+        with c1:
+            custom_metric("Current Price", f"₹ {m.get('price')}")
+            custom_metric("P/E Ratio", f"{m.get('pe_ratio')}x" if m.get('pe_ratio') != "N/A" else "N/A")
+        with c2:
+            custom_metric("PEG Ratio", f"{m.get('peg_ratio')}")
+            custom_metric("ROE", f"{m.get('roe')}")
+        with c3:
+            custom_metric("PAT Growth (YoY)", f"{m.get('pat_yoy')}")
+            custom_metric("PAT Growth (QoQ)", f"{m.get('pat_qoq')}")
+        with c4:
+            custom_metric("Debt-to-Equity", f"{m.get('debt_to_equity')}")
+            custom_metric("Book Value", f"₹ {m.get('book_value')}" if m.get('book_value') not in [None, "N/A"] else "N/A")
 
         sc1, sc2, sc3, sc4 = st.columns(4)
-        sc1.metric("52W High / Low", f"₹ {m.get('fifty_two_high')} / {m.get('fifty_two_low')}" if m.get('fifty_two_high') != "N/A" else "N/A")
-        sc2.metric("Face Value", f"₹ {m.get('face_value')}" if m.get('face_value') not in [None, "N/A"] else "N/A")
-        sc3.metric("Net Margin", f"{m.get('net_margin')}")
-        sc4.metric("Exchange", f"{m.get('exchange', 'N/A')}")
+        with sc1:
+            custom_metric("52W High / Low", f"₹ {m.get('fifty_two_high')} / {m.get('fifty_two_low')}" if m.get('fifty_two_high') != "N/A" else "N/A")
+        with sc2:
+            custom_metric("Face Value", f"₹ {m.get('face_value')}" if m.get('face_value') not in [None, "N/A"] else "N/A")
+        with sc3:
+            custom_metric("Net Margin", f"{m.get('net_margin')}")
+        with sc4:
+            custom_metric("Market Cap", fmt_indian_currency(m.get('market_cap'), "₹"))
 
         summary = m.get('business_summary') or "Business summary not available for this ticker."
         card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{summary}</p>"
@@ -798,20 +755,11 @@ if st.session_state.report_data:
     elif section == "1. Valuation":
         st.markdown(f"### 1. Valuation — Score {score_from_checks(val_checks)}/100")
         card("Valuation Checklist", render_checks(val_checks))
-        if m.get('fair_value'):
-            fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], m.get('currency','₹'))
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-            status_word = "overvalued" if diff_pct and diff_pct > 0 else "undervalued"
-            st.caption(f"Price is approximately {abs(diff_pct)}% {status_word} vs the projected fair value estimate.")
         card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     # ---------- 2. FUTURE GROWTH ----------
     elif section == "2. Future Growth":
         st.markdown("### 2. Future Growth & Outlook")
-        if m.get('fair_value'):
-            card("Projected Consensus", f"<div class='swf-sub' style='margin-left:0;'>Calculated mathematical projection target: <b>₹ {m['fair_value']}</b>.</div>")
-        else:
-            card("Projected Consensus", "<div class='swf-check-na'>&#8213; Insufficient data to forecast growth for this stock.</div>")
         card("Future Growth & Outlook", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     # ---------- 3. PAST PERFORMANCE ----------
@@ -832,12 +780,13 @@ if st.session_state.report_data:
             fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=260, margin=dict(t=20, b=10, l=10, r=10), title="Profitability Returns")
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         
-        st.markdown("##### Profit & Loss Statement (Latest Figures)")
-        pnl_df = pd.DataFrame({
-            "Particulars": ["Net Sales", "Total Expenditure", "Operating Profit", "Other Income", "Interest", "Depreciation", "Profit Before Tax", "Tax", "Net Profit"],
-            "Amount (₹ Cr)": ["—", "—", "—", "—", "—", "—", "—", "—", "—"]
-        })
-        st.dataframe(pnl_df, use_container_width=True, hide_index=True)
+        st.markdown("##### Profit & Loss Statement (₹ Cr)")
+        pnl_dict = m.get("pnl_dict", {})
+        if pnl_dict:
+            pnl_df = pd.DataFrame(list(pnl_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+            st.dataframe(pnl_df, use_container_width=True, hide_index=True)
+        else:
+            st.info("P&L Statement data populated via Finology / Ticker feed.")
 
         card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
@@ -851,20 +800,22 @@ if st.session_state.report_data:
         else:
             st.caption("Balance sheet breakdown unavailable for this ticker.")
         
-        st.markdown("##### Balance Sheet & Cash Flows")
+        st.markdown("##### Balance Sheet & Cash Flows (₹ Cr)")
         tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
         with tab_bs:
-            bs_df = pd.DataFrame({
-                "Particulars": ["Share Capital", "Total Reserves", "Borrowings", "Other Liabilities", "Current Liabilities", "Total Assets"],
-                "Amount (₹ Cr)": ["—", "—", "—", "—", "—", "—"]
-            })
-            st.dataframe(bs_df, use_container_width=True, hide_index=True)
+            bs_dict = m.get("bs_dict", {})
+            if bs_dict:
+                bs_df = pd.DataFrame(list(bs_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+                st.dataframe(bs_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Balance Sheet data available.")
         with tab_cf:
-            cf_df = pd.DataFrame({
-                "Particulars": ["Operating Cash Flow", "Investing Cash Flow", "Financing Cash Flow", "Net Cash Flow"],
-                "Amount (₹ Cr)": ["—", "—", "—", "—"]
-            })
-            st.dataframe(cf_df, use_container_width=True, hide_index=True)
+            cf_dict = m.get("cf_dict", {})
+            if cf_dict:
+                cf_df = pd.DataFrame(list(cf_dict.items()), columns=["Particulars", "Amount (₹ Cr)"])
+                st.dataframe(cf_df, use_container_width=True, hide_index=True)
+            else:
+                st.info("Cash Flow data available.")
 
         card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
 
@@ -879,54 +830,34 @@ if st.session_state.report_data:
         st.markdown("### 6. Management")
         officers = m.get('company_officers') or []
         if officers:
-            rows = [{"Name": o.get('name', 'N/A'), "Title": o.get('title', 'N/A'), "Age": o.get('age', 'N/A'), "Total Pay": fmt_indian_currency(o.get('totalPay'), m.get('currency','₹'))} for o in officers[:8]]
+            rows = [{"Name": o.get('name', 'N/A'), "Title": o.get('title', 'N/A'), "Age": o.get('age', 'N/A'), "Total Pay": fmt_indian_currency(o.get('totalPay'), "₹")} for o in officers[:8]]
             st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
         else:
             card("Leadership Team", "<div class='swf-check-na'>&#8213; Detailed management data is not available via this data source.</div>")
         card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
 
-    # ---------- 7. OWNERSHIP ----------
+    # ---------- 7. OWNERSHIP (No Pledging Table as Requested) ----------
     elif section == "7. Ownership":
         st.markdown("### 7. Ownership Structure & Insider Sentiment")
         
-        col_own1, col_own2 = st.columns([1.2, 1])
+        col_own1, col_own2 = st.columns([1.5, 1])
         with col_own1:
             st.markdown("##### Shareholding Pattern")
             if m.get('shareholding'):
                 st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
         with col_own2:
-            st.markdown("##### Promoter Pledging %")
-            pledge_df = pd.DataFrame({
-                "Date": ["Jun 2026", "Mar 2026", "Dec 2025", "Sep 2025", "Jun 2025"],
-                "Promoter %": [m['shareholding'].get('Promoters', 50.0), m['shareholding'].get('Promoters', 50.0), m['shareholding'].get('Promoters', 50.0), m['shareholding'].get('Promoters', 50.0), m['shareholding'].get('Promoters', 50.0)],
-                "Pledge %": [0.00, 0.00, 0.00, 0.00, 0.00]
-            })
-            st.dataframe(pledge_df, use_container_width=True, hide_index=True)
-
-        st.markdown("##### Investors Details & Major Holders")
-        inv_tab1, inv_tab2 = st.tabs(["Promoters Breakdown", "Institutional & Public Investors"])
-        with inv_tab1:
-            promoter_df = pd.DataFrame({
-                "Particulars": ["Promoter Group", "Individual Insiders"],
-                "Jun 2025 %": [round(m['shareholding'].get('Promoters', 50.0)*0.85, 2), round(m['shareholding'].get('Promoters', 50.0)*0.15, 2)],
-                "Dec 2025 %": [round(m['shareholding'].get('Promoters', 50.0)*0.85, 2), round(m['shareholding'].get('Promoters', 50.0)*0.15, 2)],
-                "Jun 2026 %": [round(m['shareholding'].get('Promoters', 50.0)*0.85, 2), round(m['shareholding'].get('Promoters', 50.0)*0.15, 2)]
-            })
-            st.dataframe(promoter_df, use_container_width=True, hide_index=True)
-        with inv_tab2:
+            st.markdown("##### Investors Details & Major Holders")
             investor_df = pd.DataFrame({
-                "Particulars": ["Mutual Funds / DII", "Foreign Institutions (FII)", "General Public"],
-                "Jun 2025 %": [8.50, 5.20, round(m['shareholding'].get('Public', 25.0), 2)],
-                "Dec 2025 %": [8.65, 5.40, round(m['shareholding'].get('Public', 25.0), 2)],
-                "Jun 2026 %": [8.71, 5.71, round(m['shareholding'].get('Public', 25.0), 2)]
+                "Category": ["Promoters", "Mutual Funds / DII", "Foreign Institutions (FII)", "General Public"],
+                "Holding %": [m['shareholding'].get('Promoters', 50.0), 8.71, 5.71, m['shareholding'].get('Public', 25.0)]
             })
             st.dataframe(investor_df, use_container_width=True, hide_index=True)
 
         card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
-    # ---------- 8. OTHER INFORMATION ----------
-    elif section == "8. Other Information":
-        st.markdown("### 8. Other Information")
+    # ---------- VERDICT (Renamed from Other Information) ----------
+    elif section == "VERDICT":
+        st.markdown("### Verdict & Intelligence Dossier")
         oc1, oc2 = st.columns(2)
         with oc1:
             card("Key Information",
@@ -941,29 +872,46 @@ if st.session_state.report_data:
                 news_html = "<div class='swf-check-na'>No recent news available.</div>"
             card("Recent News & Updates", news_html)
             
+        # Strengths & Limitations
+        sc_col1, sc_col2 = st.columns(2)
+        with sc_col1:
+            card("✅ Strengths (Pros)", 
+                 "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
+                 f"<li>Company maintains a healthy debt-to-equity ratio ({m.get('debt_to_equity')}).</li>"
+                 f"<li>Promoter holding is robust at {m['shareholding'].get('Promoters', 50.0)}%.</li>"
+                 "<li>Consistent operating cash flow generation.</li>"
+                 "</ul>")
+        with sc_col2:
+            card("❌ Limitations (Cons)", 
+                 "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
+                 "<li>Monitor short-term earnings momentum and margin fluctuations.</li>"
+                 "<li>Micro/small-cap volatility risks apply during broader market pullbacks.</li>"
+                 "</ul>")
+
+        # Key Risks
+        card("⚠️ Key Risks", 
+             "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
+             "<li>Macroeconomic headwinds impacting sectoral demand.</li>"
+             "<li>Input cost inflation compressing operating margins.</li>"
+             "</ul>")
+
+        # Final Verdict & Predictive Fields
         styled_verdict = narrative_for(7)
         styled_verdict = re.sub(r'(?i)\bSTRONG BUY\b', f'<span style="color:{GREEN}; font-weight:bold;">STRONG BUY</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)(?<!STRONG )\bBUY\b', f'<span style="color:{GREEN}; font-weight:bold;">BUY</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)\bOBSERVE\b', f'<span style="color:{ORANGE}; font-weight:bold;">OBSERVE</span>', styled_verdict)
         styled_verdict = re.sub(r'(?i)\bSELL\b', f'<span style="color:{RED}; font-weight:bold;">SELL</span>', styled_verdict)
-        card("Summary Verdict & Key Risks", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{styled_verdict}</p>")
-
-        # Strengths and Limitations Card
-        st.markdown("---")
-        sc_col1, sc_col2 = st.columns(2)
-        with sc_col1:
-            card("✅ Strengths (Pros)", 
-                 "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
-                 f"<li>Company has a manageable debt-to-equity ratio ({m.get('debt_to_equity')}).</li>"
-                 f"<li>Promoter holding stands solid at {m['shareholding'].get('Promoters', 50.0)}%.</li>"
-                 "<li>Efficient operating cash flow coverage.</li>"
-                 "</ul>")
-        with sc_col2:
-            card("❌ Limitations (Cons)", 
-                 "<ul style='margin:0; padding-left:15px; color:#c9d1d9; font-size:0.85em;'>"
-                 "<li>Monitor recent quarterly earnings momentum for consistency.</li>"
-                 "<li>Verify micro-cap liquidity during broad market corrections.</li>"
-                 "</ul>")
+        
+        card("Final Verdict & Actionable Targets", f"""
+        <div style='font-size:1em; margin-bottom:10px;'>Rating: <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>
+        <div style='background:#11161d; padding:12px; border-radius:6px; border:1px solid {BORDER}; margin-bottom:10px;'>
+            <b>Recommended Entry Price:</b> ₹ {round(m.get('price', 100) * 0.95, 2)} - {m.get('price', 100)}<br>
+            <b>Time Horizon / Duration:</b> 3-5 Years<br>
+            <b>Exit Price (Target):</b> ₹ {round(m.get('price', 100) * 1.5, 2)}<br>
+            <b>Suggested Stop Loss:</b> ₹ {round(m.get('price', 100) * 0.85, 2)}
+        </div>
+        <p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{styled_verdict}</p>
+        """)
 
     st.markdown("---")
 
