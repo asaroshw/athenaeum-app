@@ -563,90 +563,115 @@ def generate_comprehensive_report(metrics, ticker):
     return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
 def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
+    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     
-    # Custom PDF Typography
     styles = getSampleStyleSheet()
-    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#ffffff'))
-    sub_style = ParagraphStyle('DocSub', fontName='Helvetica-Bold', fontSize=11, textColor=colors.HexColor('#cccccc'))
-    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=14, spaceBefore=15, spaceAfter=8, textColor=colors.HexColor('#1A365D'))
-    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=9.5, leading=14, textColor=colors.HexColor('#2D3748'))
+    
+    # Modern Canva-style Typography
+    title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=22, textColor=colors.HexColor('#FFFFFF'), spaceAfter=5)
+    sub_title_style = ParagraphStyle('SubTitle', fontName='Helvetica', fontSize=12, textColor=colors.HexColor('#94A3B8'), spaceAfter=15)
+    h1_style = ParagraphStyle('H1', fontName='Helvetica-Bold', fontSize=11, textColor=colors.HexColor('#FFFFFF'), leading=14)
+    body_style = ParagraphStyle('Body', fontName='Helvetica', fontSize=9.5, leading=15, textColor=colors.HexColor('#334155'), spaceAfter=8)
     
     story = []
     
-    # 1. INSTITUTIONAL HEADER (Dark Banner)
-    rating_color = '#3FB950' if "BUY" in rating_val else '#F97316' if "OBSERVE" in rating_val else '#F85149'
+    # --- 1. PREMIUM HEADER ---
+    rating_color = '#22C55E' if "BUY" in rating_val else '#F97316' if "OBSERVE" in rating_val else '#EF4444'
     
     header_data = [
-        [Paragraph("FINANCIAL INTELLIGENCE DOSSIER", title_style), Paragraph(f"<font color='{rating_color}'>{rating_val}</font>", title_style)],
-        [Paragraph(f"{m.get('name', 'Company')} ({ticker})", sub_style), Paragraph(f"Current Price: ₹ {m.get('price', 'N/A')}", sub_style)]
+        [Paragraph("<b>FINANCIAL INTELLIGENCE DOSSIER</b>", title_style), 
+         Paragraph(f"<font color='{rating_color}' size='18'><b>{rating_val}</b></font>", ParagraphStyle('R', alignment=2))],
+        [Paragraph(f"{m.get('name', 'Company')} ({ticker})", sub_title_style), 
+         Paragraph(f"<font color='#94A3B8'>Current Price: INR {m.get('price', 'N/A')}</font>", ParagraphStyle('R2', alignment=2, fontName='Helvetica-Bold'))]
     ]
+    
     header_table = Table(header_data, colWidths=[4.5*inch, 2.5*inch])
     header_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#0D1117')),
-        ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#0F172A')),
         ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
-        ('PADDING', (0,0), (-1,-1), 14),
+        ('PADDING', (0,0), (-1,-1), 20),
     ]))
     story.append(header_table)
-    story.append(Spacer(1, 15))
+    story.append(Spacer(1, 20))
     
-    # 2. KEY METRICS GRID
+    # --- HELPER: FIX ENCODING & FLOATS ---
+    def fmt(val, sfx=""):
+        if val in [None, "N/A", ""]: return "N/A"
+        if isinstance(val, str): val = val.replace('₹', 'INR')
+        try:
+            if isinstance(val, (float, int)): return f"{val:.2f}{sfx}"
+            if re.match(r'^\d+\.\d+$', str(val)): return f"{float(val):.2f}{sfx}"
+        except: pass
+        return str(val)
+
     pred = m.get('predictive', {})
-    metrics_data = [
-        ["Target Price", f"₹ {pred.get('target_price', 'N/A')}", "Entry Range", f"{pred.get('entry_range', 'N/A')}"],
-        ["P/E Ratio", f"{m.get('pe_ratio')}x", "EV/EBITDA", f"{m.get('ev_ebitda')}x"],
-        ["P/B Ratio", f"{m.get('pb_ratio')}x", "ROE", f"{m.get('roe')}"],
-        ["Debt/Equity", f"{m.get('debt_to_equity')}", "Dividend Yield", f"{m.get('dividend_yield')}"]
-    ]
-    metrics_table = Table(metrics_data, colWidths=[1.75*inch, 1.75*inch, 1.75*inch, 1.75*inch])
-    metrics_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
-        ('TEXTCOLOR', (0,0), (-1,-1), colors.HexColor('#1E293B')),
-        ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), # Col 1 bold
-        ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'), # Col 3 bold
-        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
-        ('PADDING', (0,0), (-1,-1), 8),
-    ]))
-    story.append(metrics_table)
-    story.append(Spacer(1, 15))
+    entry_clean = str(pred.get('entry_range', 'N/A')).replace('₹', 'INR')
     
-    # 3. FINANCIAL SUMMARY TABLE (P&L)
+    # --- 2. KEY METRICS (Minimalist Grid) ---
+    metrics_data = [
+        [Paragraph("<b>Target Price</b>", body_style), Paragraph(f"INR {fmt(pred.get('target_price'))}", body_style), 
+         Paragraph("<b>Entry Range</b>", body_style), Paragraph(entry_clean, body_style)],
+        [Paragraph("<b>P/E Ratio</b>", body_style), Paragraph(fmt(m.get('pe_ratio'), 'x'), body_style), 
+         Paragraph("<b>EV/EBITDA</b>", body_style), Paragraph(fmt(m.get('ev_ebitda'), 'x'), body_style)],
+        [Paragraph("<b>P/B Ratio</b>", body_style), Paragraph(fmt(m.get('pb_ratio'), 'x'), body_style), 
+         Paragraph("<b>ROE</b>", body_style), Paragraph(fmt(m.get('roe')), body_style)],
+        [Paragraph("<b>Debt/Equity</b>", body_style), Paragraph(fmt(m.get('debt_to_equity')), body_style), 
+         Paragraph("<b>Div Yield</b>", body_style), Paragraph(fmt(m.get('dividend_yield')), body_style)]
+    ]
+    
+    m_table = Table(metrics_data, colWidths=[1.5*inch, 1.75*inch, 1.5*inch, 2.25*inch])
+    m_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('LINEBELOW', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+        ('PADDING', (0,0), (-1,-1), 10),
+    ]))
+    story.append(m_table)
+    story.append(Spacer(1, 20))
+    
+    # --- 3. FINANCIAL SUMMARY ---
     pnl_df = m.get('pnl_df', pd.DataFrame())
     if not pnl_df.empty:
-        story.append(Paragraph("Financial Summary (P&L)", h1_style))
-        pnl_data = [pnl_df.columns.to_list()] + pnl_df.values.tolist()
+        story.append(Paragraph("<b>Financial Summary (P&L)</b>", ParagraphStyle('h2', fontName='Helvetica-Bold', fontSize=12, spaceAfter=8, textColor=colors.HexColor('#0F172A'))))
+        
+        # Clean dataframe for PDF (Remove Rupee symbol)
+        cleaned_columns = [col.replace('₹', 'INR') for col in pnl_df.columns]
+        pnl_data = [cleaned_columns] + pnl_df.astype(str).replace('₹', 'INR', regex=True).values.tolist()
+        
         pnl_table = Table(pnl_data, colWidths=[4*inch, 3*inch])
         pnl_table.setStyle(TableStyle([
-            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2B6CB0')),
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#3B82F6')),
             ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
-            ('ALIGN', (1,0), (1,-1), 'RIGHT'),
-            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#F7FAFC')),
-            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E0')),
-            ('PADDING', (0,0), (-1,-1), 6),
+            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#EFF6FF')),
+            ('LINEBELOW', (0,0), (-1,-1), 1, colors.HexColor('#DBEAFE')),
+            ('PADDING', (0,0), (-1,-1), 8),
         ]))
         story.append(pnl_table)
-        story.append(Spacer(1, 15))
-    
-    # 4. AI QUALITATIVE NARRATIVE
-    story.append(Paragraph("Qualitative Analysis & Verdict", h1_style))
+        story.append(Spacer(1, 20))
+        
+    # --- 4. AI NARRATIVE (Canva-style Block Headers) ---
     clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_") and line.strip()]
     
     for line in clean_lines:
-        # Convert markdown bold to ReportLab HTML bold
+        line = line.replace('₹', 'INR') # Fix encoding
         formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
         
-        # Colorize numbered section headers
-        if re.match(r'^\d+\.', formatted_line): 
-            story.append(Spacer(1, 8))
-            story.append(Paragraph(f"<font color='#2B6CB0'><b>{formatted_line}</b></font>", body_style))
+        if re.match(r'^\d+\.\s', formatted_line):
+            # Draw a colored block for the section header
+            header_title = formatted_line.split('.', 1)[1].strip()
+            h_table = Table([[Paragraph(f"<b>{header_title}</b>", h1_style)]], colWidths=[7*inch])
+            h_table.setStyle(TableStyle([
+                ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#1E293B')),
+                ('PADDING', (0,0), (-1,-1), 6),
+            ]))
+            story.append(Spacer(1, 10))
+            story.append(h_table)
+            story.append(Spacer(1, 5))
         else:
             story.append(Paragraph(formatted_line, body_style))
-        story.append(Spacer(1, 4))
-
+            
     doc.build(story)
     
 # ============================================================
