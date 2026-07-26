@@ -568,12 +568,13 @@ def generate_comprehensive_report(metrics, ticker):
 def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=40, leftMargin=40, topMargin=40, bottomMargin=40)
     
-    # 1. UNIFORM TYPOGRAPHY (Strictly Helvetica to match institutional reports)
+    # 1. UNIFORM TYPOGRAPHY
     styles = getSampleStyleSheet()
     title_style = ParagraphStyle('Title', fontName='Helvetica-Bold', fontSize=20, textColor=colors.HexColor('#1A365D'), spaceAfter=2)
     sub_title_style = ParagraphStyle('SubTitle', fontName='Helvetica', fontSize=10, textColor=colors.HexColor('#4A5568'), spaceAfter=15)
     fig_title_style = ParagraphStyle('FigTitle', fontName='Helvetica-Bold', fontSize=10, textColor=colors.HexColor('#2B6CB0'), spaceBefore=15, spaceAfter=5)
     body_style = ParagraphStyle('Body', fontName='Helvetica', fontSize=9, leading=13, textColor=colors.HexColor('#2D3748'), spaceAfter=6)
+    list_style = ParagraphStyle('List', fontName='Helvetica', fontSize=9, leading=13, textColor=colors.HexColor('#334155'), leftIndent=15, spaceAfter=4)
     
     story = []
     current_date = datetime.now().strftime("%A, %B %d, %Y")
@@ -588,11 +589,10 @@ def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
         except: pass
         return str(val)
 
-    # --- HEADER: Mimicking the "Daily Research Report" format ---
+    # --- HEADER ---
     story.append(Paragraph(f"Daily Research Report: {m.get('name', 'Company')}", title_style))
     story.append(Paragraph(f"{current_date} | {m.get('exchange', 'N/A')} Edition | {ticker}", sub_title_style))
     
-    # Giant Price & Rating Banner
     rating_color = '#22C55E' if "BUY" in rating_val else '#F97316' if "OBSERVE" in rating_val else '#EF4444'
     price_banner = Table([
         [Paragraph(f"<font size=16><b>Last Price: INR {m.get('price', 'N/A')}</b></font>", body_style),
@@ -604,7 +604,7 @@ def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     ]))
     story.append(price_banner)
     
-    # --- FIG 1: STOCK SUMMARY (Institutional Data Grid) ---
+    # --- FIG 1: STOCK SUMMARY ---
     story.append(Paragraph("<b>Fig 1: Stock Summary & Valuation</b>", fig_title_style))
     pred = m.get('predictive', {})
     summary_data = [
@@ -617,86 +617,91 @@ def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     ]
     sum_table = Table(summary_data, colWidths=[1.5*inch, 2*inch, 1.5*inch, 2*inch])
     sum_table.setStyle(TableStyle([
-        ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#F7FAFC')), # Light grey for labels
+        ('BACKGROUND', (0,0), (0,-1), colors.HexColor('#F7FAFC')), 
         ('BACKGROUND', (2,0), (2,-1), colors.HexColor('#F7FAFC')),
         ('TEXTCOLOR', (0,0), (-1,-1), colors.HexColor('#1A202C')),
         ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'),
         ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'),
-        ('FONTNAME', (1,0), (1,-1), 'Helvetica'),
-        ('FONTNAME', (3,0), (3,-1), 'Helvetica'),
         ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
         ('PADDING', (0,0), (-1,-1), 5),
     ]))
     story.append(sum_table)
     
-    # --- FIG 2: PRICE VOLUME DYNAMICS (Native ReportLab Line Chart) ---
+    # --- FIG 2 & 3: CHARTS SIDE-BY-SIDE ---
     hist_df = m.get('history')
     if hist_df is not None and not hist_df.empty:
-        story.append(Paragraph("<b>Fig 2: Price Dynamics (1-Year)</b>", fig_title_style))
-        
-        # Build Native Vector Chart
-        drawing = Drawing(7*inch, 2.5*inch)
-        # Background rect
-        drawing.add(Rect(0, 0, 7*inch, 2.5*inch, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0')))
-        
+        # Native Line Plot (Price)
+        d1 = Drawing(3.5*inch, 2*inch)
+        d1.add(Rect(0, 0, 3.4*inch, 1.8*inch, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0')))
         lp = LinePlot()
-        lp.x = 40
-        lp.y = 30
-        lp.height = 1.8*inch
-        lp.width = 6*inch
-        
+        lp.x, lp.y, lp.height, lp.width = 30, 20, 1.3*inch, 2.8*inch
         prices = hist_df['Close'].tolist()
-        min_p = min(prices) * 0.95
-        max_p = max(prices) * 1.05
-        
-        # Create data tuples for ReportLab
-        data = [tuple((i, p) for i, p in enumerate(prices))]
-        lp.data = data
+        lp.data = [tuple((i, p) for i, p in enumerate(prices))]
         lp.joinedLines = 1
         lp.lines[0].strokeColor = colors.HexColor('#2B6CB0')
-        lp.lines[0].strokeWidth = 1.5
-        
-        lp.xValueAxis.valueMin = 0
-        lp.xValueAxis.valueMax = len(prices)
-        lp.xValueAxis.visible = False # Hide X axis numbers for clean look
-        
-        lp.yValueAxis.valueMin = min_p
-        lp.yValueAxis.valueMax = max_p
-        lp.yValueAxis.labelTextFormat = "%.0f"
-        
-        drawing.add(lp)
-        story.append(drawing)
+        lp.xValueAxis.visible = False 
+        lp.yValueAxis.valueMin, lp.yValueAxis.valueMax = min(prices)*0.95, max(prices)*1.05
+        d1.add(lp)
 
-    # --- FIG 3: FINANCIALS SUMMARY ---
-    pnl_df = m.get('pnl_df', pd.DataFrame())
-    if not pnl_df.empty:
-        story.append(Paragraph("<b>Fig 3: Financials Summary (P&L)</b>", fig_title_style))
-        
-        cleaned_columns = [col.replace('₹', 'INR') for col in pnl_df.columns]
-        pnl_data = [cleaned_columns] + pnl_df.astype(str).replace('₹', 'INR', regex=True).values.tolist()
-        
-        pnl_table = Table(pnl_data, colWidths=[4.5*inch, 2.5*inch])
-        pnl_table.setStyle(TableStyle([
+        # Native Bar Chart (Fair Value)
+        d2 = Drawing(3.5*inch, 2*inch)
+        d2.add(Rect(0, 0, 3.4*inch, 1.8*inch, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0')))
+        bc = VerticalBarChart()
+        bc.x, bc.y, bc.height, bc.width = 30, 20, 1.3*inch, 2.8*inch
+        p_val = m.get('price', 0)
+        fv_val = pred.get('target_price', 0)
+        bc.data = [[p_val, fv_val]]
+        bc.categoryAxis.categoryNames = ['Price', 'Fair Val']
+        bc.bars[0].fillColor = colors.HexColor('#3B82F6')
+        bc.valueAxis.valueMin = 0
+        d2.add(bc)
+
+        chart_table = Table([[Paragraph("<b>Fig 2: 1-Year Price</b>", fig_title_style), Paragraph("<b>Fig 3: Fair Value (INR)</b>", fig_title_style)], [d1, d2]])
+        chart_table.setStyle(TableStyle([('VALIGN', (0,0), (-1,-1), 'TOP')]))
+        story.append(chart_table)
+
+    # --- FINANCIAL TABLES (P&L, BS, CF) ---
+    def make_fin_table(title, df):
+        if df.empty: return None
+        story.append(Paragraph(title, fig_title_style))
+        cols = [col.replace('₹', 'INR') for col in df.columns]
+        data = [cols] + df.astype(str).replace('₹', 'INR', regex=True).values.tolist()
+        t = Table(data, colWidths=[4.5*inch, 2.5*inch])
+        t.setStyle(TableStyle([
             ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#1A365D')),
             ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
             ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
-            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F7FAFC')]), # Alternating rows
+            ('ROWBACKGROUNDS', (0,1), (-1,-1), [colors.white, colors.HexColor('#F7FAFC')]),
             ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E0')),
-            ('PADDING', (0,0), (-1,-1), 6),
+            ('PADDING', (0,0), (-1,-1), 4),
         ]))
-        story.append(pnl_table)
+        return t
+
+    t_pnl = make_fin_table("<b>Fig 4: Profit & Loss (INR Cr)</b>", m.get('pnl_df', pd.DataFrame()))
+    if t_pnl: story.append(t_pnl)
+    t_bs = make_fin_table("<b>Fig 5: Balance Sheet (INR Cr)</b>", m.get('bs_df', pd.DataFrame()))
+    if t_bs: story.append(t_bs)
+    t_cf = make_fin_table("<b>Fig 6: Cash Flows (INR Cr)</b>", m.get('cf_df', pd.DataFrame()))
+    if t_cf: story.append(t_cf)
+
+    story.append(PageBreak())
+
+    # --- SYSTEM CHECKLISTS ---
+    story.append(Paragraph("<b>System Parameter Checks</b>", ParagraphStyle('H1', fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#1A365D'), spaceAfter=10)))
+    
+    val_checks = valuation_checks(m) + past_performance_checks(m) + financial_health_checks(m)
+    for label, status, desc in val_checks:
+        icon = "<font color='#22C55E'>[PASS]</font>" if status is True else "<font color='#EF4444'>[FAIL]</font>" if status is False else "<font color='#94A3B8'>[N/A]</font>"
+        story.append(Paragraph(f"• {icon} <b>{label}</b>: {desc.replace('₹', 'INR')}", list_style))
         
-    # --- QUALITATIVE NARRATIVE (Institutional Breakdown) ---
+    # --- QUALITATIVE NARRATIVE ---
     story.append(Spacer(1, 15))
-    story.append(Paragraph("<b>Qualitative Analysis & Parameters</b>", ParagraphStyle('H1', fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#1A365D'), spaceAfter=10)))
+    story.append(Paragraph("<b>Qualitative Analysis & Verdict</b>", ParagraphStyle('H1', fontName='Helvetica-Bold', fontSize=14, textColor=colors.HexColor('#1A365D'), spaceAfter=10)))
     
     clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_") and line.strip()]
-    
     for line in clean_lines:
-        line = line.replace('₹', 'INR') # Fix encoding
-        formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line) # Parse Markdown bold
-        
-        # If line is a numbered header (e.g., "1. VALUATION")
+        line = line.replace('₹', 'INR') 
+        formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
         if re.match(r'^\d+\.', formatted_line):
             story.append(Spacer(1, 10))
             story.append(Paragraph(f"<font color='#2B6CB0'><b>{formatted_line}</b></font>", ParagraphStyle('SubH', fontName='Helvetica-Bold', fontSize=10, spaceAfter=4)))
