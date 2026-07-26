@@ -142,8 +142,102 @@ def fetch_google_news(query_term):
     return []
 
 # ============================================================
-# 3. QUANTITATIVE COMPOSITE ENGINE (Overhauled)
+# 3. CHECKLISTS (Sourced directly from Claude's update)
 # ============================================================
+def valuation_checks(m):
+    pe = to_float(m.get('pe_ratio'))
+    peg = to_float(m.get('peg_ratio'))
+    pat_yoy = to_float(m.get('pat_yoy'))
+    pb = to_float(m.get('pb_ratio'))
+    ev_ebitda = to_float(m.get('ev_ebitda'))
+    is_fin = m.get('is_financial_sector', False)
+    checks = []
+
+    if pe is not None:
+        if pe < 0:
+            checks.append(("Profitable on a P/E basis", False,
+                            f"P/E is negative ({pe}x) — the company is currently loss-making."))
+        else:
+            checks.append(("Reasonable P/E (<25x)", pe < 25, f"Trailing P/E of {pe}x"))
+
+    if peg is not None and pe is not None and pe > 0 and pat_yoy is not None and pat_yoy > 0:
+        checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg}"))
+
+    if pb is not None:
+        threshold = 3.0 if is_fin else 5.0
+        checks.append((f"Reasonable P/B (<{threshold:g}x)", 0 < pb < threshold, f"Price-to-Book of {pb}x"))
+
+    if not is_fin and ev_ebitda is not None:
+        checks.append(("Reasonable EV/EBITDA (<15x)", 0 < ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda}x"))
+
+    # Margin of Safety Check
+    price, fv = to_float(m.get('price')), m.get('fair_value')
+    if fv and price: checks.append(("Trading Below Modeled Fair Value", price < fv, f"Price {price} vs Fair Value {fv}"))
+
+    return checks
+
+def past_performance_checks(m):
+    yoy, qoq = to_float(m.get('pat_yoy')), to_float(m.get('pat_qoq'))
+    roe, margin = to_float(m.get('roe')), to_float(m.get('net_margin'))
+    checks = []
+    if yoy is not None:
+        checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {m.get('pat_yoy')}"))
+    if yoy is not None and qoq is not None:
+        checks.append(("Accelerating Growth", qoq > yoy, "Comparing most recent quarter growth to the yearly figure"))
+    if roe is not None:
+        checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {m.get('roe')}"))
+    if margin is not None:
+        checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {m.get('net_margin')}"))
+    return checks
+
+def financial_health_checks(m):
+    de = to_float(m.get('debt_to_equity'))
+    ic = to_float(m.get('interest_coverage'))
+    is_fin = m.get('is_financial_sector', False)
+    checks = []
+    if de is not None:
+        if de < 0:
+            checks.append(("Positive Shareholder Equity", False,
+                            f"Debt-to-equity is negative ({de}) — implies negative shareholders' equity."))
+        else:
+            threshold, label = (10.0, "Leverage in line with a lending-book business model (D/E < 10x)") if is_fin \
+                else (1.0, "Low Leverage (D/E < 1.0)")
+            checks.append((label, de < threshold, f"Debt-to-equity of {de}"))
+    if ic is not None:
+        checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic}x"))
+    return checks
+
+def dividend_checks(m):
+    dy_str = str(m.get('dividend_yield', ''))
+    if "doesn't pay" in dy_str.lower():
+        return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
+    dy = to_float(dy_str)
+    return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
+
+def score_from_checks(checks):
+    vals = [c[1] for c in checks if c[1] is not None]
+    return round(100 * sum(vals) / len(vals)) if vals else None
+
+def compute_fundamental_score(val_score, past_score, health_score, is_financial):
+    weights = {"val": 0.45, "past": 0.35, "health": 0.20} if is_financial else {"val": 0.35, "past": 0.35, "health": 0.30}
+    scores = {"val": val_score, "past": past_score, "health": health_score}
+    available = {k: v for k, v in scores.items() if v is not None}
+    if not available:
+        return 0.0
+    total_w = sum(weights[k] for k in available)
+    return round(sum(weights[k] * v for k, v in available.items()) / total_w, 1)
+
+
+# ============================================================
+# 4. QUANTITATIVE COMPOSITE ENGINE (Sourced from Claude)
+# ============================================================
+def calculate_vwap_support(df):
+    df = df.dropna(subset=['Close', 'Volume'])
+    if df.empty: return None
+    df['PriceBin'] = pd.cut(df['Close'], bins=20)
+    vol_by_bin = df.groupby('PriceBin', observed=True)['Volume'].sum()
+    return vol_by_bin.idxmax().mid
+
 def annualized_drift(hist_df, lookback=180):
     if hist_df is None or len(hist_df) < 30: return None
     d = hist_df.tail(lookback)
@@ -160,90 +254,170 @@ def calculate_atr(df, period=14):
     low_close = (df['Low'] - df['Close'].shift()).abs()
     return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(period).mean().iloc[-1]
 
-def run_predictive_pipeline(info, hist, fcf_history, pat_yoy_pct, net_income, total_equity, shares_out):
-    """COMPOSITE SCORING ARCHITECTURE (Sector-Aware)"""
-    current_price = info.get('currentPrice') or (float(hist['Close'].iloc[-1]) if not hist.empty else None)
-    sector = info.get('sector', 'N/A')
-    is_fin = sector in ['Financial Services', 'Banks', 'Credit Services']
-    
-    result = {"verdict": "OBSERVE", "target_price": None, "entry_range": "N/A", "stop_loss": None, "time_horizon": "N/A", "note": None}
+def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=8.0):
+    if not book_value_per_share or book_value_per_share <= 0 or roe_pct is None:
+        return None, None
+    roe, ke, g = roe_pct / 100, ke_pct / 100, growth_pct / 100
+    if ke <= g:
+        g = ke - 0.02
+    jpb = 1 + (roe - ke) / (ke - g)
+    jpb = min(max(jpb, pb_floor), pb_cap)
+    return round(jpb, 2), round(jpb * book_value_per_share, 2)
+
+def ddm_fair_value(dividend_per_share, ke_pct, growth_pct):
+    if not dividend_per_share or dividend_per_share <= 0:
+        return None
+    ke, g = ke_pct / 100, growth_pct / 100
+    if ke <= g:
+        g = ke - 0.02
+    return round((dividend_per_share * (1 + g)) / (ke - g), 2)
+
+def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None, forced_intrinsic_adjustment=0):
+    W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.40, 0.35, 0.25
+    intrinsic_score = min(max(50 + margin_of_safety * 150, 0), 100)
+    intrinsic_score = min(max(intrinsic_score + forced_intrinsic_adjustment, 0), 100)
+    tech_score = min(max(50 + (drift or 0) * 100, 0), 100)
+    if arima_direction == "UP":
+        tech_score = min(100, tech_score + 10)
+    elif arima_direction == "DOWN":
+        tech_score = max(0, tech_score - 10)
+    composite = W_FUNDAMENTAL * fundamental_score + W_INTRINSIC * intrinsic_score + W_TECHNICAL * tech_score
+    if composite >= 75: verdict = "STRONG BUY"
+    elif composite >= 60: verdict = "BUY"
+    elif composite >= 40: verdict = "OBSERVE"
+    else: verdict = "DON'T BUY"
+    return round(composite, 1), verdict, round(intrinsic_score, 1), round(tech_score, 1)
+
+VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
+
+def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
+                              book_value_per_share, dividend_per_share, roe_pct,
+                              pat_yoy_pct, analyst_growth_pct,
+                              precomputed_jpb=None, precomputed_ddm=None):
+    current_price = info.get('currentPrice')
+    if not current_price and hist is not None and not hist.empty:
+        current_price = float(hist['Close'].iloc[-1])
+
+    result = {
+        "verdict": "OBSERVE", "target_price": None, "entry_range": "N/A", "stop_loss": None,
+        "time_horizon": "N/A", "note": None, "model_used": "N/A",
+        "composite_score": None, "fundamental_score": fundamental_score,
+        "intrinsic_score": None, "technical_score": None, "margin_of_safety": None,
+        "discount_rate": None, "growth_used": None,
+    }
     if not current_price: return result
 
-    # --- 1. FUNDAMENTAL SCORE (0-100) ---
-    fund_score = 50
-    pe = info.get('trailingPE') or (current_price / (net_income/shares_out) if net_income and shares_out else 20)
-    if pe < 15: fund_score += 25
-    elif pe < 25: fund_score += 10
-    elif pe > 40: fund_score -= 20
+    notes = []
+    beta = info.get('beta')
+    if beta is None or pd.isna(beta) or beta <= 0: beta = 1.0
+    ke_pct = min(max((0.07 + beta * 0.07) * 100, 9), 20)
 
-    roe = info.get('returnOnEquity') or (net_income/total_equity if net_income and total_equity else 0)
-    if roe > 0.15: fund_score += 20
-    elif roe < 0.05: fund_score -= 15
+    growth_pct = 8.0
+    if analyst_growth_pct and analyst_growth_pct > 0: growth_pct = min(max(analyst_growth_pct, 5), 25)
+    elif pat_yoy_pct and pat_yoy_pct > 0: growth_pct = min(max(pat_yoy_pct, 5), 20)
 
-    if not is_fin:
-        de = info.get('debtToEquity', 0) / 100
-        if de < 0.5: fund_score += 15
-        elif de > 2.0: fund_score -= 20
-    fund_score = max(0, min(100, fund_score))
+    financial = sector in ['Financial Services', 'Banks', 'Credit Services']
+    forced_intrinsic_adjustment = 0
 
-    # --- 2. VALUATION SCORE (Sector Aware) ---
-    ke = 0.07 + (info.get('beta', 1.0) * 0.06)
-    target_price = current_price
-    
-    if is_fin:
-        g = 0.05
-        bvps = info.get('bookValue') or (total_equity/shares_out if total_equity and shares_out else current_price)
-        safe_ke = max(ke, g + 0.01)
-        justified_pb = (roe - g) / (safe_ke - g) if roe > g else 1.0
-        target_price = justified_pb * bvps
-        result['note'] = "Financial Sector detected: Valuation utilized Justified P/B (Excess ROE) Model rather than FCF-based DCF."
+    # ---------------- Model 1: intrinsic valuation (sector-aware) ----------------
+    if financial:
+        jpb_ratio, jpb_value = (precomputed_jpb if precomputed_jpb is not None else justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share))
+        ddm_val = precomputed_ddm if precomputed_ddm is not None else ddm_fair_value(dividend_per_share, ke_pct, growth_pct)
+        if jpb_value and ddm_val:
+            intrinsic_value = (jpb_value + ddm_val) / 2
+            result["model_used"] = "Blended: Excess-ROE (Justified P/B) + DDM"
+        elif jpb_value:
+            intrinsic_value = jpb_value
+            result["model_used"] = "Excess Return on Equity (Justified P/B)"
+        elif ddm_val:
+            intrinsic_value = ddm_val
+            result["model_used"] = "Dividend Discount Model (DDM)"
+        else:
+            intrinsic_value = current_price
+            forced_intrinsic_adjustment = -30
+            result["model_used"] = "No valid financial-sector inputs — valuation score penalized"
     else:
-        avg_fcf = float(fcf_history.mean()) if fcf_history is not None and len(fcf_history) > 0 else net_income or 0
-        fcf_per_share = (avg_fcf / shares_out) if shares_out else 0
-        g = min(max((pat_yoy_pct or 10)/100, 0.05), 0.20)
-        tg = 0.04
+        if fcf_history is not None and len(fcf_history) > 0:
+            avg_fcf = float(fcf_history.mean())
+        else:
+            avg_fcf = info.get('netIncomeToCommon') or 0
+        shares = info.get('sharesOutstanding')
+        fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
+
         if fcf_per_share > 0:
-            pv_fcf = sum(fcf_per_share * (1 + g)**t / (1 + ke)**t for t in range(1, 6))
-            tv = (fcf_per_share * (1 + g)**5 * (1 + tg)) / (ke - tg)
-            target_price = pv_fcf + (tv / (1 + ke)**5)
+            terminal_growth_pct = 4.0
+            g = growth_pct if growth_pct > terminal_growth_pct else terminal_growth_pct + 2
+            discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, terminal_growth_pct / 100
+            pv_fcf = sum(fcf_per_share * (1 + g_frac) ** t / (1 + discount_rate) ** t for t in range(1, 6))
+            fcf5 = fcf_per_share * (1 + g_frac) ** 5
+            terminal_value = (fcf5 * (1 + tg_frac)) / (discount_rate - tg_frac)
+            intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
+            result["model_used"] = "2-Stage DCF (Free Cash Flow)"
+        elif book_value_per_share and book_value_per_share > 0:
+            intrinsic_value = round(book_value_per_share * 0.8, 2)
+            result["model_used"] = "Book Value Haircut (negative FCF — DCF not reliable)"
+            notes.append("Free cash flow is negative or unavailable, so the standard DCF could not be run. Target price uses a 20%-discounted book value proxy.")
+        else:
+            intrinsic_value = current_price
+            forced_intrinsic_adjustment = -35
+            result["model_used"] = "Insufficient data for DCF or book-value fallback — valuation score penalized"
+            notes.append("Neither free cash flow nor book value per share was available, so no defensible target price could be modeled.")
 
-    target_price = round(target_price, 2)
-    mos = (target_price - current_price) / current_price
-    
-    val_score = 50
-    if mos > 0.20: val_score = 100
-    elif mos > 0: val_score = 75
-    elif mos > -0.15: val_score = 40
-    else: val_score = 10
+    target_price = round(intrinsic_value, 2)
+    margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
 
-    # --- 3. MOMENTUM SCORE ---
-    drift = annualized_drift(hist) or 0
-    if drift > 0.20: mom_score = 100
-    elif drift > 0: mom_score = 75
-    elif drift > -0.10: mom_score = 40
-    else: mom_score = 10
-
-    # --- COMPOSITE VERDICT ---
-    comp = (0.3 * fund_score) + (0.4 * val_score) + (0.3 * mom_score)
-    if comp >= 78: final_verdict = "STRONG BUY"
-    elif comp >= 62: final_verdict = "BUY"
-    elif comp >= 40: final_verdict = "OBSERVE"
-    else: final_verdict = "DON'T BUY"
-
+    # ---------------- Model 2: ATR + volume-weighted support ----------------
     atr = calculate_atr(hist)
-    entry_low = round(current_price * 0.96, 2)
+    support = calculate_vwap_support(hist) or (current_price * 0.92)
+    entry_low = round(support, 2)
+    entry_high = round(support + (0.5 * atr if atr else current_price * 0.02), 2)
+    if entry_low > current_price:
+        entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
     stop_loss = round(entry_low - (1.5 * atr if atr else entry_low * 0.05), 2)
 
+    # ---------------- Model 3: momentum + optional ARIMA ----------------
+    momentum, horizon, drift = "NEUTRAL", "3-5 Years", None
+    if len(hist) > 30:
+        normalized_prices = hist['Close'].values / current_price
+        slope, _ = np.polyfit(np.arange(len(hist)), normalized_prices, 1)
+        drift = slope * 252
+        if slope > 0.0005: momentum, horizon = "UP", "12-18 Months (Accelerated)"
+        elif slope < -0.0005: momentum = "DOWN"
+        if HAS_ARIMA and len(hist) > 100:
+            try:
+                fitted = ARIMA(hist['Close'].values, order=(5, 1, 0)).fit()
+                forecast = fitted.forecast(steps=30)
+                momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
+                horizon = "12-18 Months (Accelerated)" if momentum == "UP" else "3-5 Years"
+            except Exception: pass
+
+    # ---------------- Weighted composite verdict ----------------
+    composite, verdict, intrinsic_score, tech_score = composite_verdict(
+        fundamental_score, margin_of_safety, drift, arima_direction=momentum,
+        forced_intrinsic_adjustment=forced_intrinsic_adjustment,
+    )
+
+    if verdict in ("BUY", "STRONG BUY") and momentum == "DOWN" and margin_of_safety > 0.15:
+        notes.append("Intrinsic valuation and fundamentals support the rating, but price momentum is currently negative — a possible value trap.")
+
+    # Sanity Veto
+    if target_price is not None and current_price and target_price <= current_price:
+        if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
+            notes.append(f"Downgraded from {verdict}: the modeled target price ({target_price}) is at or below the current price ({current_price}), so the model will not issue a BUY regardless of how strong fundamentals are.")
+            verdict = "OBSERVE"
+
     result.update({
-        "verdict": final_verdict, "target_price": target_price,
-        "entry_range": f"₹{entry_low:,.2f} - ₹{current_price:,.2f}",
-        "stop_loss": stop_loss, "time_horizon": "12-18 Months" if drift > 0.05 else "3-5 Years",
-        "discount_rate": round(ke * 100, 1)
+        "verdict": verdict, "target_price": target_price,
+        "entry_range": f"₹{entry_low:,.2f} - ₹{entry_high:,.2f}", "stop_loss": stop_loss,
+        "time_horizon": horizon, "note": " ".join(notes) if notes else None,
+        "composite_score": composite, "intrinsic_score": intrinsic_score, "technical_score": tech_score,
+        "margin_of_safety": round(margin_of_safety * 100, 1),
+        "discount_rate": round(ke_pct, 1), "growth_used": round(growth_pct, 1),
     })
     return result
 
 # ============================================================
-# 4. MASTER DATA FETCH (Ratios N/A Fix)
+# 5. MASTER DATA FETCH (Wired for New Logic)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -255,7 +429,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
     current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
     currency_symbol = "₹"
     
-    # Financial Statements
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     net_inc, total_eq, ebitda_val = None, None, info.get('ebitda')
     revenue_latest = None
@@ -264,7 +437,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     try:
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
-            net_inc = q_fin.loc['Net Income'].dropna().sum() # TTM
+            net_inc = q_fin.loc['Net Income'].dropna().sum() 
             
         fin = stock.financials
         if fin is not None and not fin.empty and 'Total Revenue' in fin.index:
@@ -281,7 +454,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
         if cf is not None and 'Free Cash Flow' in cf.index:
             fcf_history = cf.loc['Free Cash Flow'].dropna()
             
-        # Build Table DFs
         if fin is not None and not fin.empty:
             col = fin.columns[0]
             pnl_df = pd.DataFrame([
@@ -307,9 +479,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
     mcap = info.get("marketCap")
     shares_out = info.get("sharesOutstanding")
     sector = info.get("sector", "N/A")
+    industry = info.get("industry", "N/A")
     is_fin = sector in ['Financial Services', 'Banks', 'Credit Services']
 
-    # RATIO FALLBACKS
+    # RATIOS
     pe_raw = info.get("trailingPE")
     if not is_valid_metric(pe_raw) and net_inc and mcap and net_inc > 0:
         pe_raw = round(mcap / net_inc, 2)
@@ -335,8 +508,26 @@ def fetch_stock_data(resolved_ticker, raw_input):
     
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (ebitda_val and revenue_latest) else "N/A"
 
+    # Pre-Compute Fundamental Score so Predictive Pipeline can use it
+    temp_metrics = {
+        'pe_ratio': pe_raw, 'peg_ratio': info.get("pegRatio"), 'pb_ratio': pb_raw, 
+        'pat_yoy': pat_yoy_pct, 'roe': roe_raw * 100 if roe_raw else None, 
+        'ev_ebitda': ev_ebitda, 'is_financial_sector': is_fin, 'debt_to_equity': info.get("debtToEquity", 0) / 100,
+        'interest_coverage': None, 'net_margin': None, 'pat_qoq': None
+    }
+    
+    v_score = score_from_checks(valuation_checks(temp_metrics))
+    p_score = score_from_checks(past_performance_checks(temp_metrics))
+    h_score = score_from_checks(financial_health_checks(temp_metrics))
+    
+    fundamental_score = compute_fundamental_score(v_score, p_score, h_score, is_fin)
+
+    bvps = info.get('bookValue') or (total_eq / shares_out if total_eq and shares_out else None)
+    div_per_share = info.get("dividendRate", 0)
+
     predictive_data = run_predictive_pipeline(
-        info, hist_full, fcf_history, pat_yoy_pct, net_inc, total_eq, shares_out
+        info, hist_full, fcf_history, sector, industry, fundamental_score, 
+        bvps, div_per_share, roe_raw * 100 if roe_raw else None, pat_yoy_pct, None
     )
 
     metrics = {
@@ -346,12 +537,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "peg_ratio": info.get("pegRatio", "N/A"),
         "ev_ebitda": ev_ebitda,
         "roe": f"{round(roe_raw*100, 2)}%" if is_valid_metric(roe_raw) else "N/A",
-        "ebitda_margin": ebitda_margin,
+        "ebitda_margin": f"{ebitda_margin}%" if ebitda_margin != "N/A" else "N/A",
         "debt_to_equity": round(info.get("debtToEquity", 0) / 100, 2) if info.get("debtToEquity") else "N/A",
         "dividend_yield": f"{round(info.get('dividendYield',0)*100,2)}%" if info.get('dividendYield') else "N/A",
         "pat_yoy": f"{pat_yoy_pct}%" if pat_yoy_pct else "N/A",
-        "pat_qoq": "N/A", # Simplified for stability
-        "market_cap": mcap, "sector": sector, "industry": info.get("industry", "N/A"),
+        "pat_qoq": "N/A",
+        "market_cap": mcap, "sector": sector, "industry": industry,
+        "is_financial_sector": is_fin,
         "fifty_two_high": info.get("fiftyTwoWeekHigh", "N/A"),
         "fifty_two_low": info.get("fiftyTwoWeekLow", "N/A"),
         "business_summary": info.get("longBusinessSummary"),
@@ -360,14 +552,15 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "recent_news": fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news"),
         "shareholding": {"Promoters": (info.get("heldPercentInsiders") or 0)*100, "Institutions": (info.get("heldPercentInstitutions") or 0)*100, "Public": max(0, 100 - ((info.get("heldPercentInsiders") or 0)*100 + (info.get("heldPercentInstitutions") or 0)*100))},
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
-        "q_fin": q_fin, "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
+        "q_fin": None, "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
-        "currency": currency_symbol
+        "currency": currency_symbol,
+        "fundamental_score": fundamental_score
     }
     return metrics
 
 # ============================================================
-# 5. UI PLOTLY CHARTS
+# 6. UI PLOTLY CHARTS
 # ============================================================
 def price_history_chart(hist_df, currency):
     fig = go.Figure()
@@ -391,27 +584,9 @@ def projection_path_chart(hist_df, target_price):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2))
     return fig
 
-def margin_overlay_chart(q_fin):
-    if q_fin is None or q_fin.empty or 'Total Revenue' not in q_fin.index or 'Net Income' not in q_fin.index: return None
-    dates = q_fin.columns[:5][::-1]
-    sales = [q_fin.loc['Total Revenue', d] / 10000000 for d in dates]
-    margins = [(q_fin.loc['Net Income', d] / q_fin.loc['Total Revenue', d]) * 100 if q_fin.loc['Total Revenue', d] else 0 for d in dates]
-    fig = make_subplots(specs=[[{"secondary_y": True}]])
-    fig.add_trace(go.Bar(x=[str(d.date()) for d in dates], y=sales, name="Quarter Sales (₹ Cr)", marker_color='#818cf8'), secondary_y=False)
-    fig.add_trace(go.Scatter(x=[str(d.date()) for d in dates], y=margins, name="Net Margin %", mode='lines+markers', line=dict(color=GREEN, width=2)), secondary_y=True)
-    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=280, margin=dict(t=20, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.2))
-    fig.update_yaxes(showgrid=False)
-    return fig
-
-def current_roe_gauge(current_roe):
-    roe_val = to_float(current_roe)
-    if roe_val is None: return None
-    fig = go.Figure(go.Indicator(mode="gauge+number", value=roe_val, number={'suffix': "%"}, gauge={'axis': {'range': [None, max(40, roe_val + 10)], 'tickwidth': 1, 'tickcolor': "white"}, 'bar': {'color': BLUE}, 'bgcolor': BG, 'steps': [{'range': [0, 10], 'color': RED}, {'range': [10, 20], 'color': GOLD}, {'range': [20, max(40, roe_val + 10)], 'color': GREEN}]}))
-    fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=250, margin=dict(t=20, b=20, l=20, r=20))
-    return fig
-
-def analysis_radar_chart(scores):
-    categories, values = list(scores.keys()), list(scores.values())
+def analysis_radar_chart(m, pred):
+    categories = ['Fundamentals', 'Valuation', 'Momentum']
+    values = [m.get('fundamental_score', 50), pred.get('intrinsic_score', 50), pred.get('technical_score', 50)]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=values + [values[0]], theta=categories + [categories[0]], fill='toself', fillcolor='rgba(234,179,8,0.35)', line=dict(color=GOLD, width=2)))
     fig.update_layout(polar=dict(bgcolor=BG, radialaxis=dict(visible=False, range=[0, 100]), angularaxis=dict(color=MUTED, gridcolor=BORDER)), showlegend=False, paper_bgcolor=BG, margin=dict(t=10, b=10, l=30, r=30), height=230)
@@ -421,42 +596,6 @@ def ownership_donut(shareholding):
     fig = go.Figure(data=[go.Pie(labels=list(shareholding.keys()), values=list(shareholding.values()), hole=.5, marker_colors=[BLUE, PURPLE, GOLD])])
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=240, margin=dict(t=10, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.1))
     return fig
-
-# ============================================================
-# 6. CHECKLISTS
-# ============================================================
-def valuation_checks(m):
-    price, pe, pb, fv = to_float(m.get('price')), to_float(m.get('pe_ratio')), to_float(m.get('pb_ratio')), m.get('fair_value')
-    checks = []
-    if fv and price: checks.append(("Below Modeled Fair Value", price < fv, f"Price {price} vs Fair Value {fv}"))
-    if pe: checks.append(("Reasonable P/E (<25x)", pe < 25, f"P/E of {pe}x"))
-    if pb: checks.append(("Reasonable P/B (<3x)", pb < 3, f"P/B of {pb}x"))
-    return checks
-
-def past_performance_checks(m):
-    roe, yoy = to_float(m.get('roe')), to_float(m.get('pat_yoy'))
-    return [("Positive Earnings Growth", yoy > 0 if yoy else None, f"PAT YoY {m.get('pat_yoy')}"), ("Strong ROE (>15%)", roe > 15 if roe else None, f"ROE {m.get('roe')}")]
-
-def financial_health_checks(m):
-    if m.get('sector') in ['Financial Services', 'Banks', 'Credit Services']: return [("Sector Exemption", True, "Standard Leverage checks bypassed for Banks/NBFCs.")]
-    de = to_float(m.get('debt_to_equity'))
-    return [("Low Leverage (D/E < 1.0)", de < 1.0 if de else None, f"D/E of {m.get('debt_to_equity')}")]
-
-def dividend_checks(m):
-    dy = to_float(m.get('dividend_yield'))
-    return [("Notable Dividend (>1.0%)", dy > 1.0 if dy else False, f"Yield: {m.get('dividend_yield')}")]
-
-def score_from_checks(checks):
-    vals = [c[1] for c in checks if c[1] is not None]
-    return round(100 * sum(vals) / len(vals)) if vals else 50
-
-def render_checks(checks):
-    if not checks: return "<div class='swf-check-na'>&#8213; No data.</div>"
-    html = ""
-    for label, status, desc in checks:
-        icon, cls = ("&#9989;", "swf-check-pass") if status else ("&#10060;", "swf-check-fail")
-        html += f'<div style="padding:5px 0;"><span class="{cls}">{icon} <b>{label}</b></span><div class="swf-sub">{desc}</div></div>'
-    return html
 
 def custom_metric(label, value):
     st.markdown(f'<div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;"><div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">{label}</div><div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div></div>', unsafe_allow_html=True)
@@ -584,7 +723,6 @@ if st.session_state.report_data:
     currency = m.get('currency', '₹')
 
     val_checks, past_checks, health_checks, div_checks = valuation_checks(m), past_performance_checks(m), financial_health_checks(m), dividend_checks(m)
-    scores = {"Value": score_from_checks(val_checks), "Future": 50, "Past": score_from_checks(past_checks), "Health": score_from_checks(health_checks), "Dividend": score_from_checks(div_checks)}
 
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
@@ -592,8 +730,8 @@ if st.session_state.report_data:
         hist_df = m.get('history')
         if hist_df is not None and not hist_df.empty: st.plotly_chart(price_history_chart(hist_df, currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
-        st.markdown('<div class="swf-card"><div class="swf-h">Analysis Summary</div>', unsafe_allow_html=True)
-        st.plotly_chart(analysis_radar_chart(scores), use_container_width=True, config={'displayModeBar': False})
+        st.markdown('<div class="swf-card"><div class="swf-h">Composite Score Radar</div>', unsafe_allow_html=True)
+        st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
@@ -608,33 +746,31 @@ if st.session_state.report_data:
         card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{m.get('business_summary', 'Business summary not available.')}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
 
     elif sec == "1. Valuation":
-        st.markdown(f"### 1. Valuation — Score {score_from_checks(val_checks)}/100")
+        st.markdown(f"### 1. Valuation")
         card("Valuation Checklist", render_checks(val_checks))
         st.markdown("##### Fair Value Estimate")
         if m.get('fair_value'):
             fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], currency)
             st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-            st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled DCF/DDM fair value.")
+            st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled {pred.get('model_used','valuation')} fair value.")
         card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     elif sec == "2. Future Growth":
         st.markdown("### 2. Future Growth & Outlook")
         fg1, fg2 = st.columns(2)
-        with fg1: custom_metric("Modeled Target", f"{currency}{pred['target_price']}")
+        with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", f"{currency}{pred['target_price']}")
         with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
         if m.get('fair_value'): st.plotly_chart(projection_path_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
         card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
 
     elif sec == "3. Past Performance":
-        st.markdown(f"### 3. Past Performance — Score {score_from_checks(past_checks)}/100")
+        st.markdown(f"### 3. Past Performance")
         card("Past Performance Checklist", render_checks(past_checks))
-        mo = margin_overlay_chart(m.get('q_fin'))
-        if mo: st.plotly_chart(mo, use_container_width=True, config={'displayModeBar': False})
         if not m['pnl_df'].empty: st.markdown("##### Profit & Loss (Cr)"); st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
         card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
     elif sec == "4. Financial Health":
-        st.markdown(f"### 4. Financial Health — Score {score_from_checks(health_checks)}/100")
+        st.markdown(f"### 4. Financial Health")
         card("Financial Health Checklist", render_checks(health_checks))
         tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
         with tab_bs: 
@@ -644,7 +780,7 @@ if st.session_state.report_data:
         card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
 
     elif sec == "5. Dividend":
-        st.markdown(f"### 5. Dividend — Score {score_from_checks(div_checks)}/100")
+        st.markdown(f"### 5. Dividend")
         card("Dividend Checklist", render_checks(div_checks))
         card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
 
@@ -660,10 +796,15 @@ if st.session_state.report_data:
 
     elif sec == "8. Verdict":
         st.markdown("### 8. Verdict & Summary")
-        st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
-        if current_rating == "BUY":
-            st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
+        st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
         
+        if pred.get('note'): st.info(pred['note'])
+        
+        if current_rating in ["BUY", "STRONG BUY"]:
+            st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
+        else:
+            st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
+
         styled = style_verdict_text(narrative_for(7))
         card("AI Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
         
