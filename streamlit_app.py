@@ -33,7 +33,7 @@ except ImportError:
 # 1. SETUP & CONFIGURATION
 # ============================================================
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
-st.set_page_config(page_title="Financial Intelligence App", layout="wide")
+st.set_page_config(page_title="Financial Intelligence Terminal", layout="wide")
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
@@ -104,25 +104,15 @@ def resolve_name_to_ticker(stock_input):
 
 def rating_color(rating):
     r = (rating or "").upper()
-    if "DON" in r and "BUY" in r: return RED
-    if "OBSERVE" in r: return ORANGE
+    if "DON" in r or "SELL" in r: return RED
+    if "HOLD" in r or "OBSERVE" in r: return ORANGE
     if "BUY" in r: return GREEN
     return MUTED
 
 def style_verdict_text(text):
     if not text: return text
-    return re.sub(r"(?i)\bDON.?T\s+BUY\b|\bOBSERVE\b|\bSTRONG\s+BUY\b|\bBUY\b", 
+    return re.sub(r"(?i)\bDON.?T\s+BUY\b|\bSELL\b|\bHOLD\b|\bOBSERVE\b|\bSTRONG\s+BUY\b|\bBUY\b", 
                   lambda m: f'<span style="color:{rating_color(m.group(0))}; font-weight:bold;">{m.group(0)}</span>', text)
-
-def calculate_rsi(df, window=14):
-    if df is None or len(df) <= window or 'Close' not in df.columns: return "N/A"
-    delta = df['Close'].diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=window).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=window).mean()
-    loss = loss.replace(0, 1e-10)
-    rs = gain / loss
-    rsi = 100 - (100 / (1 + rs))
-    return round(rsi.iloc[-1], 2)
 
 def fetch_google_news(query_term):
     try:
@@ -142,7 +132,7 @@ def fetch_google_news(query_term):
     return []
 
 # ============================================================
-# 3. CHECKLISTS (Sourced directly from Claude's update)
+# 3. CHECKLISTS
 # ============================================================
 def valuation_checks(m):
     pe = to_float(m.get('pe_ratio'))
@@ -155,8 +145,7 @@ def valuation_checks(m):
 
     if pe is not None:
         if pe < 0:
-            checks.append(("Profitable on a P/E basis", False,
-                            f"P/E is negative ({pe}x) — the company is currently loss-making."))
+            checks.append(("Profitable on a P/E basis", False, f"P/E is negative ({pe}x) — the company is loss-making."))
         else:
             checks.append(("Reasonable P/E (<25x)", pe < 25, f"Trailing P/E of {pe}x"))
 
@@ -170,7 +159,6 @@ def valuation_checks(m):
     if not is_fin and ev_ebitda is not None:
         checks.append(("Reasonable EV/EBITDA (<15x)", 0 < ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda}x"))
 
-    # Margin of Safety Check
     price, fv = to_float(m.get('price')), m.get('fair_value')
     if fv and price: checks.append(("Trading Below Modeled Fair Value", price < fv, f"Price {price} vs Fair Value {fv}"))
 
@@ -180,14 +168,10 @@ def past_performance_checks(m):
     yoy, qoq = to_float(m.get('pat_yoy')), to_float(m.get('pat_qoq'))
     roe, margin = to_float(m.get('roe')), to_float(m.get('net_margin'))
     checks = []
-    if yoy is not None:
-        checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {m.get('pat_yoy')}"))
-    if yoy is not None and qoq is not None:
-        checks.append(("Accelerating Growth", qoq > yoy, "Comparing most recent quarter growth to the yearly figure"))
-    if roe is not None:
-        checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {m.get('roe')}"))
-    if margin is not None:
-        checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {m.get('net_margin')}"))
+    if yoy is not None: checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {m.get('pat_yoy')}"))
+    if yoy is not None and qoq is not None: checks.append(("Accelerating Growth", qoq > yoy, "Comparing recent quarter to yearly figure"))
+    if roe is not None: checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {m.get('roe')}"))
+    if margin is not None: checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {m.get('net_margin')}"))
     return checks
 
 def financial_health_checks(m):
@@ -196,21 +180,16 @@ def financial_health_checks(m):
     is_fin = m.get('is_financial_sector', False)
     checks = []
     if de is not None:
-        if de < 0:
-            checks.append(("Positive Shareholder Equity", False,
-                            f"Debt-to-equity is negative ({de}) — implies negative shareholders' equity."))
+        if de < 0: checks.append(("Positive Shareholder Equity", False, f"D/E is negative ({de}) — implies negative equity."))
         else:
-            threshold, label = (10.0, "Leverage in line with a lending-book business model (D/E < 10x)") if is_fin \
-                else (1.0, "Low Leverage (D/E < 1.0)")
+            threshold, label = (10.0, "Leverage in line with a lending book") if is_fin else (1.0, "Low Leverage (D/E < 1.0)")
             checks.append((label, de < threshold, f"Debt-to-equity of {de}"))
-    if ic is not None:
-        checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic}x"))
+    if ic is not None: checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic}x"))
     return checks
 
 def dividend_checks(m):
     dy_str = str(m.get('dividend_yield', ''))
-    if "doesn't pay" in dy_str.lower():
-        return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
+    if "doesn't pay" in dy_str.lower(): return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
     dy = to_float(dy_str)
     return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
 
@@ -222,14 +201,11 @@ def compute_fundamental_score(val_score, past_score, health_score, is_financial)
     weights = {"val": 0.45, "past": 0.35, "health": 0.20} if is_financial else {"val": 0.35, "past": 0.35, "health": 0.30}
     scores = {"val": val_score, "past": past_score, "health": health_score}
     available = {k: v for k, v in scores.items() if v is not None}
-    if not available:
-        return 0.0
-    total_w = sum(weights[k] for k in available)
-    return round(sum(weights[k] * v for k, v in available.items()) / total_w, 1)
-
+    if not available: return 0.0
+    return round(sum(weights[k] * v for k, v in available.items()) / sum(weights[k] for k in available), 1)
 
 # ============================================================
-# 4. QUANTITATIVE COMPOSITE ENGINE (Sourced from Claude)
+# 4. QUANTITATIVE COMPOSITE ENGINE (IIFL-Grade)
 # ============================================================
 def calculate_vwap_support(df):
     df = df.dropna(subset=['Close', 'Volume'])
@@ -254,64 +230,58 @@ def calculate_atr(df, period=14):
     low_close = (df['Low'] - df['Close'].shift()).abs()
     return pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(period).mean().iloc[-1]
 
-def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=8.0):
-    if not book_value_per_share or book_value_per_share <= 0 or roe_pct is None:
-        return None, None
+def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share):
+    if not book_value_per_share or book_value_per_share <= 0 or roe_pct is None: return None, None
     roe, ke, g = roe_pct / 100, ke_pct / 100, growth_pct / 100
-    if ke <= g:
-        g = ke - 0.02
+    if ke <= g: g = ke - 0.02
     jpb = 1 + (roe - ke) / (ke - g)
-    jpb = min(max(jpb, pb_floor), pb_cap)
+    jpb = min(max(jpb, 0.4), 8.0) # Allowed to fall below 1.0 for bad ROE
     return round(jpb, 2), round(jpb * book_value_per_share, 2)
 
 def ddm_fair_value(dividend_per_share, ke_pct, growth_pct):
-    if not dividend_per_share or dividend_per_share <= 0:
-        return None
+    if not dividend_per_share or dividend_per_share <= 0: return None
     ke, g = ke_pct / 100, growth_pct / 100
-    if ke <= g:
-        g = ke - 0.02
+    if ke <= g: g = ke - 0.02
     return round((dividend_per_share * (1 + g)) / (ke - g), 2)
 
 def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None, forced_intrinsic_adjustment=0):
-    W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.40, 0.35, 0.25
+    W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.35, 0.40, 0.25
     intrinsic_score = min(max(50 + margin_of_safety * 150, 0), 100)
     intrinsic_score = min(max(intrinsic_score + forced_intrinsic_adjustment, 0), 100)
     tech_score = min(max(50 + (drift or 0) * 100, 0), 100)
-    if arima_direction == "UP":
-        tech_score = min(100, tech_score + 10)
-    elif arima_direction == "DOWN":
-        tech_score = max(0, tech_score - 10)
+    
+    if arima_direction == "UP": tech_score = min(100, tech_score + 10)
+    elif arima_direction == "DOWN": tech_score = max(0, tech_score - 10)
+        
     composite = W_FUNDAMENTAL * fundamental_score + W_INTRINSIC * intrinsic_score + W_TECHNICAL * tech_score
+    
+    # Institutional Rating Scale
     if composite >= 75: verdict = "STRONG BUY"
     elif composite >= 60: verdict = "BUY"
-    elif composite >= 40: verdict = "OBSERVE"
-    else: verdict = "DON'T BUY"
+    elif composite >= 40: verdict = "HOLD"
+    else: verdict = "SELL"
+    
     return round(composite, 1), verdict, round(intrinsic_score, 1), round(tech_score, 1)
-
-VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
                               book_value_per_share, dividend_per_share, roe_pct,
-                              pat_yoy_pct, analyst_growth_pct,
-                              precomputed_jpb=None, precomputed_ddm=None):
+                              pat_yoy_pct, analyst_growth_pct, trailing_eps):
     current_price = info.get('currentPrice')
-    if not current_price and hist is not None and not hist.empty:
-        current_price = float(hist['Close'].iloc[-1])
+    if not current_price and hist is not None and not hist.empty: current_price = float(hist['Close'].iloc[-1])
 
-    result = {
-        "verdict": "OBSERVE", "target_price": None, "entry_range": "N/A", "stop_loss": None,
-        "time_horizon": "N/A", "note": None, "model_used": "N/A",
-        "composite_score": None, "fundamental_score": fundamental_score,
-        "intrinsic_score": None, "technical_score": None, "margin_of_safety": None,
-        "discount_rate": None, "growth_used": None,
-    }
+    result = {"verdict": "HOLD", "target_price": None, "entry_range": "N/A", "stop_loss": None, "time_horizon": "N/A", "note": None}
     if not current_price: return result
 
     notes = []
+    
+    # 1. Dynamic CAPM (Institutional India Baseline)
     beta = info.get('beta')
     if beta is None or pd.isna(beta) or beta <= 0: beta = 1.0
-    ke_pct = min(max((0.07 + beta * 0.07) * 100, 9), 20)
+    risk_free = 7.0 
+    market_premium = 6.5
+    ke_pct = min(max(risk_free + (beta * market_premium), 8.0), 20.0)
 
+    # 2. Growth Estimation
     growth_pct = 8.0
     if analyst_growth_pct and analyst_growth_pct > 0: growth_pct = min(max(analyst_growth_pct, 5), 25)
     elif pat_yoy_pct and pat_yoy_pct > 0: growth_pct = min(max(pat_yoy_pct, 5), 20)
@@ -319,105 +289,91 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     financial = sector in ['Financial Services', 'Banks', 'Credit Services']
     forced_intrinsic_adjustment = 0
 
-    # ---------------- Model 1: intrinsic valuation (sector-aware) ----------------
+    # 3. Intrinsic Valuation Model Selection
     if financial:
-        jpb_ratio, jpb_value = (precomputed_jpb if precomputed_jpb is not None else justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share))
-        ddm_val = precomputed_ddm if precomputed_ddm is not None else ddm_fair_value(dividend_per_share, ke_pct, growth_pct)
+        jpb_ratio, jpb_value = justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share)
+        ddm_val = ddm_fair_value(dividend_per_share, ke_pct, growth_pct)
         if jpb_value and ddm_val:
             intrinsic_value = (jpb_value + ddm_val) / 2
-            result["model_used"] = "Blended: Excess-ROE (Justified P/B) + DDM"
+            result["model_used"] = "Blended: Justified P/B + DDM"
         elif jpb_value:
             intrinsic_value = jpb_value
             result["model_used"] = "Excess Return on Equity (Justified P/B)"
-        elif ddm_val:
-            intrinsic_value = ddm_val
-            result["model_used"] = "Dividend Discount Model (DDM)"
         else:
-            intrinsic_value = current_price
-            forced_intrinsic_adjustment = -30
-            result["model_used"] = "No valid financial-sector inputs — valuation score penalized"
+            intrinsic_value = book_value_per_share * 0.8 if book_value_per_share else current_price * 0.5
+            forced_intrinsic_adjustment = -40
+            result["model_used"] = "Book Value Haircut (Poor ROE metrics)"
     else:
-        if fcf_history is not None and len(fcf_history) > 0:
-            avg_fcf = float(fcf_history.mean())
-        else:
-            avg_fcf = info.get('netIncomeToCommon') or 0
-        shares = info.get('sharesOutstanding')
+        avg_fcf = float(fcf_history.mean()) if fcf_history is not None and len(fcf_history) > 0 else info.get('netIncomeToCommon', 0)
+        shares = info.get('sharesOutstanding', 1)
         fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
 
         if fcf_per_share > 0:
-            terminal_growth_pct = 4.0
+            terminal_growth_pct = 4.0 # India Real GDP proxy
             g = growth_pct if growth_pct > terminal_growth_pct else terminal_growth_pct + 2
             discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, terminal_growth_pct / 100
+            
             pv_fcf = sum(fcf_per_share * (1 + g_frac) ** t / (1 + discount_rate) ** t for t in range(1, 6))
-            fcf5 = fcf_per_share * (1 + g_frac) ** 5
-            terminal_value = (fcf5 * (1 + tg_frac)) / (discount_rate - tg_frac)
+            terminal_value = (fcf_per_share * (1 + g_frac) ** 5 * (1 + tg_frac)) / (discount_rate - tg_frac)
             intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
             result["model_used"] = "2-Stage DCF (Free Cash Flow)"
-        elif book_value_per_share and book_value_per_share > 0:
-            intrinsic_value = round(book_value_per_share * 0.8, 2)
-            result["model_used"] = "Book Value Haircut (negative FCF — DCF not reliable)"
-            notes.append("Free cash flow is negative or unavailable, so the standard DCF could not be run. Target price uses a 20%-discounted book value proxy.")
+            
+        elif trailing_eps and trailing_eps > 0 and book_value_per_share and book_value_per_share > 0:
+            # Graham Number Fallback for Asset-Heavy / Negative FCF
+            intrinsic_value = round(np.sqrt(22.5 * trailing_eps * book_value_per_share), 2)
+            result["model_used"] = "Graham Number (Defensive Fallback)"
+            notes.append("Negative cash flows detected. DCF replaced by Graham Number defensive asset-value model.")
+            
         else:
             intrinsic_value = current_price
-            forced_intrinsic_adjustment = -35
-            result["model_used"] = "Insufficient data for DCF or book-value fallback — valuation score penalized"
-            notes.append("Neither free cash flow nor book value per share was available, so no defensible target price could be modeled.")
+            forced_intrinsic_adjustment = -40
+            result["model_used"] = "Insufficient data — Valuation Penalized"
+            notes.append("Insufficient positive data to run DCF or Graham models. Valuation penalized.")
 
     target_price = round(intrinsic_value, 2)
     margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
 
-    # ---------------- Model 2: ATR + volume-weighted support ----------------
+    # 4. ATR & Support
     atr = calculate_atr(hist)
     support = calculate_vwap_support(hist) or (current_price * 0.92)
     entry_low = round(support, 2)
     entry_high = round(support + (0.5 * atr if atr else current_price * 0.02), 2)
-    if entry_low > current_price:
-        entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
+    if entry_low > current_price: entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
     stop_loss = round(entry_low - (1.5 * atr if atr else entry_low * 0.05), 2)
 
-    # ---------------- Model 3: momentum + optional ARIMA ----------------
+    # 5. Momentum
     momentum, horizon, drift = "NEUTRAL", "3-5 Years", None
     if len(hist) > 30:
-        normalized_prices = hist['Close'].values / current_price
-        slope, _ = np.polyfit(np.arange(len(hist)), normalized_prices, 1)
+        slope, _ = np.polyfit(np.arange(len(hist)), hist['Close'].values / current_price, 1)
         drift = slope * 252
         if slope > 0.0005: momentum, horizon = "UP", "12-18 Months (Accelerated)"
         elif slope < -0.0005: momentum = "DOWN"
-        if HAS_ARIMA and len(hist) > 100:
-            try:
-                fitted = ARIMA(hist['Close'].values, order=(5, 1, 0)).fit()
-                forecast = fitted.forecast(steps=30)
-                momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
-                horizon = "12-18 Months (Accelerated)" if momentum == "UP" else "3-5 Years"
-            except Exception: pass
 
-    # ---------------- Weighted composite verdict ----------------
+    # 6. Final Composite Scoring
     composite, verdict, intrinsic_score, tech_score = composite_verdict(
-        fundamental_score, margin_of_safety, drift, arima_direction=momentum,
-        forced_intrinsic_adjustment=forced_intrinsic_adjustment,
+        fundamental_score, margin_of_safety, drift, momentum, forced_intrinsic_adjustment
     )
 
-    if verdict in ("BUY", "STRONG BUY") and momentum == "DOWN" and margin_of_safety > 0.15:
-        notes.append("Intrinsic valuation and fundamentals support the rating, but price momentum is currently negative — a possible value trap.")
-
-    # Sanity Veto
+    # 7. BULLETPROOF SANITY VETO
     if target_price is not None and current_price and target_price <= current_price:
-        if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
-            notes.append(f"Downgraded from {verdict}: the modeled target price ({target_price}) is at or below the current price ({current_price}), so the model will not issue a BUY regardless of how strong fundamentals are.")
-            verdict = "OBSERVE"
+        if verdict in ["BUY", "STRONG BUY"]:
+            notes.append(f"Downgraded from {verdict} to HOLD. The modeled Target Price (₹{target_price}) offers NO UPSIDE from the Current Price (₹{current_price}). A BUY rating is mathematically prohibited.")
+            verdict = "HOLD"
+            
+    if verdict == "SELL" and fundamental_score >= 70:
+        notes.append("Fundamentals are very strong, but the SELL rating is driven entirely by extreme overvaluation or collapsing momentum.")
 
     result.update({
         "verdict": verdict, "target_price": target_price,
         "entry_range": f"₹{entry_low:,.2f} - ₹{entry_high:,.2f}", "stop_loss": stop_loss,
         "time_horizon": horizon, "note": " ".join(notes) if notes else None,
-        "composite_score": composite, "intrinsic_score": intrinsic_score, "technical_score": tech_score,
-        "margin_of_safety": round(margin_of_safety * 100, 1),
+        "composite_score": composite, "margin_of_safety": round(margin_of_safety * 100, 1),
         "discount_rate": round(ke_pct, 1), "growth_used": round(growth_pct, 1),
     })
     return result
 
 # ============================================================
-# 5. MASTER DATA FETCH (Wired for New Logic)
+# 5. MASTER DATA FETCH
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -431,8 +387,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     net_inc, total_eq, ebitda_val = None, None, info.get('ebitda')
-    revenue_latest = None
-    fcf_history = None
+    revenue_latest, fcf_history = None, None
 
     try:
         q_fin = stock.quarterly_financials
@@ -482,33 +437,23 @@ def fetch_stock_data(resolved_ticker, raw_input):
     industry = info.get("industry", "N/A")
     is_fin = sector in ['Financial Services', 'Banks', 'Credit Services']
 
-    # RATIOS
     pe_raw = info.get("trailingPE")
-    if not is_valid_metric(pe_raw) and net_inc and mcap and net_inc > 0:
-        pe_raw = round(mcap / net_inc, 2)
+    if not is_valid_metric(pe_raw) and net_inc and mcap and net_inc > 0: pe_raw = round(mcap / net_inc, 2)
         
     pb_raw = info.get("priceToBook")
-    if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
-        pb_raw = round(mcap / total_eq, 2)
+    if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0: pb_raw = round(mcap / total_eq, 2)
 
     roe_raw = info.get("returnOnEquity")
-    if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
-        roe_raw = (net_inc / total_eq)
+    if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0: roe_raw = (net_inc / total_eq)
         
-    ev_ebitda = "N/A"
-    if is_fin:
-        ev_ebitda = "N/A (Fin Sector)"
-    else:
+    ev_ebitda = "N/A (Fin Sector)" if is_fin else None
+    if not is_fin:
         ev_val = info.get("enterpriseValue") or (mcap + info.get('totalDebt',0) - info.get('totalCash',0) if mcap else None)
-        if ebitda_val and ev_val and ebitda_val > 0:
-            ev_ebitda = round(ev_val / ebitda_val, 2)
+        if ebitda_val and ev_val and ebitda_val > 0: ev_ebitda = round(ev_val / ebitda_val, 2)
 
-    pat_yoy = info.get("earningsQuarterlyGrowth")
-    pat_yoy_pct = round(pat_yoy * 100, 2) if is_valid_metric(pat_yoy) else None
-    
+    pat_yoy_pct = round(info.get("earningsQuarterlyGrowth", 0) * 100, 2) if is_valid_metric(info.get("earningsQuarterlyGrowth")) else None
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (ebitda_val and revenue_latest) else "N/A"
 
-    # Pre-Compute Fundamental Score so Predictive Pipeline can use it
     temp_metrics = {
         'pe_ratio': pe_raw, 'peg_ratio': info.get("pegRatio"), 'pb_ratio': pb_raw, 
         'pat_yoy': pat_yoy_pct, 'roe': roe_raw * 100 if roe_raw else None, 
@@ -516,18 +461,17 @@ def fetch_stock_data(resolved_ticker, raw_input):
         'interest_coverage': None, 'net_margin': None, 'pat_qoq': None
     }
     
-    v_score = score_from_checks(valuation_checks(temp_metrics))
-    p_score = score_from_checks(past_performance_checks(temp_metrics))
-    h_score = score_from_checks(financial_health_checks(temp_metrics))
-    
-    fundamental_score = compute_fundamental_score(v_score, p_score, h_score, is_fin)
+    fundamental_score = compute_fundamental_score(
+        score_from_checks(valuation_checks(temp_metrics)),
+        score_from_checks(past_performance_checks(temp_metrics)),
+        score_from_checks(financial_health_checks(temp_metrics)), is_fin)
 
     bvps = info.get('bookValue') or (total_eq / shares_out if total_eq and shares_out else None)
-    div_per_share = info.get("dividendRate", 0)
-
+    
     predictive_data = run_predictive_pipeline(
         info, hist_full, fcf_history, sector, industry, fundamental_score, 
-        bvps, div_per_share, roe_raw * 100 if roe_raw else None, pat_yoy_pct, None
+        bvps, info.get("dividendRate", 0), roe_raw * 100 if roe_raw else None, 
+        pat_yoy_pct, None, info.get('trailingEps')
     )
 
     metrics = {
@@ -554,8 +498,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
         "q_fin": None, "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
-        "currency": currency_symbol,
-        "fundamental_score": fundamental_score
+        "currency": currency_symbol, "fundamental_score": fundamental_score
     }
     return metrics
 
@@ -601,6 +544,14 @@ def custom_metric(label, value):
     st.markdown(f'<div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;"><div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">{label}</div><div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div></div>', unsafe_allow_html=True)
 
 def card(title, body_html): st.markdown(f'<div class="swf-card"><div class="swf-h">{title}</div>{body_html}</div>', unsafe_allow_html=True)
+
+def render_checks(checks):
+    if not checks: return "<div class='swf-check-na'>&#8213; No data.</div>"
+    html = ""
+    for label, status, desc in checks:
+        icon, cls = ("&#9989;", "swf-check-pass") if status else ("&#10060;", "swf-check-fail")
+        html += f'<div style="padding:5px 0;"><span class="{cls}">{icon} <b>{label}</b></span><div class="swf-sub">{desc}</div></div>'
+    return html
 
 # ============================================================
 # 7. AI & INTERLACED PDF
@@ -687,7 +638,7 @@ with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label
 with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
 if generate_clicked and stock_input.strip():
-    with st.spinner('Compiling metrics and running the composite models...'):
+    with st.spinner('Compiling metrics and running the institutional models...'):
         try:
             rt = resolve_name_to_ticker(stock_input)
             metrics = fetch_stock_data(rt, stock_input)
