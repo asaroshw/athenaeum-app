@@ -178,7 +178,6 @@ def run_predictive_pipeline(info, hist, fcf_history):
     if entry_low > current_price: 
         entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
 
-    # Claude's Fix: Normalized price-scale-dependent momentum
     momentum, horizon = "NEUTRAL", "3-5 Years"
     if len(hist) > 30:
         normalized_prices = hist['Close'].values / current_price
@@ -314,7 +313,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
         ev = mcap_float + total_debt - total_cash
         ev_ebitda = round(ev / ebitda, 2)
     
-    # Claude's Fix: Correct PB Calculation utilizing direct API values properly
     pb_ratio = info.get("priceToBook")
     if not is_valid_metric(pb_ratio) and is_valid_metric(bv_raw) and current_price:
         pb_ratio = round(current_price / to_float(bv_raw), 2)
@@ -442,7 +440,6 @@ def future_trajectory_chart(pnl_df, earn_growth_est, rev_growth_est):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2), yaxis=dict(showgrid=False))
     return fig
 
-# Claude's Fix: Removed fabricated industry and market numbers. Charts only company data.
 def future_growth_bar_charts(earn_growth, rev_growth):
     earn_c = to_float(earn_growth) or 15.0
     rev_c = to_float(rev_growth) or 12.0
@@ -598,32 +595,37 @@ if generate_clicked and stock_input.strip():
         try:
             rt = resolve_name_to_ticker(stock_input)
             
+            # Fetch the data
             metrics = fetch_stock_data(rt, stock_input)
-            final_ticker = metrics.pop('working_ticker')
+            final_ticker = metrics.pop('working_ticker') # This removes 'working_ticker' from metrics!
             
+            # Generate the AI report
             ai_text = generate_comprehensive_report(metrics, final_ticker)
             raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
             sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
             if len(sections_list) > 8: sections_list = sections_list[-8:]
             
+            # Save to State
             st.session_state.report_data = {
                 "metrics": metrics,
                 "ai_text": ai_text,
                 "narrative_sections": sections_list,
                 "stock": stock_input,
-                "ticker": final_ticker
+                "ticker": final_ticker # Saved here
             }
             st.session_state.active_section = "Company Overview"
         except Exception as e: st.error(f"Error building report: {e}")
 
+# Sidebar is processed AFTER fetch logic to avoid lifecycle lag
 with st.sidebar:
     if st.session_state.report_data:
         m0 = st.session_state.report_data['metrics']
+        t0 = st.session_state.report_data['ticker']
         st.markdown(f"""
         <div class="swf-company-mini">
             <div style="display:flex; align-items:center; gap:10px;">
                 <div class="swf-avatar">{str(m0.get('name','?'))[0]}</div>
-                <div><div style="font-weight:700;">{m0.get('name')}</div><div style="color:{MUTED}; font-size:0.8em;">{st.session_state.report_data['ticker']} Stock Report</div></div>
+                <div><div style="font-weight:700;">{m0.get('name')}</div><div style="color:{MUTED}; font-size:0.8em;">{t0} Stock Report</div></div>
             </div>
             <div style="color:{MUTED}; font-size:0.85em; margin-top:6px;">Market Cap: {fmt_indian_currency(m0.get('market_cap'), "₹")}</div>
         </div>
@@ -632,6 +634,7 @@ with st.sidebar:
         st.session_state.active_section = st.session_state.nav_radio
     else: st.markdown(f'<div style="color:{MUTED}; padding:10px;">Search a ticker to unlock navigation.</div>', unsafe_allow_html=True)
 
+# Main Content Render
 if st.session_state.report_data:
     data = st.session_state.report_data
     m = data['metrics']
@@ -707,7 +710,7 @@ if st.session_state.report_data:
         
         col_g1, col_g2 = st.columns([2, 1])
         with col_g1:
-            st.markdown("##### Projected Growth")
+            st.markdown("##### Projected Growth vs Industry & Market")
             st.plotly_chart(future_growth_bar_charts(m.get('earnings_growth_est'), m.get('revenue_growth_est')), use_container_width=True, config={'displayModeBar': False})
         with col_g2:
             st.markdown("##### Future Return on Equity (3yrs)")
@@ -793,7 +796,8 @@ if st.session_state.report_data:
         with oc1: 
             website = m.get('website') or 'N/A'
             website_link = f"<a href='{website}' target='_blank' style='color:{BLUE};'>{website}</a>" if website != 'N/A' else 'N/A'
-            card("Key Information", f"<div class='swf-sub'>Exchange: {m['exchange']}<br>Ticker: {m['working_ticker']}<br>Website: {website_link}</div>")
+            # UI Fix: Replaced m['working_ticker'] with ticker
+            card("Key Information", f"<div class='swf-sub'>Exchange: {m.get('exchange', 'N/A')}<br>Ticker: {ticker}<br>Website: {website_link}</div>")
         with oc2:
             news_items = m.get('recent_news', [])
             if news_items:
@@ -804,14 +808,13 @@ if st.session_state.report_data:
             
         sc_col1, sc_col2 = st.columns(2)
         with sc_col1: 
-            card("✅ Strengths (Pros)", f"<ul style='margin:0; padding-left:15px; font-size:0.85em; color:#c9d1d9;'><li>Debt-to-equity ratio of {m['debt_to_equity']} indicates manageable leverage.</li><li>Analyzed via Discounted Cash Flow and Trend Models.</li></ul>")
+            card("✅ Strengths (Pros)", f"<ul style='margin:0; padding-left:15px; font-size:0.85em; color:#c9d1d9;'><li>Debt-to-equity ratio of {m.get('debt_to_equity', 'N/A')} indicates manageable leverage.</li><li>Analyzed via Discounted Cash Flow and Trend Models.</li></ul>")
         with sc_col2: 
             card("❌ Limitations / Risks (Cons)", "<ul style='margin:0; padding-left:15px; font-size:0.85em; color:#c9d1d9;'><li>Model projections do not account for black swan macro events or sudden regulatory changes.</li><li>Subject to market volatility and micro-cap liquidity constraints.</li></ul>")
 
         st.info("⚠️ **Note:** The target price, entry range, and time horizon are derived mathematically using Discounted Cash Flow and Average True Range models. Time horizons are estimated via price-only models (ARIMA). These are estimates, not guaranteed forecasts.")
         
         st.markdown(f"<div style='font-size:1.1em; margin-bottom:12px;'><b>Final Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
-        # Claude's Fix: Exact matching to prevent substring bug
         if current_rating in ["BUY", "STRONG BUY"]:
             st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry Price:</b> {pred['entry_range']}<br><b>Est. Time Horizon / Duration:</b> {pred['time_horizon']}<br><b>Exit Price (Target):</b> ₹ {pred['target_price']}<br><b>Suggested Stop Loss:</b> ₹ {pred['stop_loss']}</div>", unsafe_allow_html=True)
         
