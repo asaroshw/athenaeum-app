@@ -18,6 +18,12 @@ from reportlab.lib import colors
 from google import genai
 from google.genai import types
 from datetime import timedelta
+from reportlab.lib.pagesizes import letter
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib import colors
+from reportlab.lib.units import inch
+import re
 
 try:
     from statsmodels.tsa.arima.model import ARIMA
@@ -558,25 +564,91 @@ def generate_comprehensive_report(metrics, ticker):
 
 def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val):
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, leading=22, textColor=colors.HexColor('#1A365D'))
-    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=10, spaceBefore=10, spaceAfter=4, textColor=colors.HexColor('#2B6CB0'))
-    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=8, leading=11.5, textColor=colors.HexColor('#2D3748'))
     
-    clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_")]
-    rating_color = GREEN if "BUY" in rating_val else ORANGE if "OBSERVE" in rating_val else RED
+    # Custom PDF Typography
+    styles = getSampleStyleSheet()
+    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#ffffff'))
+    sub_style = ParagraphStyle('DocSub', fontName='Helvetica-Bold', fontSize=11, textColor=colors.HexColor('#cccccc'))
+    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=14, spaceBefore=15, spaceAfter=8, textColor=colors.HexColor('#1A365D'))
+    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=9.5, leading=14, textColor=colors.HexColor('#2D3748'))
     
-    story = [
-        Paragraph("Financial Intelligence App — Research Division", title_style),
-        Paragraph(f"Terminal Dossier — {m['name']} ({ticker}) | Verdict: <font color='{rating_color}'><b>{rating_val}</b></font>", h1_style),
-        Spacer(1, 10)
+    story = []
+    
+    # 1. INSTITUTIONAL HEADER (Dark Banner)
+    rating_color = '#3FB950' if "BUY" in rating_val else '#F97316' if "OBSERVE" in rating_val else '#F85149'
+    
+    header_data = [
+        [Paragraph("FINANCIAL INTELLIGENCE DOSSIER", title_style), Paragraph(f"<font color='{rating_color}'>{rating_val}</font>", title_style)],
+        [Paragraph(f"{m.get('name', 'Company')} ({ticker})", sub_style), Paragraph(f"Current Price: ₹ {m.get('price', 'N/A')}", sub_style)]
     ]
-
+    header_table = Table(header_data, colWidths=[4.5*inch, 2.5*inch])
+    header_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#0D1117')),
+        ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+        ('VALIGN', (0,0), (-1,-1), 'MIDDLE'),
+        ('PADDING', (0,0), (-1,-1), 14),
+    ]))
+    story.append(header_table)
+    story.append(Spacer(1, 15))
+    
+    # 2. KEY METRICS GRID
+    pred = m.get('predictive', {})
+    metrics_data = [
+        ["Target Price", f"₹ {pred.get('target_price', 'N/A')}", "Entry Range", f"{pred.get('entry_range', 'N/A')}"],
+        ["P/E Ratio", f"{m.get('pe_ratio')}x", "EV/EBITDA", f"{m.get('ev_ebitda')}x"],
+        ["P/B Ratio", f"{m.get('pb_ratio')}x", "ROE", f"{m.get('roe')}"],
+        ["Debt/Equity", f"{m.get('debt_to_equity')}", "Dividend Yield", f"{m.get('dividend_yield')}"]
+    ]
+    metrics_table = Table(metrics_data, colWidths=[1.75*inch, 1.75*inch, 1.75*inch, 1.75*inch])
+    metrics_table.setStyle(TableStyle([
+        ('BACKGROUND', (0,0), (-1,-1), colors.HexColor('#F8FAFC')),
+        ('TEXTCOLOR', (0,0), (-1,-1), colors.HexColor('#1E293B')),
+        ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), # Col 1 bold
+        ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'), # Col 3 bold
+        ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+        ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')),
+        ('PADDING', (0,0), (-1,-1), 8),
+    ]))
+    story.append(metrics_table)
+    story.append(Spacer(1, 15))
+    
+    # 3. FINANCIAL SUMMARY TABLE (P&L)
+    pnl_df = m.get('pnl_df', pd.DataFrame())
+    if not pnl_df.empty:
+        story.append(Paragraph("Financial Summary (P&L)", h1_style))
+        pnl_data = [pnl_df.columns.to_list()] + pnl_df.values.tolist()
+        pnl_table = Table(pnl_data, colWidths=[4*inch, 3*inch])
+        pnl_table.setStyle(TableStyle([
+            ('BACKGROUND', (0,0), (-1,0), colors.HexColor('#2B6CB0')),
+            ('TEXTCOLOR', (0,0), (-1,0), colors.whitesmoke),
+            ('FONTNAME', (0,0), (-1,0), 'Helvetica-Bold'),
+            ('ALIGN', (0,0), (-1,-1), 'LEFT'),
+            ('ALIGN', (1,0), (1,-1), 'RIGHT'),
+            ('BACKGROUND', (0,1), (-1,-1), colors.HexColor('#F7FAFC')),
+            ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#CBD5E0')),
+            ('PADDING', (0,0), (-1,-1), 6),
+        ]))
+        story.append(pnl_table)
+        story.append(Spacer(1, 15))
+    
+    # 4. AI QUALITATIVE NARRATIVE
+    story.append(Paragraph("Qualitative Analysis & Verdict", h1_style))
+    clean_lines = [line.strip() for line in ai_text.split('\n') if not line.strip().startswith("DYNAMIC_") and line.strip()]
+    
     for line in clean_lines:
-        story.append(Paragraph(line, body_style))
-        story.append(Spacer(1, 3))
+        # Convert markdown bold to ReportLab HTML bold
+        formatted_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
+        
+        # Colorize numbered section headers
+        if re.match(r'^\d+\.', formatted_line): 
+            story.append(Spacer(1, 8))
+            story.append(Paragraph(f"<font color='#2B6CB0'><b>{formatted_line}</b></font>", body_style))
+        else:
+            story.append(Paragraph(formatted_line, body_style))
+        story.append(Spacer(1, 4))
 
     doc.build(story)
-
+    
 # ============================================================
 # 6. APP UI & NAVIGATION
 # ============================================================
