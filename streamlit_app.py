@@ -26,7 +26,7 @@ except ImportError:
     HAS_ARIMA = False
 
 # ============================================================
-# 1. SETUP & CONFIGURATION (Unified Font & Styling)
+# 1. SETUP & CONFIGURATION
 # ============================================================
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 st.set_page_config(page_title="Financial Intelligence App", layout="wide")
@@ -178,11 +178,13 @@ def run_predictive_pipeline(info, hist, fcf_history):
     if entry_low > current_price: 
         entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
 
+    # Claude's Fix: Normalized price-scale-dependent momentum
     momentum, horizon = "NEUTRAL", "3-5 Years"
     if len(hist) > 30:
-        slope, _ = np.polyfit(np.arange(len(hist)), hist['Close'].values, 1)
-        if slope > 0.1: momentum, horizon = "UP", "12-18 Months (Accelerated)"
-        elif slope < -0.1: momentum = "DOWN"
+        normalized_prices = hist['Close'].values / current_price
+        slope, _ = np.polyfit(np.arange(len(hist)), normalized_prices, 1)
+        if slope > 0.0005: momentum, horizon = "UP", "12-18 Months (Accelerated)"
+        elif slope < -0.0005: momentum = "DOWN"
         
         if HAS_ARIMA and len(hist) > 100:
             try:
@@ -312,16 +314,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
         ev = mcap_float + total_debt - total_cash
         ev_ebitda = round(ev / ebitda, 2)
     
-    if mcap_float and bv_raw is None:
-        eq = info.get("bookValue")
-        if eq and info.get("sharesOutstanding"):
-            bv_raw = round((eq * info.get("sharesOutstanding")) / 10000000, 2)
-            
+    # Claude's Fix: Correct PB Calculation utilizing direct API values properly
     pb_ratio = info.get("priceToBook")
-    if not is_valid_metric(pb_ratio) and bv_raw and current_price and info.get("sharesOutstanding"):
-        pb_ratio = round((current_price * info.get("sharesOutstanding")) / (to_float(bv_raw) * 10000000), 2) if to_float(bv_raw) > 0 else "N/A"
+    if not is_valid_metric(pb_ratio) and is_valid_metric(bv_raw) and current_price:
+        pb_ratio = round(current_price / to_float(bv_raw), 2)
 
-    # Robust P/E Calculation fallback if yfinance trailingEps is missing
     if not is_valid_metric(pe_raw) or to_float(pe_raw) is None:
         eps = info.get("trailingEps") or info.get("forwardEps")
         if eps and eps > 0: 
@@ -445,14 +442,14 @@ def future_trajectory_chart(pnl_df, earn_growth_est, rev_growth_est):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, margin=dict(t=20, b=20, l=10, r=10), legend=dict(orientation="h", y=-0.2), yaxis=dict(showgrid=False))
     return fig
 
+# Claude's Fix: Removed fabricated industry and market numbers. Charts only company data.
 def future_growth_bar_charts(earn_growth, rev_growth):
-    earn_c = to_float(earn_growth) or 15.0; rev_c = to_float(rev_growth) or 12.0
-    earn_i, earn_m = round(earn_c * 0.8, 1), round(earn_c * 0.6, 1)
-    rev_i, rev_m = round(rev_c * 0.85, 1), round(rev_c * 0.65, 1)
+    earn_c = to_float(earn_growth) or 15.0
+    rev_c = to_float(rev_growth) or 12.0
 
     fig = make_subplots(rows=1, cols=2, subplot_titles=("Annual Earnings Growth", "Annual Revenue Growth"))
-    fig.add_trace(go.Bar(x=['Company', 'Industry', 'Market'], y=[earn_c, earn_i, earn_m], marker_color=[BLUE, '#4ade80', '#c026d3'], text=[f"{earn_c}%", f"{earn_i}%", f"{earn_m}%"], textposition='auto'), row=1, col=1)
-    fig.add_trace(go.Bar(x=['Company', 'Industry', 'Market'], y=[rev_c, rev_i, rev_m], marker_color=[BLUE, '#4ade80', '#c026d3'], text=[f"{rev_c}%", f"{rev_i}%", f"{rev_m}%"], textposition='auto'), row=1, col=2)
+    fig.add_trace(go.Bar(x=['Company'], y=[earn_c], marker_color=[BLUE], text=[f"{earn_c}%"], textposition='auto'), row=1, col=1)
+    fig.add_trace(go.Bar(x=['Company'], y=[rev_c], marker_color=[BLUE], text=[f"{rev_c}%"], textposition='auto'), row=1, col=2)
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=300, showlegend=False, margin=dict(t=30, b=10, l=10, r=10))
     fig.update_yaxes(showgrid=False, showticklabels=False)
     return fig
@@ -601,17 +598,14 @@ if generate_clicked and stock_input.strip():
         try:
             rt = resolve_name_to_ticker(stock_input)
             
-            # Fetch the data
             metrics = fetch_stock_data(rt, stock_input)
             final_ticker = metrics.pop('working_ticker')
             
-            # Generate the AI report
             ai_text = generate_comprehensive_report(metrics, final_ticker)
             raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
             sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
             if len(sections_list) > 8: sections_list = sections_list[-8:]
             
-            # Save to State
             st.session_state.report_data = {
                 "metrics": metrics,
                 "ai_text": ai_text,
@@ -622,7 +616,6 @@ if generate_clicked and stock_input.strip():
             st.session_state.active_section = "Company Overview"
         except Exception as e: st.error(f"Error building report: {e}")
 
-# Sidebar is processed AFTER fetch logic to avoid lifecycle lag
 with st.sidebar:
     if st.session_state.report_data:
         m0 = st.session_state.report_data['metrics']
@@ -639,7 +632,6 @@ with st.sidebar:
         st.session_state.active_section = st.session_state.nav_radio
     else: st.markdown(f'<div style="color:{MUTED}; padding:10px;">Search a ticker to unlock navigation.</div>', unsafe_allow_html=True)
 
-# Main Content Render
 if st.session_state.report_data:
     data = st.session_state.report_data
     m = data['metrics']
@@ -715,7 +707,7 @@ if st.session_state.report_data:
         
         col_g1, col_g2 = st.columns([2, 1])
         with col_g1:
-            st.markdown("##### Projected Growth vs Industry & Market")
+            st.markdown("##### Projected Growth")
             st.plotly_chart(future_growth_bar_charts(m.get('earnings_growth_est'), m.get('revenue_growth_est')), use_container_width=True, config={'displayModeBar': False})
         with col_g2:
             st.markdown("##### Future Return on Equity (3yrs)")
@@ -819,7 +811,8 @@ if st.session_state.report_data:
         st.info("⚠️ **Note:** The target price, entry range, and time horizon are derived mathematically using Discounted Cash Flow and Average True Range models. Time horizons are estimated via price-only models (ARIMA). These are estimates, not guaranteed forecasts.")
         
         st.markdown(f"<div style='font-size:1.1em; margin-bottom:12px;'><b>Final Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
-        if "BUY" in current_rating:
+        # Claude's Fix: Exact matching to prevent substring bug
+        if current_rating in ["BUY", "STRONG BUY"]:
             st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry Price:</b> {pred['entry_range']}<br><b>Est. Time Horizon / Duration:</b> {pred['time_horizon']}<br><b>Exit Price (Target):</b> ₹ {pred['target_price']}<br><b>Suggested Stop Loss:</b> ₹ {pred['stop_loss']}</div>", unsafe_allow_html=True)
         
         styled_verdict = narrative_for(7)
