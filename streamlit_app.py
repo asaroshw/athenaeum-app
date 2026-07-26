@@ -19,15 +19,16 @@ from google import genai
 from google.genai import types
 from datetime import timedelta
 from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
 from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
 from reportlab.lib import colors
 from reportlab.lib.units import inch
 from reportlab.graphics.shapes import Drawing, Rect
 from reportlab.graphics.charts.lineplots import LinePlot
+from reportlab.graphics.charts.barcharts import VerticalBarChart  # <--- THIS IS THE MISSING LINE
 import re
 from datetime import datetime
-
+import pandas as pd
 try:
     from statsmodels.tsa.arima.model import ARIMA
     HAS_ARIMA = True
