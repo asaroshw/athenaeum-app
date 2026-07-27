@@ -794,7 +794,7 @@ def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
     sys = "You are an elite equity research director. Output exactly 8 numbered sections: 1. VALUATION & FAIR VALUE 2. FUTURE GROWTH & OUTLOOK 3. PAST PERFORMANCE & EARNINGS QUALITY 4. FINANCIAL HEALTH & BALANCE SHEET 5. DIVIDEND & CAPITAL ALLOCATION 6. MANAGEMENT & COMPENSATION 7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT 8. NARRATIVE VERDICT. Provide ONLY narrative reasoning."
     pmt = f"Target: {metrics['name']} ({ticker}). Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. System Verdict: {metrics['predictive']['verdict']}."
-    return client.models.generate_content(model='gemini-3.5-pro', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
+    return client.models.generate_content(model='gemini-2.5-pro', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
 def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val, pred):
     doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
