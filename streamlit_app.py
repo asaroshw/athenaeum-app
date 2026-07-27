@@ -2,25 +2,14 @@ import streamlit as st
 import yfinance as yf
 import pandas as pd
 import numpy as np
-import math
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import logging
 import re
-import io
-import requests
 import urllib.parse
 from bs4 import BeautifulSoup
 import xml.etree.ElementTree as ET
 from datetime import timedelta
-from reportlab.lib.pagesizes import letter
-from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
-from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-from reportlab.lib import colors
-from reportlab.lib.units import inch
-from reportlab.graphics.shapes import Drawing, Rect
-from reportlab.graphics.charts.lineplots import LinePlot
-from reportlab.graphics.charts.barcharts import VerticalBarChart
 from google import genai
 from google.genai import types
 
@@ -31,7 +20,7 @@ except ImportError:
     HAS_ARIMA = False
 
 # ============================================================
-# 1. SETUP & CONFIGURATION  (unchanged)
+# 1. SETUP & CONFIGURATION
 # ============================================================
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 st.set_page_config(page_title="Financial Intelligence App", layout="wide")
@@ -46,10 +35,6 @@ st.markdown(f"""
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
     html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{ font-family: 'Inter', sans-serif !important; }}
     .stApp {{ background-color: {BG}; color: #E6E6E6; }}
-    section[data-testid="stSidebar"] {{ background-color: {BG}; border-right: 1px solid {BORDER}; }}
-    section[data-testid="stSidebar"] .stRadio > label {{ display:none; }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] label {{ background-color: transparent; padding: 8px 10px; border-radius: 6px; margin-bottom: 2px; }}
-    section[data-testid="stSidebar"] div[role="radiogroup"] label:hover {{ background-color: #1c2128; }}
     .swf-title-container {{ text-align: center; padding: 10px 0 20px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
     .swf-title {{ font-size: 1.85em; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; }}
     .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
@@ -58,17 +43,32 @@ st.markdown(f"""
     .swf-check-pass {{ color: {GREEN}; }}
     .swf-check-fail {{ color: {RED}; }}
     .swf-check-na {{ color: {MUTED}; }}
-    .swf-company-mini {{ padding: 6px 4px 14px 4px; border-bottom: 1px solid {BORDER}; margin-bottom: 8px; }}
-    .swf-avatar {{ width:40px; height:40px; border-radius:8px; background:#fff; color:#111; font-weight:800; display:flex; align-items:center; justify-content:center; font-size:1.2em; }}
     .swf-badge {{ background:{CARD_BG}; border:1px solid {BORDER}; padding:5px 12px; border-radius:6px; font-weight:700; font-size:0.85em; }}
-    .swf-factrow {{ display:flex; justify-content:space-between; padding:5px 0; border-bottom:1px solid {BORDER}; font-size:0.9em; }}
-    .swf-newsrow {{ padding:7px 0; border-bottom:1px solid {BORDER}; font-size:0.9em; }}
-    .swf-newsrow a {{ color:{BLUE}; text-decoration:none; }}
+    .swf-section-title {{ font-size: 1.6em; font-weight: 800; color: #FFFFFF; margin-top: 10px; padding-top: 14px; border-top: 2px solid {BORDER}; }}
+
+    /* Print overhaul: Ctrl+P should produce a clean, light, ink-friendly report.
+       Note: Plotly charts render inside their own canvas/iframe and keep their dark
+       theme even here — CSS on the page chrome can't reach into that canvas, so
+       charts will still print on a dark background. Everything else (cards, text,
+       checklists, headers, the search bar, buttons) is print-optimized below. */
+    @media print {{
+        section[data-testid="stSidebar"], header[data-testid="stHeader"], #MainMenu, footer,
+        div[data-testid="stTextInput"], div[data-testid="stButton"], .stSpinner {{
+            display: none !important;
+        }}
+        .stApp {{ background-color: #ffffff !important; }}
+        body, .stApp, p, div, span, td, th, li {{ color: #111111 !important; }}
+        .swf-card {{ background-color: #ffffff !important; border: 1px solid #ccc !important; break-inside: avoid; }}
+        .swf-check-pass {{ color: #15803d !important; }}
+        .swf-check-fail {{ color: #b91c1c !important; }}
+        .swf-h, .swf-section-title {{ color: #1e40af !important; }}
+        .swf-title {{ color: #111111 !important; }}
+    }}
 </style>
 """, unsafe_allow_html=True)
 
 # ============================================================
-# 2. CORE UTILITIES  (unchanged from your file — these were fine)
+# 2. CORE UTILITIES
 # ============================================================
 def to_float(val):
     if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
@@ -143,16 +143,10 @@ def fetch_google_news(query_term):
     except: pass
     return []
 
+import requests  # (kept import position stable relative to the functions above that use it)
+
 # ============================================================
 # 3. SECTOR DETECTION
-# ------------------------------------------------------------
-# FIX: your file checked `sector in ['Financial Services','Banks','Credit Services']`
-# — an exact match. yfinance almost never puts "Banks" or "Credit Services" in the
-# *sector* field (those are *industry*-level labels; sector is usually just
-# "Financial Services" for all of banking/NBFC/insurance/broking). A bank whose
-# sector string has different casing, or whose real signal lives in `industry`
-# instead, would silently fall through to the wrong (FCF-DCF) valuation branch.
-# Checks both fields with substring matching instead.
 # ============================================================
 FINANCIAL_SECTOR_KEYWORDS = [
     "financial services", "bank", "nbfc", "insurance", "capital markets",
@@ -164,25 +158,47 @@ def is_financial_sector(sector, industry):
     text = f"{sector or ''} {industry or ''}".lower()
     return any(kw in text for kw in FINANCIAL_SECTOR_KEYWORDS)
 
+# Yahoo/yfinance uses different row labels for a bank/NBFC's income statement (interest
+# income rather than product sales) — trying only 'Total Revenue' silently breaks
+# margin and fundamental checks for financial-sector stocks.
+STANDARD_REVENUE_KEYS = ['Total Revenue', 'Operating Revenue']
+BANK_REVENUE_KEYS = ['Total Revenue', 'Total Operating Income', 'Interest Income',
+                      'Total Interest Income', 'Operating Revenue']
+
 # ============================================================
-# 4. CHECKLISTS
+# 4. NEWS / QUALITATIVE SIGNAL SCANNER  (Step 2)
 # ------------------------------------------------------------
-# Fixes applied here:
-#  - render_checks was CALLED four times in your file but never DEFINED anywhere —
-#    that's an immediate NameError the moment any tab other than Overview/Future
-#    Growth/Management/Ownership/Verdict is opened. Restored below.
-#  - Negative P/E, negative PEG, and negative EV/EBITDA now hard-fail instead of
-#    silently satisfying "< threshold" (Suggestion 2).
-#  - Negative D/E (negative shareholders' equity) hard-fails instead of passing
-#    "< 1.0" (same bug pattern, one level over).
-#  - Removed the "Trading Below Modeled Fair Value" check that had crept into
-#    valuation_checks: that signal is exactly what `intrinsic_score` already
-#    measures from the DCF/DDM/Justified-P/B margin of safety. Leaving it in
-#    valuation_checks meant it got counted TWICE in the composite (once via
-#    Fundamental score, again via Intrinsic score) — silently over-weighting
-#    valuation relative to the intended 40/35/25 split. Fundamental score now
-#    stays limited to independent accounting ratios, as a genuine ensemble
-#    requires.
+# A lightweight keyword scanner over recent_news + business_summary — NOT a real NLP
+# sentiment model, just a coarse catalyst/risk signal, clearly labeled as such
+# everywhere it surfaces in the UI and the AI prompt.
+# ============================================================
+CATALYST_KEYWORDS = ['acqui', 'profit', 'surge', 'turnaround', 'wins', ' win ', 'order book',
+                      'expansion', 'partnership', 'record revenue', 'upgrade', 'beat estimates',
+                      'demerger', 'stake sale', 'contract']
+RISK_KEYWORDS = ['fraud', 'resign', 'default', 'probe', 'raid', 'downgrade', 'scam',
+                  'investigation', 'lawsuit', 'bankruptcy', 'insolvency', 'delisting']
+
+def scan_news_sentiment(recent_news, business_summary):
+    titles = [n.get('title', '') for n in (recent_news or [])]
+    text = ((business_summary or "") + " " + " ".join(titles)).lower()
+    catalyst_hits = sorted(set(kw.strip() for kw in CATALYST_KEYWORDS if kw in text))
+    risk_hits = sorted(set(kw.strip() for kw in RISK_KEYWORDS if kw in text))
+    bonus, notes = 0, []
+    if len(catalyst_hits) >= 2:
+        bonus += 15
+        notes.append(f"Qualitative bonus (+15): multiple positive catalysts detected in recent "
+                      f"news/business summary ({', '.join(catalyst_hits[:4])}).")
+    elif len(catalyst_hits) == 1:
+        bonus += 10
+        notes.append(f"Qualitative bonus (+10): a positive catalyst was detected ({catalyst_hits[0]}).")
+    if risk_hits:
+        bonus -= 20
+        notes.append(f"Qualitative penalty (-20): risk keyword(s) detected in recent news "
+                      f"({', '.join(risk_hits[:3])}) — treat with caution.")
+    return bonus, notes
+
+# ============================================================
+# 5. CHECKLISTS
 # ============================================================
 def valuation_checks(m):
     pe = to_float(m.get('pe_ratio'))
@@ -198,15 +214,18 @@ def valuation_checks(m):
             checks.append(("Profitable on a P/E basis", False,
                             f"P/E is negative ({pe}x) — the company is currently loss-making."))
         else:
-            checks.append(("Reasonable P/E (<25x)", pe < 25, f"Trailing P/E of {pe}x"))
+            # Step 3: soften the P/E threshold when growth is exceptional — a flat <25x
+            # bar unfairly punishes genuine high-growth names; PEG (below) is the more
+            # discriminating judge in that regime.
+            threshold = 45 if (pat_yoy is not None and pat_yoy > 30) else 25
+            checks.append((f"Reasonable P/E (<{threshold}x{' — growth-adjusted' if threshold==45 else ''})",
+                            pe < threshold, f"Trailing P/E of {pe}x"))
 
     if peg is not None:
         if peg < 0:
             checks.append(("Positive PEG", False,
-                            f"PEG is negative ({peg}) — implies shrinking earnings or a loss-making company, not a value signal."))
+                            f"PEG is negative ({peg}) — implies shrinking earnings or a loss-making company."))
         elif pe is not None and pe > 0 and pat_yoy is not None and pat_yoy > 0:
-            # PEG is only meaningful as "cheap growth" when both P/E and growth are
-            # genuinely positive; otherwise it doesn't measure what it looks like it does.
             checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg}"))
 
     if pb is not None:
@@ -270,9 +289,6 @@ def score_from_checks(checks):
     return round(100 * sum(vals) / len(vals)) if vals else None
 
 def render_checks(checks):
-    """RESTORED — this was called 4+ times in your UI but had no definition anywhere
-    in the file, which is a guaranteed NameError on the Valuation / Past Performance /
-    Financial Health / Dividend tabs."""
     if not checks:
         return "<div class='swf-check-na'>&#8213; Not enough data to run this checklist.</div>"
     html = ""
@@ -282,10 +298,6 @@ def render_checks(checks):
     return html
 
 def compute_fundamental_score(val_score, past_score, health_score, is_financial):
-    """Suggestion 5 — missing categories are excluded and the remaining weights are
-    renormalized, instead of defaulting a missing category to a comfortable neutral
-    50 (a softer version of the same 'missing data quietly gets a good score' bug).
-    Returns 0 only if literally nothing at all is available."""
     weights = {"val": 0.45, "past": 0.35, "health": 0.20} if is_financial else {"val": 0.35, "past": 0.35, "health": 0.30}
     scores = {"val": val_score, "past": past_score, "health": health_score}
     available = {k: v for k, v in scores.items() if v is not None}
@@ -295,8 +307,18 @@ def compute_fundamental_score(val_score, past_score, health_score, is_financial)
     return round(sum(weights[k] * v for k, v in available.items()) / total_w, 1)
 
 # ============================================================
-# 5. QUANTITATIVE COMPOSITE ENGINE
+# 6. QUANTITATIVE COMPOSITE ENGINE
+# ------------------------------------------------------------
+# Step 3 recalibration: risk-free 6.5%, equity risk premium 5.5%, terminal growth 5.0%
+# (previously 7% / 7% / 4% — too conservative/generic for an Indian growth-market context).
+# Graham Number replaced with a turnaround-aware Target-P/E fallback (Step 3).
+# Stop-loss now floored at 50% of current price (Step 3, "Taparia edge case").
+# Momentum block is now NaN-safe and fully wrapped in try/except (Step 4).
 # ============================================================
+RISK_FREE_RATE = 0.065
+EQUITY_RISK_PREMIUM = 0.055
+TERMINAL_GROWTH_PCT = 5.0
+
 def calculate_vwap_support(df):
     d = df.dropna(subset=['Close', 'Volume'])
     if d.empty: return None
@@ -315,8 +337,6 @@ def calculate_atr(df, period=14):
     return float(val) if pd.notna(val) else None
 
 def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=8.0):
-    """Suggestion 4 — floored at 0.4x, not 1.0x: a bank earning less than its cost of
-    equity should be allowed to trade meaningfully below book value."""
     if not book_value_per_share or book_value_per_share <= 0 or roe_pct is None:
         return None, None
     roe, ke, g = roe_pct / 100, ke_pct / 100, growth_pct / 100
@@ -334,7 +354,8 @@ def ddm_fair_value(dividend_per_share, ke_pct, growth_pct):
         g = ke - 0.02
     return round((dividend_per_share * (1 + g)) / (ke - g), 2)
 
-def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None, forced_intrinsic_adjustment=0):
+def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None,
+                        forced_intrinsic_adjustment=0, qualitative_bonus=0):
     W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.40, 0.35, 0.25
     intrinsic_score = min(max(50 + margin_of_safety * 150, 0), 100)
     intrinsic_score = min(max(intrinsic_score + forced_intrinsic_adjustment, 0), 100)
@@ -344,6 +365,7 @@ def composite_verdict(fundamental_score, margin_of_safety, drift, arima_directio
     elif arima_direction == "DOWN":
         tech_score = max(0, tech_score - 10)
     composite = W_FUNDAMENTAL * fundamental_score + W_INTRINSIC * intrinsic_score + W_TECHNICAL * tech_score
+    composite = min(max(composite + qualitative_bonus, 0), 100)  # Step 2: catalyst/risk adjustment
     if composite >= 75: verdict = "STRONG BUY"
     elif composite >= 60: verdict = "BUY"
     elif composite >= 40: verdict = "OBSERVE"
@@ -353,22 +375,13 @@ def composite_verdict(fundamental_score, margin_of_safety, drift, arima_directio
 VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
 def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
-    """Suggestion 1 — tiered veto (replaces the flat 'cap at OBSERVE' veto):
-       > 15% downside (target_price < current_price * 0.85): forced DON'T BUY,
-         an ABSOLUTE override — this can pull an OBSERVE down too, not just BUY.
-         (Your ₹392-vs-₹137 example: a 65% downside must never read as a neutral HOLD.)
-       0-15% downside: ceiling at OBSERVE only — caps BUY/STRONG BUY, but does not
-         lift an already-DON'T-BUY verdict up.
-       Undervalued (target >= price): untouched.
-    """
     if target_price is None or not current_price:
         return verdict
     downside_pct = (current_price - target_price) / current_price
     if downside_pct > 0.15:
         if verdict != "DON'T BUY":
             notes.append(f"Forced to DON'T BUY: the modeled target price is {round(downside_pct*100,1)}% below "
-                          f"the current price — a downside this large overrides the composite score entirely, "
-                          f"regardless of fundamentals or momentum.")
+                          f"the current price — a downside this large overrides the composite score entirely.")
         return "DON'T BUY"
     elif downside_pct > 0:
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
@@ -380,7 +393,9 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
                               book_value_per_share, dividend_per_share, roe_pct,
                               pat_yoy_pct, analyst_growth_pct,
-                              precomputed_jpb=None, precomputed_ddm=None):
+                              precomputed_jpb=None, precomputed_ddm=None,
+                              resolved_pe=None, is_turnaround=False, latest_quarter_net_income=None,
+                              shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None):
     current_price = info.get('currentPrice')
     if not current_price and hist is not None and not hist.empty:
         current_price = float(hist['Close'].iloc[-1])
@@ -390,22 +405,29 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         "time_horizon": "N/A", "note": None, "model_used": "N/A",
         "composite_score": None, "fundamental_score": fundamental_score,
         "intrinsic_score": None, "technical_score": None, "margin_of_safety": None,
-        "discount_rate": None, "growth_used": None,
+        "discount_rate": None, "growth_used": None, "is_turnaround": is_turnaround,
     }
     if not current_price:
         return result
 
-    notes = []
+    notes = list(qualitative_notes or [])
     beta = info.get('beta')
     if beta is None or pd.isna(beta) or beta <= 0:
         beta = 1.0
-    ke_pct = min(max((0.07 + beta * 0.07) * 100, 9), 20)
+    ke_pct = min(max((RISK_FREE_RATE + beta * EQUITY_RISK_PREMIUM) * 100, 9), 20)
 
     growth_pct = 8.0
     if analyst_growth_pct and analyst_growth_pct > 0:
         growth_pct = min(max(analyst_growth_pct, 5), 25)
     elif pat_yoy_pct and pat_yoy_pct > 0:
         growth_pct = min(max(pat_yoy_pct, 5), 20)
+    if is_turnaround:
+        # Step 2: mimic real analyst pricing of a turnaround — the sharp swing from
+        # loss to profit justifies a materially higher forward growth assumption than
+        # a mechanical trailing-figures model would otherwise allow.
+        growth_pct = max(growth_pct, 20.0)
+        notes.append(f"Turnaround detected: forward growth assumption raised to {growth_pct:.0f}% to reflect "
+                      f"the recent swing from losses to profit, rather than penalizing the stale trailing figures.")
 
     financial = is_financial_sector(sector, industry)
     forced_intrinsic_adjustment = 0
@@ -433,41 +455,43 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             avg_fcf = float(fcf_history.mean())
         else:
             avg_fcf = info.get('netIncomeToCommon') or 0
-        shares = info.get('sharesOutstanding')
+        shares = info.get('sharesOutstanding') or shares_outstanding
         fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
 
         if fcf_per_share > 0:
-            terminal_growth_pct = 4.0
-            g = growth_pct if growth_pct > terminal_growth_pct else terminal_growth_pct + 2
-            discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, terminal_growth_pct / 100
+            g = growth_pct if growth_pct > TERMINAL_GROWTH_PCT else TERMINAL_GROWTH_PCT + 2
+            discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, TERMINAL_GROWTH_PCT / 100
             pv_fcf = sum(fcf_per_share * (1 + g_frac) ** t / (1 + discount_rate) ** t for t in range(1, 6))
             fcf5 = fcf_per_share * (1 + g_frac) ** 5
             terminal_value = (fcf5 * (1 + tg_frac)) / (discount_rate - tg_frac)
             intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
             result["model_used"] = "2-Stage DCF (Free Cash Flow)"
         else:
-            # Suggestion 3 — FCF is negative/unusable. Try the Graham Number first
-            # (needs positive EPS AND positive book value — valid for a company that's
-            # accrual-profitable but cash-flow-negative, e.g. investing heavily in
-            # working capital). Fall back to a book-value haircut, then to a hard
-            # penalty rather than ever defaulting target_price = current_price (which
-            # would silently imply a misleading ~0% margin of safety).
-            eps = info.get('trailingEps')
-            if eps and eps > 0 and book_value_per_share and book_value_per_share > 0:
-                intrinsic_value = round(math.sqrt(22.5 * eps * book_value_per_share), 2)
-                result["model_used"] = "Graham Number (defensive — FCF unusable)"
+            # Step 3: Target-P/E fallback (replaces the Graham Number, which is too
+            # punitive for asset-light companies with a small book value). If in a
+            # turnaround, price off the annualized run-rate of the turnaround quarter
+            # rather than the stale trailing loss.
+            trailing_eps = info.get('trailingEps')
+            effective_eps = trailing_eps
+            if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
+                effective_eps = (latest_quarter_net_income / shares) * 4
+
+            if effective_eps and effective_eps > 0:
+                historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
+                target_pe = min(historical_pe, 35)
+                intrinsic_value = round(effective_eps * target_pe, 2)
+                result["model_used"] = "Target P/E (defensive — FCF unusable)"
                 notes.append("Free cash flow is negative or unavailable, so the standard DCF could not be run; "
-                              "the target price instead uses the Graham Number (a conservative value-investing "
-                              "ceiling based on EPS and book value).")
+                              "the target price instead uses a Target P/E approach (EPS × a capped historical multiple).")
             elif book_value_per_share and book_value_per_share > 0:
                 intrinsic_value = round(book_value_per_share * 0.8, 2)
                 result["model_used"] = "Book Value Haircut (defensive — FCF and EPS both unusable)"
-                notes.append("Neither free cash flow nor a positive EPS was usable for a Graham Number, so the "
-                              "target price instead uses a 20%-discounted book value as a conservative proxy.")
+                notes.append("Neither free cash flow nor a positive EPS was usable, so the target price instead "
+                              "uses a 20%-discounted book value as a conservative proxy.")
             else:
                 intrinsic_value = current_price
                 forced_intrinsic_adjustment = -35
-                result["model_used"] = "Insufficient data for DCF, Graham Number, or book value — valuation score penalized"
+                result["model_used"] = "Insufficient data for DCF, Target P/E, or book value — valuation score penalized"
                 notes.append("No free cash flow, EPS, or book value was usable, so no defensible target price "
                               "could be modeled; the valuation score was penalized rather than left neutral.")
 
@@ -481,31 +505,42 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     entry_high = round(support + (0.5 * atr if atr else current_price * 0.02), 2)
     if entry_low > current_price:
         entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
-    stop_loss = round(entry_low - (1.5 * atr if atr else entry_low * 0.05), 2)
+    raw_stop_loss = entry_low - (1.5 * atr if atr else entry_low * 0.05)
+    # Step 3 ("Taparia edge case"): a large ATR relative to a low/volatile price can
+    # push the raw stop-loss to zero or negative — floor it at 50% of current price.
+    stop_loss = round(max(current_price * 0.5, raw_stop_loss), 2)
 
     # ---------------- Model 3: momentum + optional ARIMA ----------------
+    # Step 4: fully wrapped in try/except and NaN-sanitized — an illiquid or recently
+    # suspended stock's history can contain NaNs, which crashes np.polyfit with a
+    # fatal LinAlgError if not cleaned first.
     momentum, horizon, drift = "NEUTRAL", "3-5 Years", None
-    if len(hist) > 30:
-        normalized_prices = hist['Close'].values / current_price
-        slope, _ = np.polyfit(np.arange(len(hist)), normalized_prices, 1)
-        drift = slope * 252
-        if slope > 0.0005:
-            momentum, horizon = "UP", "12-18 Months (Accelerated)"
-        elif slope < -0.0005:
-            momentum = "DOWN"
-        if HAS_ARIMA and len(hist) > 100:
-            try:
-                fitted = ARIMA(hist['Close'].values, order=(5, 1, 0)).fit()
-                forecast = fitted.forecast(steps=30)
-                momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
-                horizon = "12-18 Months (Accelerated)" if momentum == "UP" else "3-5 Years"
-            except Exception:
-                pass
+    try:
+        closes_clean = hist['Close'].dropna()
+        if len(closes_clean) > 30 and current_price:
+            normalized_prices = closes_clean.values / current_price
+            if np.all(np.isfinite(normalized_prices)):
+                slope, _ = np.polyfit(np.arange(len(normalized_prices)), normalized_prices, 1)
+                drift = slope * 252
+                if slope > 0.0005:
+                    momentum, horizon = "UP", "12-18 Months (Accelerated)"
+                elif slope < -0.0005:
+                    momentum = "DOWN"
+            if HAS_ARIMA and len(closes_clean) > 100:
+                try:
+                    fitted = ARIMA(closes_clean.values, order=(5, 1, 0)).fit()
+                    forecast = fitted.forecast(steps=30)
+                    momentum = "UP" if forecast[-1] > forecast[0] else "DOWN"
+                    horizon = "12-18 Months (Accelerated)" if momentum == "UP" else "3-5 Years"
+                except Exception:
+                    pass
+    except Exception:
+        momentum, horizon, drift = "NEUTRAL", "3-5 Years", None
 
-    # ---------------- Weighted composite verdict ----------------
+    # ---------------- Weighted composite verdict (+ Step 2 qualitative bonus) ----------------
     composite, verdict, intrinsic_score, tech_score = composite_verdict(
         fundamental_score, margin_of_safety, drift, arima_direction=momentum,
-        forced_intrinsic_adjustment=forced_intrinsic_adjustment,
+        forced_intrinsic_adjustment=forced_intrinsic_adjustment, qualitative_bonus=qualitative_bonus,
     )
 
     if verdict in ("BUY", "STRONG BUY") and momentum == "DOWN" and margin_of_safety > 0.15:
@@ -515,7 +550,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         notes.append("Fundamentals score well here — the DON'T BUY comes from rich valuation and/or weak "
                       "momentum, not weak underlying business quality.")
 
-    # ---------------- Suggestion 1: tiered sanity veto, applied LAST ----------------
     verdict = apply_tiered_sanity_veto(verdict, target_price, current_price, notes)
 
     result.update({
@@ -529,28 +563,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     return result
 
 # ============================================================
-# 6. MASTER DATA FETCH
-# ------------------------------------------------------------
-# Fixes applied here (Objective 1 + supporting fixes):
-#  - `debt_to_equity` no longer uses `info.get("debtToEquity", 0)` (a missing D/E
-#    silently became "0 debt", the best possible leverage score). Missing D/E is
-#    now genuinely None / "N/A", and the checklist correctly omits it rather than
-#    rewarding it.
-#  - `roe` no longer uses `if roe_raw else None` (a bare truthy check nulls out a
-#    real, valid 0% ROE the same way it nulls out a missing one — a company that
-#    broke exactly even is a real, different data point from "we don't know").
-#    Replaced with an explicit `is_valid_metric` / `is not None` check everywhere
-#    ROE is used, including the value fed into the Justified P/B model.
-#  - Restored net_margin, PAT QoQ, PEG-from-P/E-and-growth, and interest coverage,
-#    which existed in an earlier iteration but were dropped from this version —
-#    dropping them silently thins out the Past Performance and Financial Health
-#    checklists (fewer checks run = a less discriminating fundamental score).
-#  - Quarterly net income is now capped at the 4 most recent quarters before
-#    summing (`.iloc[:4]`), instead of summing however many happen to be
-#    non-null — summing 2 or 3 quarters instead of 4 understates a TTM figure
-#    and throws off the P/E / ROE fallbacks that depend on it.
-#  - Sector detection now goes through `is_financial_sector()` (substring match
-#    on sector AND industry) instead of an exact match on sector alone.
+# 7. MASTER DATA FETCH
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
@@ -562,34 +575,40 @@ def fetch_stock_data(resolved_ticker, raw_input):
     current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
     currency_symbol = "₹"
 
+    sector = info.get("sector", "N/A")
+    industry = info.get("industry", "N/A")
+    is_fin = is_financial_sector(sector, industry)
+    revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
+
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     net_inc, total_eq, ebitda_val = None, None, info.get('ebitda')
     revenue_latest, ebit_latest, interest_exp_latest = None, None, None
     fcf_history = None
     pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
+    latest_quarter_net_income = None
 
     try:
         q_fin = stock.quarterly_financials
         if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
             ni_series = q_fin.loc['Net Income'].dropna()
             if len(ni_series) > 0:
-                # Cap at the 4 most-recent quarters for a proper TTM figure — summing
-                # every non-null column (which could be 2, 3, or 5+ depending on what
-                # yfinance happens to return) silently mis-states the annual total.
                 net_inc = float(ni_series.iloc[:4].sum())
+                latest_quarter_net_income = float(ni_series.iloc[0])
             if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
                 pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
             if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
                 pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
-            if 'Total Revenue' in q_fin.index and len(ni_series) > 0:
-                rev_series = q_fin.loc['Total Revenue'].dropna()
+            rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
+            if rev_key_found and len(ni_series) > 0:
+                rev_series = q_fin.loc[rev_key_found].dropna()
                 if len(rev_series) > 0 and rev_series.iloc[0] != 0:
                     net_margin_final = round((ni_series.iloc[0] / rev_series.iloc[0]) * 100, 2)
 
         fin = stock.financials
-        if fin is not None and not fin.empty and 'Total Revenue' in fin.index:
-            revenue_latest = float(fin.loc['Total Revenue'].iloc[0])
         if fin is not None and not fin.empty:
+            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
+            if rev_key_found and pd.notna(fin.loc[rev_key_found].iloc[0]):
+                revenue_latest = float(fin.loc[rev_key_found].iloc[0])
             for k in ['EBIT', 'Operating Income']:
                 if k in fin.index and pd.notna(fin.loc[k].iloc[0]):
                     ebit_latest = float(fin.loc[k].iloc[0]); break
@@ -604,8 +623,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 if k in bs.index:
                     eq_series = bs.loc[k].dropna()
                     if len(eq_series) > 0:
-                        total_eq = float(eq_series.iloc[0])
-                        break
+                        total_eq = float(eq_series.iloc[0]); break
 
         cf = stock.cashflow
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
@@ -613,8 +631,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
         if fin is not None and not fin.empty:
             col = fin.columns[0]
+            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
             pnl_df = pd.DataFrame([
-                {"Particulars": "Net Sales", "Amount (₹ Cr)": round(fin.loc['Total Revenue', col] / 10000000, 2) if 'Total Revenue' in fin.index else "—"},
+                {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fin.loc[rev_key_found, col] / 10000000, 2) if rev_key_found else "—"},
                 {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(fin.loc['Operating Income', col] / 10000000, 2) if 'Operating Income' in fin.index else "—"},
                 {"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col] / 10000000, 2) if 'Net Income' in fin.index else "—"}
             ])
@@ -636,11 +655,19 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     mcap = info.get("marketCap")
     shares_out = info.get("sharesOutstanding")
-    sector = info.get("sector", "N/A")
-    industry = info.get("industry", "N/A")
-    is_fin = is_financial_sector(sector, industry)
 
-    # -------- RATIOS (Objective 1: never default to N/A if calculable) --------
+    # -------- Turnaround detection (Step 2) --------
+    trailing_earnings_negative = (net_inc is not None and net_inc < 0) or (info.get('trailingEps') and info.get('trailingEps') < 0)
+    is_turnaround = bool(trailing_earnings_negative and (
+        (pat_qoq is not None and pat_qoq > 50) or (latest_quarter_net_income is not None and latest_quarter_net_income > 0)
+    ))
+
+    # -------- News + qualitative scan (Step 2) --------
+    recent_news = fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news")
+    business_summary = info.get("longBusinessSummary")
+    qualitative_bonus, qualitative_notes = scan_news_sentiment(recent_news, business_summary)
+
+    # -------- RATIOS --------
     pe_raw = info.get("trailingPE")
     if not is_valid_metric(pe_raw) and net_inc and mcap and net_inc > 0:
         pe_raw = round(mcap / net_inc, 2)
@@ -649,10 +676,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
         pb_raw = round(mcap / total_eq, 2)
 
-    roe_raw = info.get("returnOnEquity")   # a fraction, e.g. 0.145
+    roe_raw = info.get("returnOnEquity")
     if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
         roe_raw = net_inc / total_eq
-    roe_is_known = is_valid_metric(roe_raw)   # single source of truth — never a bare `if roe_raw`
+    roe_is_known = is_valid_metric(roe_raw)
 
     peg_raw = info.get("pegRatio")
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and pat_yoy_pct and pat_yoy_pct > 0:
@@ -671,21 +698,23 @@ def fetch_stock_data(resolved_ticker, raw_input):
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (is_valid_metric(ebitda_val) and revenue_latest) else "N/A"
     interest_coverage = round(ebit_latest / interest_exp_latest, 2) if (ebit_latest is not None and interest_exp_latest) else "N/A"
 
-    dte_raw = info.get("debtToEquity")   # NO unsafe default here
+    dte_raw = info.get("debtToEquity")
     debt_to_equity = round(dte_raw / 100, 2) if is_valid_metric(dte_raw) else "N/A"
 
-    # -------- Pre-compute fundamental score so the predictive pipeline can use it --------
     temp_metrics = {
         'pe_ratio': pe_raw, 'peg_ratio': peg_raw, 'pb_ratio': pb_raw,
         'pat_yoy': pat_yoy_pct, 'roe': (roe_raw * 100) if roe_is_known else None,
         'ev_ebitda': ev_ebitda, 'is_financial_sector': is_fin, 'debt_to_equity': debt_to_equity,
         'interest_coverage': interest_coverage, 'net_margin': net_margin_final, 'pat_qoq': pat_qoq,
     }
-
     v_score = score_from_checks(valuation_checks(temp_metrics))
     p_score = score_from_checks(past_performance_checks(temp_metrics))
     h_score = score_from_checks(financial_health_checks(temp_metrics))
     fundamental_score = compute_fundamental_score(v_score, p_score, h_score, is_fin)
+    if is_turnaround:
+        # Step 2: ease the heavy penalties a purely mechanical score would otherwise
+        # apply to a company with negative trailing figures despite a real, recent turn.
+        fundamental_score = min(100, fundamental_score + 15)
 
     bvps = info.get('bookValue')
     if not is_valid_metric(bvps) and total_eq and shares_out:
@@ -694,12 +723,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     div_per_share = info.get("dividendRate")
 
-    # Precompute the sector-specific intrinsic models once, so the checklist (P/B vs
-    # Justified P/B, above) and the predictive pipeline never disagree.
     jpb_ratio = jpb_value = ddm_val = None
     if is_fin:
         beta_preview = info.get('beta') if info.get('beta') and pd.notna(info.get('beta')) and info.get('beta') > 0 else 1.0
-        ke_preview = min(max((0.07 + beta_preview * 0.07) * 100, 9), 20)
+        ke_preview = min(max((RISK_FREE_RATE + beta_preview * EQUITY_RISK_PREMIUM) * 100, 9), 20)
         growth_preview = pat_yoy_pct if (pat_yoy_pct and pat_yoy_pct > 0) else 8.0
         jpb_ratio, jpb_value = justified_pb_fair_value(roe_raw * 100 if roe_is_known else None, ke_preview, growth_preview, bvps)
         ddm_val = ddm_fair_value(div_per_share, ke_preview, growth_preview)
@@ -709,6 +736,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         info, hist_full, fcf_history, sector, industry, fundamental_score,
         bvps, div_per_share, roe_raw * 100 if roe_is_known else None, pat_yoy_pct, None,
         precomputed_jpb=(jpb_ratio, jpb_value), precomputed_ddm=ddm_val,
+        resolved_pe=to_float(pe_raw), is_turnaround=is_turnaround,
+        latest_quarter_net_income=latest_quarter_net_income, shares_outstanding=shares_out,
+        qualitative_bonus=qualitative_bonus, qualitative_notes=qualitative_notes,
     )
 
     metrics = {
@@ -726,26 +756,25 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "pat_yoy": f"{pat_yoy_pct}%" if pat_yoy_pct is not None else "N/A",
         "pat_qoq": f"{pat_qoq}%" if pat_qoq is not None else "N/A",
         "market_cap": mcap, "sector": sector, "industry": industry,
-        "is_financial_sector": is_fin, "justified_pb": jpb_ratio,
+        "is_financial_sector": is_fin, "justified_pb": jpb_ratio, "is_turnaround": is_turnaround,
         "fifty_two_high": info.get("fiftyTwoWeekHigh", "N/A"),
         "fifty_two_low": info.get("fiftyTwoWeekLow", "N/A"),
-        "business_summary": info.get("longBusinessSummary"),
+        "business_summary": business_summary,
         "website": info.get("website", "N/A"),
         "company_officers": info.get("companyOfficers", []),
-        "recent_news": fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news"),
+        "recent_news": recent_news,
         "shareholding": {"Promoters": (info.get("heldPercentInsiders") or 0) * 100,
                           "Institutions": (info.get("heldPercentInstitutions") or 0) * 100,
                           "Public": max(0, 100 - ((info.get("heldPercentInsiders") or 0) * 100 + (info.get("heldPercentInstitutions") or 0) * 100))},
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
-        "q_fin": None, "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
+        "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
-        "currency": currency_symbol,
-        "fundamental_score": fundamental_score,
+        "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
     return metrics
 
 # ============================================================
-# 7. UI PLOTLY CHARTS  (unchanged)
+# 8. UI PLOTLY CHARTS
 # ============================================================
 def price_history_chart(hist_df, currency):
     fig = go.Figure()
@@ -788,82 +817,47 @@ def custom_metric(label, value):
 def card(title, body_html): st.markdown(f'<div class="swf-card"><div class="swf-h">{title}</div>{body_html}</div>', unsafe_allow_html=True)
 
 # ============================================================
-# 8. AI & INTERLACED PDF  (unchanged)
+# 9. AI NARRATIVE — Step 5: "Reality Checker" mandate + real news headlines
 # ============================================================
 def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
-    sys = "You are an elite equity research director. Output exactly 8 numbered sections: 1. VALUATION & FAIR VALUE 2. FUTURE GROWTH & OUTLOOK 3. PAST PERFORMANCE & EARNINGS QUALITY 4. FINANCIAL HEALTH & BALANCE SHEET 5. DIVIDEND & CAPITAL ALLOCATION 6. MANAGEMENT & COMPENSATION 7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT 8. NARRATIVE VERDICT. Provide ONLY narrative reasoning."
-    pmt = f"Target: {metrics['name']} ({ticker}). Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. System Verdict: {metrics['predictive']['verdict']}."
-    return client.models.generate_content(model='gemini-3.5-flash', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
+    sys = """You are an elite equity research director. Output exactly 8 numbered sections:
+1. VALUATION & FAIR VALUE
+2. FUTURE GROWTH & OUTLOOK
+3. PAST PERFORMANCE & EARNINGS QUALITY
+4. FINANCIAL HEALTH & BALANCE SHEET
+5. DIVIDEND & CAPITAL ALLOCATION
+6. MANAGEMENT & COMPENSATION
+7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
+8. NARRATIVE VERDICT
+Provide ONLY narrative reasoning — no invented numbers beyond what is given to you.
 
-def build_pdf_report(pdf_buffer, m, ai_text, ticker, rating_val, pred):
-    doc = SimpleDocTemplate(pdf_buffer, pagesize=letter, rightMargin=36, leftMargin=36, topMargin=36, bottomMargin=36)
-    title_style = ParagraphStyle('DocTitle', fontName='Helvetica-Bold', fontSize=18, textColor=colors.HexColor('#1A365D'))
-    h1_style = ParagraphStyle('SectionH1', fontName='Helvetica-Bold', fontSize=12, spaceBefore=14, spaceAfter=6, textColor=colors.HexColor('#2B6CB0'))
-    body_style = ParagraphStyle('BodyText', fontName='Helvetica', fontSize=9, leading=13, textColor=colors.HexColor('#2D3748'))
-
-    story = [Paragraph("Financial Intelligence Terminal", title_style), Paragraph(f"Dossier: {m['name']} ({ticker}) | VERDICT: {rating_val}", h1_style), Spacer(1, 10)]
-    currency = m.get('currency', '₹')
-
-    sections = re.split(r'(?=\d+\.\s+[A-Z&\s]+)', ai_text)
-    for section in sections:
-        if not section.strip() or section.strip().startswith("DYNAMIC_"): continue
-        lines = section.strip().split('\n')
-        header = lines[0].replace('**', '')
-        story.append(Paragraph(header, h1_style))
-
-        if "1. VALUATION" in header:
-            sum_data = [
-                ["Market Cap", f"{currency}{fmt_indian_currency(m.get('market_cap'),'')}", "Target Price", f"{currency}{pred.get('target_price')}"],
-                ["P/E Ratio", f"{m.get('pe_ratio')}x", "P/B Ratio", f"{m.get('pb_ratio')}x"],
-                ["ROE", f"{m.get('roe')}", "EV/EBITDA", f"{m.get('ev_ebitda')}"]
-            ]
-            t = Table(sum_data, colWidths=[1.5*inch, 1.8*inch, 1.5*inch, 1.8*inch])
-            t.setStyle(TableStyle([('BACKGROUND', (0,0), (0,-1), colors.HexColor('#F7FAFC')), ('BACKGROUND', (2,0), (2,-1), colors.HexColor('#F7FAFC')), ('FONTNAME', (0,0), (-1,-1), 'Helvetica'), ('FONTNAME', (0,0), (0,-1), 'Helvetica-Bold'), ('FONTNAME', (2,0), (2,-1), 'Helvetica-Bold'), ('GRID', (0,0), (-1,-1), 0.5, colors.HexColor('#E2E8F0')), ('PADDING', (0,0), (-1,-1), 6)]))
-            story.append(t)
-            story.append(Spacer(1, 10))
-
-            d2 = Drawing(4*inch, 1.5*inch)
-            d2.add(Rect(0, 0, 3.8*inch, 1.4*inch, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0')))
-            bc = VerticalBarChart()
-            bc.x, bc.y, bc.height, bc.width = 40, 20, 1.0*inch, 3*inch
-            bc.data = [[m['price'], pred['target_price']]]
-            bc.categoryAxis.categoryNames = ['Current', 'Fair Value']
-            bc.bars[0].fillColor = colors.HexColor('#3B82F6')
-            bc.valueAxis.valueMin = 0
-            d2.add(bc)
-            story.append(d2)
-            story.append(Spacer(1, 10))
-
-        elif "2. FUTURE GROWTH" in header:
-            hist_df = m.get('history')
-            if hist_df is not None and not hist_df.empty:
-                d1 = Drawing(5*inch, 2*inch)
-                d1.add(Rect(0, 0, 4.8*inch, 1.8*inch, fillColor=colors.HexColor('#F8FAFC'), strokeColor=colors.HexColor('#E2E8F0')))
-                lp = LinePlot()
-                lp.x, lp.y, lp.height, lp.width = 40, 20, 1.4*inch, 4*inch
-                prices = hist_df['Close'].tolist()
-                lp.data = [tuple((i, p) for i, p in enumerate(prices))]
-                lp.joinedLines = 1
-                lp.lines[0].strokeColor = colors.HexColor('#2B6CB0')
-                lp.xValueAxis.visible = False
-                lp.yValueAxis.valueMin, lp.yValueAxis.valueMax = min(prices)*0.95, max(prices)*1.05
-                d1.add(lp)
-                story.append(d1)
-                story.append(Spacer(1, 10))
-
-        for line in lines[1:]:
-            fmt_line = re.sub(r'\*\*(.*?)\*\*', r'<b>\1</b>', line)
-            story.append(Paragraph(fmt_line, body_style))
-            story.append(Spacer(1, 4))
-    doc.build(story)
+REALITY CHECKER MANDATE (applies especially to section 8):
+You are given the system's quantitative target price, verdict, and recent news headlines.
+- If the implied upside/downside is an extreme outlier (e.g. beyond +200% or beyond -60%),
+  or the stock's price action looks driven by temporary macro/geopolitical noise rather than
+  the company's own fundamentals, say so explicitly and explain why the number should be
+  read with caution rather than taken at face value.
+- If recent_news shows a genuine operating catalyst (an acquisition, a turnaround quarter, a
+  large order win) or a real risk event (fraud, resignation, default), weave that into the
+  narrative and use it to justify or temper the verdict — do not ignore it in favor of only
+  the trailing financial ratios."""
+    pred = metrics.get('predictive', {})
+    news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
+    turnaround_note = " This stock has been flagged as a potential TURNAROUND (negative trailing figures, but a recent positive quarter)." if metrics.get('is_turnaround') else ""
+    pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')}.{turnaround_note} "
+           f"Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. "
+           f"EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. "
+           f"Valuation model used: {pred.get('model_used')}. Quantitative Target Price: {metrics['currency']}{pred.get('target_price')}. "
+           f"System Verdict: {pred.get('verdict')} (composite score {pred.get('composite_score')}/100). "
+           f"Recent news headlines: {news_titles}")
+    return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt,
+                                           config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
 # ============================================================
-# 9. APP UI & NAVIGATION (EXPANSIVE DASHBOARD)  (unchanged)
+# 10. APP STATE  (Step 1: no sidebar, no tab navigation)
 # ============================================================
 if 'report_data' not in st.session_state: st.session_state.report_data = None
-if 'active_section' not in st.session_state: st.session_state.active_section = "Company Overview"
-SECTIONS = ["Company Overview", "1. Valuation", "2. Future Growth", "3. Past Performance", "4. Financial Health", "5. Dividend", "6. Management", "7. Ownership", "8. Verdict"]
 
 st.markdown('<div class="swf-title-container"><div class="swf-title">🦉 FINANCIAL INTELLIGENCE APP</div></div>', unsafe_allow_html=True)
 
@@ -884,17 +878,13 @@ if generate_clicked and stock_input.strip():
             if len(sections_list) > 8: sections_list = sections_list[-8:]
 
             st.session_state.report_data = {"metrics": metrics, "ai_text": ai_text, "narrative_sections": sections_list, "ticker": final_ticker}
-            st.session_state.active_section = "Company Overview"
-        except Exception as e: st.error(f"Error: {e}")
+        except Exception as e:
+            st.error(f"Error: {e}")
 
-with st.sidebar:
-    if st.session_state.report_data:
-        m0 = st.session_state.report_data['metrics']
-        t0 = st.session_state.report_data['ticker']
-        st.markdown(f'<div class="swf-company-mini"><div style="display:flex; align-items:center; gap:10px;"><div class="swf-avatar">{str(m0.get("name","?"))[0]}</div><div><div style="font-weight:700;">{m0.get("name")}</div><div style="color:{MUTED}; font-size:0.8em;">{t0} Report</div></div></div><div style="color:{MUTED}; font-size:0.85em; margin-top:6px;">Market Cap: {fmt_indian_currency(m0.get("market_cap"), m0.get("currency","₹"))}</div></div>', unsafe_allow_html=True)
-        st.radio("Navigate", SECTIONS, index=SECTIONS.index(st.session_state.active_section), key="nav_radio", label_visibility="collapsed")
-        st.session_state.active_section = st.session_state.nav_radio
-
+# ============================================================
+# 11. SINGLE-PAGE REPORT  (Step 1: every section rendered sequentially,
+#     full detail preserved from the previous tabbed version — nothing dropped)
+# ============================================================
 if st.session_state.report_data:
     data = st.session_state.report_data
     m = data['metrics']
@@ -909,9 +899,11 @@ if st.session_state.report_data:
 
     val_checks, past_checks, health_checks, div_checks = valuation_checks(m), past_performance_checks(m), financial_health_checks(m), dividend_checks(m)
 
+    # ---------------- Header ----------------
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
-        st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{m["name"]}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span></div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{currency}{m["price"]}</div></div></div></div>', unsafe_allow_html=True)
+        turnaround_badge = ' <span class="swf-badge" style="margin-left:6px; color:#F97316;">TURNAROUND</span>' if m.get('is_turnaround') else ''
+        st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{m["name"]}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span>{turnaround_badge}</div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{currency}{m["price"]}</div></div></div></div>', unsafe_allow_html=True)
         hist_df = m.get('history')
         if hist_df is not None and not hist_df.empty: st.plotly_chart(price_history_chart(hist_df, currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
@@ -920,81 +912,87 @@ if st.session_state.report_data:
         st.markdown('</div>', unsafe_allow_html=True)
 
     st.markdown("---")
-    sec = st.session_state.active_section
 
-    if sec == "Company Overview":
-        c1, c2, c3, c4 = st.columns(4)
-        with c1: custom_metric("Current Price", f"{currency}{m['price']}"); custom_metric("P/E Ratio", f"{m['pe_ratio']}x" if m['pe_ratio'] != "N/A" else "N/A")
-        with c2: custom_metric("P/BV Ratio", f"{m['pb_ratio']}x" if m['pb_ratio'] != "N/A" else "N/A"); custom_metric("ROE", f"{m['roe']}")
-        with c3: custom_metric("EV/EBITDA", f"{m['ev_ebitda']}x" if "N/A" not in str(m['ev_ebitda']) else m['ev_ebitda']); custom_metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
-        with c4: custom_metric("Debt-to-Equity", f"{m['debt_to_equity']}"); custom_metric("EBITDA Margin", f"{m.get('ebitda_margin', 'N/A')}")
-        card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{m.get('business_summary', 'Business summary not available.')}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
-
-    elif sec == "1. Valuation":
-        st.markdown(f"### 1. Valuation")
-        card("Valuation Checklist", render_checks(val_checks))
-        st.markdown("##### Fair Value Estimate")
-        if m.get('fair_value'):
-            fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], currency)
-            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
-            st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled {pred.get('model_used','valuation')} fair value.")
-        card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
-
-    elif sec == "2. Future Growth":
-        st.markdown("### 2. Future Growth & Outlook")
-        fg1, fg2 = st.columns(2)
-        with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", f"{currency}{pred['target_price']}")
-        with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
-        if m.get('fair_value'): st.plotly_chart(projection_path_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
-        card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
-
-    elif sec == "3. Past Performance":
-        st.markdown(f"### 3. Past Performance")
-        card("Past Performance Checklist", render_checks(past_checks))
-        if not m['pnl_df'].empty: st.markdown("##### Profit & Loss (Cr)"); st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
-        card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
-
-    elif sec == "4. Financial Health":
-        st.markdown(f"### 4. Financial Health")
-        card("Financial Health Checklist", render_checks(health_checks))
-        tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
-        with tab_bs:
-            if not m['bs_df'].empty: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
-        with tab_cf:
-            if not m['cf_df'].empty: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
-        card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
-
-    elif sec == "5. Dividend":
-        st.markdown(f"### 5. Dividend")
-        card("Dividend Checklist", render_checks(div_checks))
-        card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
-
-    elif sec == "6. Management":
-        st.markdown("### 6. Management & Leadership")
-        if m['company_officers']: st.dataframe(pd.DataFrame([{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]), use_container_width=True, hide_index=True)
-        card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
-
-    elif sec == "7. Ownership":
-        st.markdown("### 7. Ownership Structure")
-        st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
-        card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
-
-    elif sec == "8. Verdict":
-        st.markdown("### 8. Verdict & Summary")
-        st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
-
-        if pred.get('note'): st.info(pred['note'])
-
-        if current_rating in ["BUY", "STRONG BUY"]:
-            st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
-
-        styled = style_verdict_text(narrative_for(7))
-        card("AI Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
+    # ---------------- Company Overview ----------------
+    st.markdown('<div class="swf-section-title">Company Overview</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: custom_metric("Current Price", f"{currency}{m['price']}"); custom_metric("P/E Ratio", f"{m['pe_ratio']}x" if m['pe_ratio'] != "N/A" else "N/A")
+    with c2: custom_metric("P/BV Ratio", f"{m['pb_ratio']}x" if m['pb_ratio'] != "N/A" else "N/A"); custom_metric("ROE", f"{m['roe']}")
+    with c3: custom_metric("EV/EBITDA", f"{m['ev_ebitda']}x" if "N/A" not in str(m['ev_ebitda']) else m['ev_ebitda']); custom_metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
+    with c4: custom_metric("Debt-to-Equity", f"{m['debt_to_equity']}"); custom_metric("EBITDA Margin", f"{m.get('ebitda_margin', 'N/A')}")
+    card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{m.get('business_summary', 'Business summary not available.')}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
 
     st.markdown("---")
-    pdf_buffer = io.BytesIO()
-    build_pdf_report(pdf_buffer, m, data['ai_text'], ticker, current_rating, pred)
-    pdf_buffer.seek(0)
-    st.download_button("📥 Download Official PDF Dossier", data=pdf_buffer, file_name=f"{ticker}_Dossier.pdf", mime="application/pdf", type="primary")
+    # ---------------- 1. Valuation ----------------
+    st.markdown('<div class="swf-section-title">1. Valuation</div>', unsafe_allow_html=True)
+    card("Valuation Checklist", render_checks(val_checks))
+    st.markdown("##### Fair Value Estimate")
+    if m.get('fair_value'):
+        fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], currency)
+        st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled {pred.get('model_used','valuation')} fair value.")
+    card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
+
+    st.markdown("---")
+    # ---------------- 2. Future Growth ----------------
+    st.markdown('<div class="swf-section-title">2. Future Growth &amp; Outlook</div>', unsafe_allow_html=True)
+    fg1, fg2 = st.columns(2)
+    with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", f"{currency}{pred['target_price']}")
+    with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
+    if m.get('fair_value'): st.plotly_chart(projection_path_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
+    card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(1)}</p>")
+
+    st.markdown("---")
+    # ---------------- 3. Past Performance ----------------
+    st.markdown('<div class="swf-section-title">3. Past Performance</div>', unsafe_allow_html=True)
+    card("Past Performance Checklist", render_checks(past_checks))
+    if not m['pnl_df'].empty: st.markdown("##### Profit & Loss (Cr)"); st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
+    card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
+
+    st.markdown("---")
+    # ---------------- 4. Financial Health ----------------
+    st.markdown('<div class="swf-section-title">4. Financial Health</div>', unsafe_allow_html=True)
+    card("Financial Health Checklist", render_checks(health_checks))
+    tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
+    with tab_bs:
+        if not m['bs_df'].empty: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
+    with tab_cf:
+        if not m['cf_df'].empty: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
+    card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(3)}</p>")
+
+    st.markdown("---")
+    # ---------------- 5. Dividend ----------------
+    st.markdown('<div class="swf-section-title">5. Dividend</div>', unsafe_allow_html=True)
+    card("Dividend Checklist", render_checks(div_checks))
+    card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(4)}</p>")
+
+    st.markdown("---")
+    # ---------------- 6. Management ----------------
+    st.markdown('<div class="swf-section-title">6. Management &amp; Leadership</div>', unsafe_allow_html=True)
+    if m['company_officers']: st.dataframe(pd.DataFrame([{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]), use_container_width=True, hide_index=True)
+    card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(5)}</p>")
+
+    st.markdown("---")
+    # ---------------- 7. Ownership ----------------
+    st.markdown('<div class="swf-section-title">7. Ownership Structure</div>', unsafe_allow_html=True)
+    st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
+    card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
+
+    st.markdown("---")
+    # ---------------- 8. Verdict ----------------
+    st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
+
+    if pred.get('note'): st.info(pred['note'])
+
+    if current_rating in ["BUY", "STRONG BUY"]:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
+
+    styled = style_verdict_text(narrative_for(7))
+    card("AI Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
+
+    st.caption("This report combines a sector-aware intrinsic valuation model, an ATR/volume-profile risk model, "
+               "a trend-based time estimate, and a lightweight news/catalyst scan — for educational purposes only. "
+               "It is not financial advice. Press Ctrl+P (or Cmd+P) to print or save this report.")
