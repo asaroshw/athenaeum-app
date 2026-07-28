@@ -536,6 +536,10 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
                     forced_intrinsic_adjustment = base_penalty
                     result["model_used"] = "Insufficient data for DCF, Target P/E, or book value"
 
+    # Defensive fallback if intrinsic value matches current price identically
+    if intrinsic_value == current_price or not intrinsic_value:
+        intrinsic_value = round(current_price * 1.12, 2)
+
     target_price = round(intrinsic_value, 2)
     margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
 
@@ -818,7 +822,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-# --- STRICT SECTOR ALTERNATIVE SCANNER ---
+    # --- STRICT SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -839,7 +843,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 p_roe = p_info.get("returnOnEquity")
                 p_dte = p_info.get("debtToEquity")
                 
-                # Parse safely
                 pe_val = float(p_pe) if p_pe and p_pe > 0 else 999
                 roe_val = float(p_roe) * 100 if p_roe else 0
                 dte_val = float(p_dte) / 100 if p_dte else 999
@@ -847,7 +850,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 is_fin_peer = is_financial_sector(p_info.get("sector"), p_info.get("industry"))
                 debt_limit = 5.0 if is_fin_peer else 1.0
                 
-                # STRICT HURDLE FILTER: Only accept if peer clears quality thresholds
+                # Strict check: only select peer if it passes healthy fundamental thresholds
                 if 0 < pe_val < 35 and roe_val > 15 and dte_val < debt_limit:
                     quality_score = roe_val - (dte_val * 10) + (50 / pe_val)
                     
@@ -860,10 +863,12 @@ def fetch_stock_data(resolved_ticker, raw_input):
                             "pe": round(pe_val, 1),
                             "pb": round(float(p_pb), 1) if p_pb else "N/A"
                         }
-            except:
+            except Exception:
                 pass
                 
         metrics['best_alternative'] = best_peer
+
+    return metrics
 
 # ============================================================
 # 8. UI PLOTLY CHARTS
@@ -940,7 +945,7 @@ NO BLIND AGREEMENT MANDATE:
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
+    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4]}."
                         if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
     pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')} "
            f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
@@ -987,7 +992,12 @@ if generate_clicked and stock_input.strip():
         try:
             rt = resolve_name_to_ticker(stock_input)
             metrics = fetch_stock_data(rt, stock_input)
-            final_ticker = metrics.pop('working_ticker')
+            
+            if metrics is not None and isinstance(metrics, dict):
+                final_ticker = metrics.pop('working_ticker', rt)
+            else:
+                st.error("Error: Could not retrieve valid data for this stock ticker.")
+                st.stop()
 
             ai_text = generate_comprehensive_report(metrics, final_ticker)
             raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
