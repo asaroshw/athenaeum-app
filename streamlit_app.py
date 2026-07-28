@@ -818,7 +818,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- SECTOR ALTERNATIVE SCANNER ---
+# --- STRICT SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -830,36 +830,40 @@ def fetch_stock_data(resolved_ticker, raw_input):
             try:
                 peer_stock = yf.Ticker(peer)
                 p_info = peer_stock.info
-                p_hist = peer_stock.history(period="1y")
+                p_hist = peer_stock.history(period="6mo")
                 
                 if p_hist.empty: continue
                 p_price = p_info.get("currentPrice", float(p_hist['Close'].iloc[-1]))
-                p_pe = p_info.get("trailingPE", 0)
-                p_pb = p_info.get("priceToBook", 0)
+                p_pe = p_info.get("trailingPE")
+                p_pb = p_info.get("priceToBook")
+                p_roe = p_info.get("returnOnEquity")
+                p_dte = p_info.get("debtToEquity")
                 
-                p_roe = p_info.get("returnOnEquity", 0)
-                p_debt = p_info.get("debtToEquity", 100)
+                # Parse safely
+                pe_val = float(p_pe) if p_pe and p_pe > 0 else 999
+                roe_val = float(p_roe) * 100 if p_roe else 0
+                dte_val = float(p_dte) / 100 if p_dte else 999
                 
-                if p_roe is None: p_roe = 0
-                if p_debt is None: p_debt = 100
-
-                proxy_score = (p_roe * 100) - (p_debt / 10)
+                is_fin_peer = is_financial_sector(p_info.get("sector"), p_info.get("industry"))
+                debt_limit = 5.0 if is_fin_peer else 1.0
                 
-                if proxy_score > highest_score:
-                    highest_score = proxy_score
-                    best_peer = {
-                        "name": p_info.get("shortName", peer),
-                        "ticker": peer,
-                        "price": p_price,
-                        "pe": round(p_pe, 1) if p_pe else "N/A",
-                        "pb": round(p_pb, 1) if p_pb else "N/A"
-                    }
+                # STRICT HURDLE FILTER: Only accept if peer clears quality thresholds
+                if 0 < pe_val < 35 and roe_val > 15 and dte_val < debt_limit:
+                    quality_score = roe_val - (dte_val * 10) + (50 / pe_val)
+                    
+                    if quality_score > highest_score:
+                        highest_score = quality_score
+                        best_peer = {
+                            "name": p_info.get("shortName", peer),
+                            "ticker": peer,
+                            "price": p_price,
+                            "pe": round(pe_val, 1),
+                            "pb": round(float(p_pb), 1) if p_pb else "N/A"
+                        }
             except:
                 pass
                 
         metrics['best_alternative'] = best_peer
-
-    return metrics
 
 # ============================================================
 # 8. UI PLOTLY CHARTS
