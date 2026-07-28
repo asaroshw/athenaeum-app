@@ -822,7 +822,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- STRICT SECTOR ALTERNATIVE SCANNER ---
+   # --- STRICT STRONG BUY SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -848,14 +848,15 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 dte_val = float(p_dte) / 100 if p_dte else 999
                 
                 is_fin_peer = is_financial_sector(p_info.get("sector"), p_info.get("industry"))
-                debt_limit = 5.0 if is_fin_peer else 1.0
+                debt_limit = 2.0 if is_fin_peer else 0.7  # Tighter debt control for Strong Buy
                 
-                # Strict check: only select peer if it passes healthy fundamental thresholds
-                if 0 < pe_val < 35 and roe_val > 15 and dte_val < debt_limit:
-                    quality_score = roe_val - (dte_val * 10) + (50 / pe_val)
+                # STRICT STRONG BUY HURDLES: Exceptional ROE, low debt, attractive P/E
+                if 0 < pe_val < 25 and roe_val > 20 and dte_val < debt_limit:
+                    strong_buy_score = roe_val - (dte_val * 15) + (60 / pe_val)
                     
-                    if quality_score > highest_score:
-                        highest_score = quality_score
+                    # Ensure it clears the high bar equivalent to a Strong Buy composite score
+                    if strong_buy_score > highest_score and strong_buy_score > 35:
+                        highest_score = strong_buy_score
                         best_peer = {
                             "name": p_info.get("shortName", peer),
                             "ticker": peer,
@@ -867,8 +868,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 pass
                 
         metrics['best_alternative'] = best_peer
-
-    return metrics
 
 # ============================================================
 # 8. UI PLOTLY CHARTS
