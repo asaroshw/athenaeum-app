@@ -33,22 +33,13 @@ RISK_FREE_RATE = 0.065
 EQUITY_RISK_PREMIUM = 0.055
 TERMINAL_GROWTH_PCT = 5.0
 
-SECTOR_PEERS = {
-    "financial": ["BAJFINANCE.NS", "CHOLAFIN.NS", "SHRIRAMFIN.NS", "HDFCBANK.NS"],
-    "capex_intensive": ["LT.NS", "HAL.NS", "BEL.NS", "SIEMENS.NS"],
-    "cyclical": ["BOSCHLTD.NS", "MOTHERSON.NS", "UNOMINDA.NS", "MRF.NS"],
-    "standard": ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HUL.NS"] 
-}
-
 FINANCIAL_SECTOR_KEYWORDS = [
     "financial services", "bank", "nbfc", "insurance", "capital markets",
-    "credit services", "diversified financials", "asset management",
-    "mortgage finance", "consumer finance", "shadow banking",
+    "credit services", "diversified financials", "asset management", "mortgage finance"
 ]
 CAPEX_INTENSIVE_KEYWORDS = [
     "industrial", "engineering", "infrastructure", "construction", "capital goods",
-    "electrical equipment", "machinery", "railroad", "defense", "aerospace",
-    "building products", "specialty industrial",
+    "electrical equipment", "machinery", "railroad", "defense", "aerospace"
 ]
 CYCLICAL_KEYWORDS = ["auto", "automobile", "tire", "tyre"]
 
@@ -66,9 +57,6 @@ ORDER_BOOK_KEYWORDS = ['order book', 'order win', 'wins order', 'contract win', 
                         'capex expansion', 'capacity expansion', 'new plant', 'guidance']
 GROWTH_PCT_PATTERN = re.compile(r'(\d{1,2})\s*%\s*(?:growth|guidance)|(?:growth|guidance).{0,25}?(\d{1,2})\s*%', re.IGNORECASE)
 
-# ============================================================
-# UTILITIES & HELPERS
-# ============================================================
 def to_float(val):
     if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
     if isinstance(val, bool) or (isinstance(val, float) and pd.isna(val)): return None
@@ -152,9 +140,6 @@ def extract_order_book_signal(recent_news, business_summary):
         except: pass
     return order_hits, growth_pct_found
 
-# ============================================================
-# CHECKLISTS
-# ============================================================
 def valuation_checks(m):
     pe, peg, pat_yoy, pb, ev_ebitda = to_float(m.get('pe_ratio')), to_float(m.get('peg_ratio')), to_float(m.get('pat_yoy')), to_float(m.get('pb_ratio')), to_float(m.get('ev_ebitda'))
     is_fin = m.get('is_financial_sector', False)
@@ -163,25 +148,27 @@ def valuation_checks(m):
         if pe < 0: checks.append(("Profitable on a P/E basis", False, f"P/E is negative ({pe}x)."))
         else:
             thresh = 45 if (pat_yoy is not None and pat_yoy > 30) else 25
-            checks.append((f"Reasonable P/E (<{thresh}x)", pe < thresh, f"Trailing P/E of {pe}x"))
+            checks.append((f"Reasonable P/E (<{thresh}x)", bool(pe < thresh), f"Trailing P/E of {pe}x"))
     if peg is not None and peg > 0:
-        checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg}"))
+        checks.append(("Attractive PEG (<1.5)", bool(peg < 1.5), f"PEG ratio of {peg}"))
     if pb is not None:
         thresh = 3.0 if is_fin else 5.0
-        checks.append((f"Reasonable P/B (<{thresh:g}x)", 0 < pb < thresh, f"Price-to-Book of {pb}x"))
+        checks.append((f"Reasonable P/B (<{thresh:g}x)", bool(0 < pb < thresh), f"Price-to-Book of {pb}x"))
     if is_fin and pb is not None and m.get('justified_pb'):
         jpb = m['justified_pb']
-        checks.append(("P/B vs Excess-ROE Justified P/B", pb < jpb, f"Actual P/B {pb}x vs justified {jpb}x"))
-    if not is_fin and ev_ebitda is not None and ev_ebitda > 0:
-        checks.append(("Reasonable EV/EBITDA (<15x)", ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda}x"))
+        checks.append(("P/B vs Excess-ROE Justified P/B", bool(pb < jpb), f"Actual P/B {pb}x vs justified {jpb}x"))
+    if not is_fin and ev_ebitda is not None:
+        if ev_ebitda < 0: checks.append(("Positive EV/EBITDA", False, f"EV/EBITDA is negative ({ev_ebitda}x)."))
+        else: checks.append(("Reasonable EV/EBITDA (<15x)", bool(ev_ebitda < 15), f"EV/EBITDA of {ev_ebitda}x"))
     return checks
 
 def past_performance_checks(m):
     yoy, qoq, roe, margin = to_float(m.get('pat_yoy')), to_float(m.get('pat_qoq')), to_float(m.get('roe')), to_float(m.get('net_margin'))
     checks = []
-    if yoy is not None: checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {yoy}%"))
-    if roe is not None: checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {roe}%"))
-    if margin is not None: checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {margin}%"))
+    if yoy is not None: checks.append(("Positive Earnings Growth (YoY)", bool(yoy > 0), f"PAT YoY growth of {yoy}%"))
+    if yoy is not None and qoq is not None: checks.append(("Accelerating Growth", bool(qoq > yoy), "Comparing recent quarter growth to yearly figure"))
+    if roe is not None: checks.append(("Strong Return on Equity (>15%)", bool(roe > 15), f"ROE of {roe}%"))
+    if margin is not None: checks.append(("Healthy Net Margin (>10%)", bool(margin > 10), f"Net margin of {margin}%"))
     return checks
 
 def financial_health_checks(m):
@@ -189,16 +176,19 @@ def financial_health_checks(m):
     is_fin = m.get('is_financial_sector', False)
     checks = []
     if de is not None:
-        thresh = 10.0 if is_fin else 1.0
-        checks.append((f"Leverage Control (D/E < {thresh}x)", de < thresh, f"Debt-to-equity of {de}"))
-    if ic is not None: checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"Interest coverage of {ic}x"))
+        if de < 0: checks.append(("Positive Shareholder Equity", False, f"Debt-to-equity is negative ({de})."))
+        else:
+            threshold = 10.0 if is_fin else 1.0
+            checks.append((f"Leverage Control (D/E < {threshold:g}x)", bool(de < threshold), f"Debt-to-equity of {de}"))
+    if ic is not None: checks.append(("Comfortable Interest Coverage (>3x)", bool(ic > 3), f"Interest coverage of {ic}x"))
     return checks
 
 def dividend_checks(m):
     dy_str = str(m.get('dividend_yield', ''))
-    if "doesn't pay" in dy_str.lower(): return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
+    if "doesn't pay" in dy_str.lower() or dy_str == "None":
+        return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
     dy = to_float(dy_str)
-    return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
+    return [("Notable Dividend (>1.5%)", bool(dy is not None and dy > 1.5), f"Dividend yield: {m.get('dividend_yield')}")]
 
 def score_from_checks(checks):
     vals = [c[1] for c in checks if c[1] is not None]
@@ -212,9 +202,6 @@ def compute_fundamental_score(val_score, past_score, health_score, is_financial)
     total_w = sum(weights[k] for k in available)
     return round(sum(weights[k] * v for k, v in available.items()) / total_w, 1)
 
-# ============================================================
-# COMPOSITE ENGINE & PIPELINE
-# ============================================================
 def calculate_vwap_support(df):
     d = df.dropna(subset=['Close', 'Volume'])
     if d.empty: return None
@@ -385,9 +372,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     })
     return result
 
-# ============================================================
-# MASTER FETCH
-# ============================================================
 def fetch_stock_data(resolved_ticker, raw_input):
     stock = yf.Ticker(resolved_ticker)
     hist_full = stock.history(period="1y")
@@ -400,9 +384,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
     sector_profile = classify_sector_profile(sector, industry)
     revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
 
-    pnl_df, bs_df, cf_df = [], [], []
+    pnl_df, bs_df = [], []
     net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
-    revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
+    revenue_latest, ebit_latest, interest_exp_latest = None, None, None
     fcf_history = None
     pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
     latest_quarter_net_income = None
@@ -470,7 +454,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     mcap = info.get("marketCap")
     shares_out = info.get("sharesOutstanding")
-    operating_margin = round((ebit_latest / revenue_latest) * 100, 2) if (ebit_latest is not None and revenue_latest) else None
 
     trailing_earnings_negative = (net_inc is not None and net_inc < 0) or (info.get('trailingEps') and info.get('trailingEps') < 0)
     is_turnaround = bool(trailing_earnings_negative and ((pat_qoq is not None and pat_qoq > 50) or (latest_quarter_net_income is not None and latest_quarter_net_income > 0)))
@@ -478,7 +461,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
     recent_news = fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news")
     business_summary = info.get("longBusinessSummary")
     qualitative_bonus, qualitative_notes = scan_news_sentiment(recent_news, business_summary)
-    order_book_hits, growth_pct_from_news = extract_order_book_signal(recent_news, business_summary)
 
     pe_raw = info.get("trailingPE")
     if not is_valid_metric(pe_raw) and net_inc and mcap: pe_raw = round(mcap / net_inc, 2)
@@ -545,15 +527,18 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "market_cap": mcap, "sector": sector, "industry": industry,
         "business_summary": business_summary, "recent_news": recent_news,
         "shareholding": shareholding, "history": [{"Date": str(d.date()), "Close": float(c)} for d, c in zip(hist_full.index, hist_full['Close'])],
-        "pnl_df": pnl_df, "bs_df": bs_df, "val_checks": valuation_checks(temp_metrics),
-        "past_checks": past_performance_checks(temp_metrics), "health_checks": financial_health_checks(temp_metrics),
-        "div_checks": dividend_checks(temp_metrics), "predictive": predictive_data, "currency": "₹"
+        "pnl_df": pnl_df, "bs_df": bs_df,
+        "val_checks": valuation_checks(temp_metrics),
+        "past_checks": past_performance_checks(temp_metrics),
+        "health_checks": financial_health_checks(temp_metrics),
+        "div_checks": dividend_checks(temp_metrics),
+        "predictive": predictive_data, "currency": "₹"
     }
 
 def generate_comprehensive_report(metrics, ticker):
     client = genai.Client(api_key=GEMINI_KEY)
     sys = """You are a Senior Equity Analyst acting as the final synthesis layer over a quantitative model.
-Output exactly 8 numbered sections:
+Output exactly 8 numbered sections starting with:
 1. VALUATION & FAIR VALUE
 2. FUTURE GROWTH & OUTLOOK
 3. PAST PERFORMANCE & EARNINGS QUALITY
@@ -562,7 +547,7 @@ Output exactly 8 numbered sections:
 6. MANAGEMENT & COMPENSATION
 7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
 8. NARRATIVE VERDICT
-Provide thorough, professional analysis for each section based on the provided inputs."""
+Provide thorough, professional analysis for each section."""
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines."
     pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')}. "
