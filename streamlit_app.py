@@ -945,8 +945,8 @@ NO BLIND AGREEMENT MANDATE:
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4]}."
-                    if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
+    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
+                        if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
     pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')} "
            f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
            f"Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. "
