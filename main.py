@@ -27,14 +27,8 @@ RISK_FREE_RATE = 0.065
 EQUITY_RISK_PREMIUM = 0.055
 TERMINAL_GROWTH_PCT = 5.0
 
-FINANCIAL_SECTOR_KEYWORDS = [
-    "financial services", "bank", "nbfc", "insurance", "capital markets",
-    "credit services", "diversified financials", "asset management", "mortgage finance"
-]
-CAPEX_INTENSIVE_KEYWORDS = [
-    "industrial", "engineering", "infrastructure", "construction", "capital goods",
-    "electrical equipment", "machinery", "railroad", "defense", "aerospace"
-]
+FINANCIAL_SECTOR_KEYWORDS = ["financial services", "bank", "nbfc", "insurance", "capital markets", "credit services", "asset management"]
+CAPEX_INTENSIVE_KEYWORDS = ["industrial", "engineering", "infrastructure", "construction", "capital goods", "defense", "aerospace"]
 CYCLICAL_KEYWORDS = ["auto", "automobile", "tire", "tyre"]
 
 def to_float(val):
@@ -87,7 +81,7 @@ def fetch_google_news(query_term):
         if res.status_code == 200:
             root = ET.fromstring(res.content)
             headlines = []
-            for item in root.findall('.//item')[:5]:
+            for item in root.findall('.//item')[:6]:
                 title = item.find('title')
                 link = item.find('link')
                 if title is not None and link is not None:
@@ -97,14 +91,12 @@ def fetch_google_news(query_term):
     return []
 
 def valuation_checks(m):
-    pe, peg, pat_yoy, pb, ev_ebitda = to_float(m.get('pe_ratio')), to_float(m.get('peg_ratio')), to_float(m.get('pat_yoy')), to_float(m.get('pb_ratio')), to_float(m.get('ev_ebitda'))
+    pe, pb = to_float(m.get('pe_ratio')), to_float(m.get('pb_ratio'))
     is_fin = m.get('is_financial_sector', False)
     checks = []
     if pe is not None:
         if pe < 0: checks.append(("Profitable on a P/E basis", False, f"Negative P/E ({pe}x)"))
-        else:
-            thresh = 45 if (pat_yoy and pat_yoy > 30) else 25
-            checks.append((f"Reasonable P/E (<{thresh}x)", pe < thresh, f"Trailing P/E: {pe}x"))
+        else: checks.append(("Reasonable P/E (<25x)", pe < 25, f"Trailing P/E: {pe}x"))
     if pb is not None:
         thresh = 3.0 if is_fin else 5.0
         checks.append((f"Reasonable P/B (<{thresh:g}x)", 0 < pb < thresh, f"Price-to-Book: {pb}x"))
@@ -130,7 +122,7 @@ def financial_health_checks(m):
 
 def dividend_checks(m):
     dy = to_float(m.get('dividend_yield'))
-    return [("Notable Dividend Yield (>1.5%)", dy is not None and dy > 1.5, f"Yield: {m.get('dividend_yield')}")]
+    return [("Notable Dividend Yield (>1.5%)", dy is not None and dy > 1.5, f"Yield: {m.get('dividend_yield', 'None')}")]
 
 def score_from_checks(checks):
     vals = [c[1] for c in checks if c[1] is not None]
@@ -157,9 +149,14 @@ def run_predictive_pipeline(info, hist, fcf_history, current_price, fundamental_
         intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
         model_used = "2-Stage DCF"
     else:
-        eps = info.get('trailingEps') or 10
-        intrinsic_value = eps * 20
-        model_used = "Target P/E"
+        eps = info.get('trailingEps')
+        if eps and eps > 0:
+            intrinsic_value = eps * 20
+            model_used = "Target P/E"
+        else:
+            bv = info.get('bookValue') or 10
+            intrinsic_value = bv * 0.8
+            model_used = "Book Value Haircut"
 
     target_price = round(intrinsic_value, 2)
     margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
@@ -176,7 +173,9 @@ def run_predictive_pipeline(info, hist, fcf_history, current_price, fundamental_
         "verdict": verdict, "target_price": target_price, "composite_score": composite,
         "fundamental_score": fundamental_score, "intrinsic_score": round(intrinsic_score, 1),
         "technical_score": 50.0, "margin_of_safety": round(margin_of_safety * 100, 1),
-        "model_used": model_used, "time_horizon": "3-5 Years"
+        "model_used": model_used, "time_horizon": "3-5 Years",
+        "entry_range": f"₹{round(current_price*0.92, 2)} - ₹{round(current_price*0.96, 2)}",
+        "stop_loss": round(current_price * 0.85, 2)
     }
 
 def fetch_stock_data(resolved_ticker: str):
@@ -206,7 +205,38 @@ def fetch_stock_data(resolved_ticker: str):
     fund_score = round((v_score + p_score + h_score) / 3, 1)
 
     predictive = run_predictive_pipeline(info, hist, fcf_history, current_price, fund_score)
-    recent_news = fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news")
+    recent_news = fetch_google_news(info.get('longName', resolved_ticker))
+
+    # Financial statements tables extraction
+    pnl_data, bs_data, cf_data = [], [], []
+    try:
+        fin = stock.financials
+        if fin is not None and not fin.empty:
+            col = fin.columns[0]
+            for row_name in ['Total Revenue', 'Operating Income', 'Net Income']:
+                if row_name in fin.index:
+                    val = fin.loc[row_name, col]
+                    pnl_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2) if pd.notna(val) else "—"})
+        bs = stock.balance_sheet
+        if bs is not None and not bs.empty:
+            col = bs.columns[0]
+            for row_name in ['Total Debt', 'Total Assets', 'Common Stock Equity']:
+                if row_name in bs.index:
+                    val = bs.loc[row_name, col]
+                    bs_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2) if pd.notna(val) else "—"})
+        if cf is not None and not cf.empty:
+            col = cf.columns[0]
+            for row_name in ['Operating Cash Flow', 'Free Cash Flow']:
+                if row_name in cf.index:
+                    val = cf.loc[row_name, col]
+                    cf_data.append({"Particulars": row_name, "Amount (₹ Cr)": round(val / 10000000, 2) if pd.notna(val) else "—"})
+    except: pass
+
+    shareholding = {
+        "Promoters": round((info.get("heldPercentInsiders") or 0) * 100, 1),
+        "Institutions": round((info.get("heldPercentInstitutions") or 0) * 100, 1),
+        "Public": round(max(0, 100 - (((info.get("heldPercentInsiders") or 0) + (info.get("heldPercentInstitutions") or 0)) * 100)), 1)
+    }
 
     return {
         "name": info.get("longName", resolved_ticker), "ticker": resolved_ticker, "price": current_price,
@@ -215,17 +245,27 @@ def fetch_stock_data(resolved_ticker: str):
         "business_summary": info.get("longBusinessSummary", "No summary available."),
         "recent_news": recent_news, "val_checks": valuation_checks(temp_metrics),
         "past_checks": past_performance_checks(temp_metrics), "health_checks": financial_health_checks(temp_metrics),
-        "div_checks": dividend_checks(temp_metrics), "predictive": predictive
+        "div_checks": dividend_checks(temp_metrics), "predictive": predictive,
+        "pnl_df": pnl_data, "bs_df": bs_data, "cf_df": cf_data, "shareholding": shareholding,
+        "history": [{"Date": str(d.date()), "Close": float(c)} for d, c in zip(hist.index, hist['Close'])]
     }
 
-def generate_ai_narrative(metrics: dict) -> str:
-    if not GEMINI_KEY: return "Gemini API key is not configured in Render environment variables."
-    try:
-        client = genai.Client(api_key=GEMINI_KEY)
-        prompt = f"Analyze stock {metrics['name']} ({metrics['ticker']}). Price: ₹{metrics['price']}, Verdict: {metrics['predictive']['verdict']}. Provide a comprehensive 2-paragraph fundamental analysis."
-        return client.models.generate_content(model='gemini-3.5-flash-lite', contents=prompt).text
-    except Exception as e:
-        return f"AI summary unavailable: {str(e)}"
+def generate_comprehensive_report(metrics: dict) -> str:
+    if not GEMINI_KEY: return "Gemini API key is not configured."
+    client = genai.Client(api_key=GEMINI_KEY)
+    sys = """You are a Senior Equity Analyst. Output exactly 8 numbered sections:
+1. VALUATION & FAIR VALUE
+2. FUTURE GROWTH & OUTLOOK
+3. PAST PERFORMANCE & EARNINGS QUALITY
+4. FINANCIAL HEALTH & BALANCE SHEET
+5. DIVIDEND & CAPITAL ALLOCATION
+6. MANAGEMENT & COMPENSATION
+7. OWNERSHIP STRUCTURE & INSIDER SENTIMENT
+8. NARRATIVE VERDICT
+Provide thorough, professional analysis for each section based on the provided inputs."""
+    pred = metrics['predictive']
+    pmt = f"Target: {metrics['name']} ({metrics['ticker']}). Sector: {metrics['sector']}. Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. Target Price: ₹{pred['target_price']}. Verdict: {pred['verdict']}."
+    return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt, config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
 @app.get("/")
 def root(): return {"status": "Athenaeum API is live"}
@@ -235,7 +275,7 @@ def analyze(ticker: str):
     try:
         resolved = resolve_name_to_ticker(ticker.strip())
         data = fetch_stock_data(resolved)
-        narrative = generate_ai_narrative(data)
-        return {"status": "success", "metrics": data, "ai_narrative": narrative}
+        ai_text = generate_comprehensive_report(data)
+        return {"status": "success", "metrics": data, "ai_narrative": ai_text}
     except Exception as e:
         raise HTTPException(status_code=400, detail=str(e))
