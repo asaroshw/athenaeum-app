@@ -1013,17 +1013,17 @@ if st.session_state.report_data:
         st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
-    # ---------------- Tier 1 transparency strip ----------------
-    sp_label = SECTOR_PROFILE_LABELS.get(m.get('sector_profile', 'standard'), 'Standard')
-    ob_html = (", ".join(f"<span class='swf-tag'>{h}</span>" for h in m.get('order_book_hits', []))
-               if m.get('order_book_hits') else "<span class='swf-check-na'>None detected</span>")
-    car_npa_note = ("<div class='swf-sub' style='margin-top:6px;'>Capital Adequacy Ratio and NPA figures are RBI "
-                     "regulatory disclosures, not standard equity-fundamentals data — they are not available "
-                     "through this pipeline and are not estimated.</div>") if m.get('is_financial_sector') else ""
-    card("Sector Normalization (Tier 1) &amp; Forward Signals (Tier 2)",
-         f"<div class='swf-sub' style='margin-bottom:6px;'><b>Sector profile:</b> {sp_label}</div>"
-         f"<div class='swf-sub' style='margin-bottom:6px;'><b>Order-book / guidance signals in recent news:</b> {ob_html}</div>"
-         + car_npa_note)
+    # ---------------- Recent News & Catalysts ----------------
+    news_items = m.get('recent_news', [])
+    if news_items:
+        news_html = "<ul style='padding-left: 20px; margin-bottom: 0;'>"
+        for item in news_items[:5]:
+            news_html += f"<li style='margin-bottom: 8px;'><a href='{item['link']}' target='_blank' style='color:{BLUE}; text-decoration:none;'>{item['title']}</a></li>"
+        news_html += "</ul>"
+    else:
+        news_html = "<div class='swf-sub'>No recent news found for this stock.</div>"
+        
+    card("Recent News & Market Catalysts", news_html)
 
     st.markdown("---")
 
@@ -1105,15 +1105,33 @@ if st.session_state.report_data:
     st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
 
-    if pred.get('note'): st.info(pred['note'])
-
     if current_rating in ["BUY", "STRONG BUY"]:
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
     else:
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
 
+    # --- NEW PROS AND CONS CARDS ---
+    all_checks = val_checks + past_checks + health_checks + div_checks
+    pros = [c for c in all_checks if c[1] is True]
+    cons = [c for c in all_checks if c[1] is False]
+
+    def render_pro_con_list(items):
+        if not items: return "<div class='swf-sub'>None identified based on current data.</div>"
+        html = "<ul style='padding-left: 20px; margin-bottom: 0; font-size: 0.9em;'>"
+        for label, _, _ in items:
+            html += f"<li style='margin-bottom: 5px; color: #E6E6E6;'>{label}</li>"
+        html += "</ul>"
+        return html
+
+    pc1, pc2 = st.columns(2)
+    with pc1:
+        card("✅ Quantitative Strengths", render_pro_con_list(pros))
+    with pc2:
+        card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons))
+
+    # --- NARRATIVE SUMMARY (Renamed) ---
     styled = style_verdict_text(narrative_for(7))
-    card("AI Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
+    card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
 
     st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an "
                "ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan "
