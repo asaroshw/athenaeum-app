@@ -23,13 +23,17 @@
         .metric-label { font-size: 0.75rem; color: #8B949E; text-transform: uppercase; font-weight: 600; }
         .metric-val { font-size: 1.2rem; font-weight: 700; color: #FFFFFF; margin-top: 4px; }
         .verdict-badge { display: inline-block; padding: 6px 14px; border-radius: 6px; font-weight: 800; font-size: 0.9rem; margin-top: 8px; }
-        .buy { background: rgba(63, 185, 80, 0.2); color: #3FB950; border: 1px solid #3FB950; }
+        .strong-buy, .buy { background: rgba(63, 185, 80, 0.2); color: #3FB950; border: 1px solid #3FB950; }
         .observe { background: rgba(249, 115, 22, 0.2); color: #F97316; border: 1px solid #F97316; }
         .dont-buy { background: rgba(248, 81, 73, 0.2); color: #F85149; border: 1px solid #F85149; }
+        .section-title { font-size: 1.4rem; font-weight: 800; color: #FFFFFF; margin: 24px 0 12px 0; border-top: 2px solid #1F1F1F; padding-top: 16px; }
         .checklist-item { padding: 8px 0; border-bottom: 1px solid #161B22; font-size: 0.9rem; }
         .pass { color: #3FB950; } .fail { color: #F85149; }
         .loading { text-align: center; color: #EAB308; padding: 30px; font-weight: 600; }
-        .narrative-text { color: #C9D1D9; font-size: 0.95rem; line-height: 1.6; white-space: pre-line; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.85rem; }
+        th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #1F1F1F; color: #C9D1D9; }
+        th { color: #8B949E; text-transform: uppercase; font-size: 0.75rem; }
+        .narrative-block { color: #C9D1D9; font-size: 0.95rem; line-height: 1.6; white-space: pre-line; }
         a { color: #38BDF8; text-decoration: none; }
     </style>
 </head>
@@ -45,50 +49,132 @@
         <button onclick="analyzeStock()" class="btn-analyze">Analyse Stock</button>
     </div>
 
-    <div id="loading" class="loading" style="display:none;">Running fundamental models & AI narrative scan...</div>
+    <div id="loading" class="loading" style="display:none;">Running fundamental models, financial tables & AI synthesis...</div>
 
     <div id="results" style="display:none;">
-        <div class="card">
-            <div style="display:flex; justify-content:space-between; align-items:flex-start;">
-                <div>
-                    <div style="color:#8B949E; font-size:0.8rem;" id="resSector">Sector</div>
-                    <div style="font-size:1.3rem; font-weight:800; color:#FFF;" id="resName">Name</div>
-                    <div style="color:#8B949E; font-size:0.85rem;" id="resTicker">TICKER</div>
-                    <div id="resBadge" class="verdict-badge">VERDICT</div>
-                </div>
-                <div style="text-align:right;">
-                    <div style="font-size:1.5rem; font-weight:800; color:#FFF;" id="resPrice">₹0.00</div>
-                    <div style="color:#8B949E; font-size:0.75rem;">Current Price</div>
+        
+        <!-- Header & Price Chart Card -->
+        <div style="display:grid; grid-template-columns: 1fr; gap:16px;">
+            <div class="card">
+                <div style="display:flex; justify-content:space-between; align-items:flex-start;">
+                    <div>
+                        <div style="color:#8B949E; font-size:0.8rem;" id="resSector">Sector</div>
+                        <div style="font-size:1.4rem; font-weight:800; color:#FFF;" id="resName">Name</div>
+                        <div style="color:#8B949E; font-size:0.85rem;" id="resTicker">TICKER</div>
+                        <div id="resBadge" class="verdict-badge">VERDICT</div>
+                    </div>
+                    <div style="text-align:right;">
+                        <div style="font-size:1.6rem; font-weight:800; color:#FFF;" id="resPrice">₹0.00</div>
+                        <div style="color:#8B949E; font-size:0.75rem;">Current Price</div>
+                    </div>
                 </div>
             </div>
-
-            <div class="metric-grid">
-                <div class="metric-box"><div class="metric-label">Target Price</div><div class="metric-val" id="resTarget">₹0.00</div></div>
-                <div class="metric-box"><div class="metric-label">P/E Ratio</div><div class="metric-val" id="resPE">N/A</div></div>
-                <div class="metric-box"><div class="metric-label">P/B Ratio</div><div class="metric-val" id="resPB">N/A</div></div>
-                <div class="metric-box"><div class="metric-label">Model Used</div><div class="metric-val" style="font-size:0.9rem;" id="resModel">DCF</div></div>
+            <div class="card">
+                <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">1-Year Price History</div>
+                <div id="priceChart" style="height:240px;"></div>
             </div>
         </div>
 
+        <!-- Radar Chart -->
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Composite Score Radar</div>
             <div id="radarChart" style="height:220px;"></div>
         </div>
 
-        <div class="card">
-            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Fundamental Checklists</div>
-            <div id="checklistContainer"></div>
+        <!-- Company Overview -->
+        <div class="section-title">Company Overview</div>
+        <div class="metric-grid">
+            <div class="metric-box"><div class="metric-label">Target Price</div><div class="metric-val" id="resTarget">₹0.00</div></div>
+            <div class="metric-box"><div class="metric-label">P/E Ratio</div><div class="metric-val" id="resPE">N/A</div></div>
+            <div class="metric-box"><div class="metric-label">P/B Ratio</div><div class="metric-val" id="resPB">N/A</div></div>
+            <div class="metric-box"><div class="metric-label">ROE</div><div class="metric-val" id="resROE">N/A</div></div>
+        </div>
+        <div class="card" style="margin-top:16px;">
+            <p style="color:#C9D1D9; font-size:0.9rem; line-height:1.5; margin:0;" id="resSummary">Summary</p>
         </div>
 
+        <!-- 1. Valuation -->
+        <div class="section-title">1. Valuation</div>
         <div class="card">
-            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Recent News & Catalysts</div>
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Valuation Checklist</div>
+            <div id="valChecks"></div>
+        </div>
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Valuation & Fair Value Analysis</div>
+            <div class="narrative-block" id="narrative1"></div>
+        </div>
+
+        <!-- 2. Future Growth -->
+        <div class="section-title">2. Future Growth & Outlook</div>
+        <div class="metric-grid">
+            <div class="metric-box"><div class="metric-label">Modeled Model</div><div class="metric-val" id="resModel" style="font-size:1rem;">DCF</div></div>
+            <div class="metric-box"><div class="metric-label">Time Horizon</div><div class="metric-val" style="font-size:1rem;">3-5 Years</div></div>
+        </div>
+        <div class="card" style="margin-top:16px;">
+            <div class="narrative-block" id="narrative2"></div>
+        </div>
+
+        <!-- 3. Past Performance -->
+        <div class="section-title">3. Past Performance</div>
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Past Performance Checklist</div>
+            <div id="pastChecks"></div>
+            <div style="margin-top:15px; font-weight:700; font-size:0.9rem;">Profit & Loss Statement (₹ Cr)</div>
+            <div id="pnlTable"></div>
+        </div>
+        <div class="card">
+            <div class="narrative-block" id="narrative3"></div>
+        </div>
+
+        <!-- 4. Financial Health -->
+        <div class="section-title">4. Financial Health</div>
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Financial Health Checklist</div>
+            <div id="healthChecks"></div>
+            <div style="margin-top:15px; font-weight:700; font-size:0.9rem;">Balance Sheet & Cash Flows (₹ Cr)</div>
+            <div id="bsTable"></div>
+        </div>
+        <div class="card">
+            <div class="narrative-block" id="narrative4"></div>
+        </div>
+
+        <!-- 5. Dividend -->
+        <div class="section-title">5. Dividend</div>
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Dividend Checklist</div>
+            <div id="divChecks"></div>
+        </div>
+        <div class="card">
+            <div class="narrative-block" id="narrative5"></div>
+        </div>
+
+        <!-- 6. Management -->
+        <div class="section-title">6. Management & Leadership</div>
+        <div class="card">
+            <div class="narrative-block" id="narrative6"></div>
+        </div>
+
+        <!-- 7. Ownership Structure -->
+        <div class="section-title">7. Ownership Structure</div>
+        <div class="metric-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom:16px;">
+            <div class="metric-box"><div class="metric-label">Promoters</div><div class="metric-val" id="ownPromoter">0%</div></div>
+            <div class="metric-box"><div class="metric-label">Institutions</div><div class="metric-val" id="ownInst">0%</div></div>
+            <div class="metric-box"><div class="metric-label">Public</div><div class="metric-val" id="ownPublic">0%</div></div>
+        </div>
+        <div class="card">
+            <div class="narrative-block" id="narrative7"></div>
+        </div>
+
+        <!-- 8. Verdict & Summary -->
+        <div class="section-title">8. Verdict & Summary</div>
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Recent News & Market Catalysts</div>
             <div id="newsContainer"></div>
         </div>
-
         <div class="card">
-            <div style="color:#38BDF8; font-weight:700; margin-bottom:12px;">AI Executive Narrative</div>
-            <div class="narrative-text" id="resNarrative"></div>
+            <div class="narrative-block" id="narrative8"></div>
         </div>
+
     </div>
 
     <script>
@@ -114,55 +200,73 @@
                     document.getElementById('resTarget').innerText = `₹${p.target_price}`;
                     document.getElementById('resPE').innerText = m.pe_ratio;
                     document.getElementById('resPB').innerText = m.pb_ratio;
+                    document.getElementById('resROE').innerText = m.roe;
                     document.getElementById('resModel').innerText = p.model_used;
-                    document.getElementById('resNarrative').innerText = json.ai_narrative;
+                    document.getElementById('resSummary').innerText = m.business_summary;
 
                     const badge = document.getElementById('resBadge');
                     badge.innerText = p.verdict;
-                    badge.className = 'verdict-badge ' + (p.verdict.includes('BUY') ? 'buy' : p.verdict === 'OBSERVE' ? 'observe' : 'dont-buy');
+                    badge.className = 'verdict-badge ' + (p.verdict.includes('BUY') ? 'strong-buy' : p.verdict === 'OBSERVE' ? 'observe' : 'dont-buy');
 
-                    // Render Radar Chart
-                    const radarData = [{
-                        type: 'scatterpolar',
-                        r: [p.fundamental_score, p.intrinsic_score, p.technical_score, p.fundamental_score],
-                        theta: ['Fundamentals', 'Valuation', 'Momentum', 'Fundamentals'],
-                        fill: 'toself',
-                        fillcolor: 'rgba(234,179,8,0.3)',
-                        line: { color: '#EAB308', width: 2 }
-                    }];
-                    const radarLayout = {
-                        polar: { bgcolor: '#0D0D0D', radialaxis: { visible: false, range: [0, 100] }, angularaxis: { color: '#8B949E' } },
-                        paper_bgcolor: '#0D0D0D', margin: { t: 10, b: 10, l: 30, r: 30 }, height: 220, showlegend: false
+                    // Price History Chart
+                    const dates = m.history.map(x => x.Date);
+                    const closes = m.history.map(x => x.Close);
+                    Plotly.newPlot('priceChart', [{x: dates, y: closes, type: 'scatter', mode: 'lines', line: {color: '#38BDF8', width: 2}, fill: 'tozeroy'}], {paper_bgcolor: '#0D0D0D', plot_bgcolor: '#0D0D0D', margin: {t:10, b:25, l:35, r:10}, xaxis: {color: '#8B949E'}, yaxis: {color: '#8B949E'}}, {displayModeBar: false});
+
+                    // Radar Chart
+                    Plotly.newPlot('radarChart', [{type: 'scatterpolar', r: [p.fundamental_score, p.intrinsic_score, p.technical_score, p.fundamental_score], theta: ['Fundamentals', 'Valuation', 'Momentum', 'Fundamentals'], fill: 'toself', fillcolor: 'rgba(234,179,8,0.3)', line: {color: '#EAB308', width: 2}}], {polar: {bgcolor: '#0D0D0D', radialaxis: {visible: false, range: [0, 100]}, angularaxis: {color: '#8B949E'}}, paper_bgcolor: '#0D0D0D', margin: {t: 10, b: 10, l: 30, r: 30}, height: 220, showlegend: false}, {displayModeBar: false});
+
+                    // Checklists render helper
+                    const renderChecklist = (arr, elementId) => {
+                        let html = '';
+                        arr.forEach(c => {
+                            const icon = c[1] ? '✅' : '❌';
+                            const cls = c[1] ? 'pass' : 'fail';
+                            html += `<div class="checklist-item"><span class="${cls}">${icon} <b>${c[0]}</b></span><div style="font-size:0.8rem; color:#8B949E; margin-top:2px;">${c[2]}</div></div>`;
+                        });
+                        document.getElementById(elementId).innerHTML = html;
                     };
-                    Plotly.newPlot('radarChart', radarData, radarLayout, {displayModeBar: false});
+                    renderChecklist(m.val_checks, 'valChecks');
+                    renderChecklist(m.past_checks, 'pastChecks');
+                    renderChecklist(m.health_checks, 'healthChecks');
+                    renderChecklist(m.div_checks, 'divChecks');
 
-                    // Render Checklists
-                    let checkHtml = '';
-                    const allChecks = [...m.val_checks, ...m.past_checks, ...m.health_checks, ...m.div_checks];
-                    allChecks.forEach(c => {
-                        const icon = c[1] ? '✅' : '❌';
-                        const cls = c[1] ? 'pass' : 'fail';
-                        checkHtml += `<div class="checklist-item"><span class="${cls}">${icon} <b>${c[0]}</b></span><div style="font-size:0.8rem; color:#8B949E; margin-top:2px;">${c[2]}</div></div>`;
-                    });
-                    document.getElementById('checklistContainer').innerHTML = checkHtml;
+                    // Financial Tables
+                    const renderTable = (data, elementId) => {
+                        if(!data || data.length === 0) { document.getElementById(elementId).innerHTML = '<div style="color:#8B949E; font-size:0.85em;">Data unavailable</div>'; return; }
+                        let html = '<table><tr><th>Particulars</th><th>Amount (₹ Cr)</th></tr>';
+                        data.forEach(row => { html += `<tr><td>${row.Particulars}</td><td>${row['Amount (₹ Cr)']}</td></tr>`; });
+                        html += '</table>';
+                        document.getElementById(elementId).innerHTML = html;
+                    };
+                    renderTable(m.pnl_df, 'pnlTable');
+                    renderTable(m.bs_df, 'bsTable');
 
-                    // Render News
+                    // Ownership
+                    document.getElementById('ownPromoter').innerText = `${m.shareholding.Promoters}%`;
+                    document.getElementById('ownInst').innerText = `${m.shareholding.Institutions}%`;
+                    document.getElementById('ownPublic').innerText = `${m.shareholding.Public}%`;
+
+                    // News
                     let newsHtml = '<ul style="padding-left:20px; margin:0; font-size:0.9rem;">';
                     if(m.recent_news && m.recent_news.length > 0) {
-                        m.recent_news.forEach(n => {
-                            newsHtml += `<li style="margin-bottom:6px;"><a href="${n.link}" target="_blank">${n.title}</a></li>`;
-                        });
-                    } else {
-                        newsHtml = '<div style="color:#8B949E; font-size:0.85em;">No recent news found.</div>';
-                    }
+                        m.recent_news.forEach(n => { newsHtml += `<li style="margin-bottom:6px;"><a href="${n.link}" target="_blank">${n.title}</a></li>`; });
+                    } else { newsHtml = '<div style="color:#8B949E; font-size:0.85em;">No recent news found.</div>'; }
                     newsHtml += '</ul>';
                     document.getElementById('newsContainer').innerHTML = newsHtml;
+
+                    // Split AI Narrative into 8 sections
+                    const sections = json.ai_narrative.split(/\d+\.\s+/).filter(s => s.trim().length > 0);
+                    for(let i=0; i<8; i++) {
+                        const el = document.getElementById(`narrative${i+1}`);
+                        if(el) el.innerText = sections[i] ? sections[i].trim() : "Detailed analysis unavailable.";
+                    }
 
                     document.getElementById('loading').style.display = 'none';
                     document.getElementById('results').style.display = 'block';
                 }
             } catch(e) {
-                alert('Error fetching data from cloud backend.');
+                alert('Error connecting to backend API.');
                 document.getElementById('loading').style.display = 'none';
             }
         }
