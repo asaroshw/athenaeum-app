@@ -4,127 +4,56 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
     <title>Athenaeum Financial Intelligence</title>
+    <script src="https://cdn.plot.ly/plotly-2.27.0.min.js"></script>
     <style>
         * { box-sizing: border-box; }
         body {
-            background-color: #000000;
-            color: #E6E6E6;
-            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
-            margin: 0;
-            padding: 16px;
-            overscroll-behavior-y: none; /* Disables mobile swipe-to-refresh */
+            background-color: #000000; color: #E6E6E6;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+            margin: 0; padding: 16px; overscroll-behavior-y: none;
         }
-        .header {
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 12px;
-            padding: 12px 0 20px 0;
-            border-bottom: 1px solid #1F1F1F;
-            margin-bottom: 20px;
-        }
+        .header { display: flex; align-items: center; justify-content: center; gap: 12px; padding: 12px 0 20px 0; border-bottom: 1px solid #1F1F1F; margin-bottom: 20px; }
         .logo { height: 42px; filter: invert(1); }
         .title { font-size: 1.2rem; font-weight: 800; letter-spacing: 1.5px; color: #FFFFFF; }
-        
-        .card {
-            background: #0D0D0D;
-            border: 1px solid #1F1F1F;
-            border-radius: 12px;
-            padding: 18px;
-            margin-bottom: 16px;
-        }
-        .search-box {
-            width: 100%;
-            padding: 14px;
-            border-radius: 8px;
-            border: 1px solid #262B36;
-            background: #161B22;
-            color: #FFFFFF;
-            font-size: 1rem;
-            margin-bottom: 10px;
-            outline: none;
-        }
-        .search-box:focus { border-color: #EAB308; }
-        .btn-analyze {
-            width: 100%;
-            padding: 14px;
-            background: #EAB308;
-            color: #000000;
-            font-weight: 800;
-            font-size: 1rem;
-            border: none;
-            border-radius: 8px;
-            cursor: pointer;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-        }
-        .btn-analyze:active { background: #ca9a07; }
-
-        .metric-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 12px;
-            margin-top: 12px;
-        }
-        .metric-box {
-            background: #161B22;
-            border: 1px solid #262B36;
-            padding: 12px;
-            border-radius: 8px;
-        }
+        .card { background: #0D0D0D; border: 1px solid #1F1F1F; border-radius: 12px; padding: 18px; margin-bottom: 16px; }
+        .search-box { width: 100%; padding: 14px; border-radius: 8px; border: 1px solid #262B36; background: #161B22; color: #FFFFFF; font-size: 1rem; margin-bottom: 10px; outline: none; }
+        .btn-analyze { width: 100%; padding: 14px; background: #EAB308; color: #000000; font-weight: 800; font-size: 1rem; border: none; border-radius: 8px; cursor: pointer; text-transform: uppercase; }
+        .metric-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 12px; margin-top: 12px; }
+        .metric-box { background: #161B22; border: 1px solid #262B36; padding: 12px; border-radius: 8px; }
         .metric-label { font-size: 0.75rem; color: #8B949E; text-transform: uppercase; font-weight: 600; }
         .metric-val { font-size: 1.2rem; font-weight: 700; color: #FFFFFF; margin-top: 4px; }
-        
-        .verdict-badge {
-            display: inline-block;
-            padding: 6px 14px;
-            border-radius: 6px;
-            font-weight: 800;
-            font-size: 0.9rem;
-            margin-top: 8px;
-        }
+        .verdict-badge { display: inline-block; padding: 6px 14px; border-radius: 6px; font-weight: 800; font-size: 0.9rem; margin-top: 8px; }
         .buy { background: rgba(63, 185, 80, 0.2); color: #3FB950; border: 1px solid #3FB950; }
         .observe { background: rgba(249, 115, 22, 0.2); color: #F97316; border: 1px solid #F97316; }
         .dont-buy { background: rgba(248, 81, 73, 0.2); color: #F85149; border: 1px solid #F85149; }
-
-        .narrative-text {
-            color: #C9D1D9;
-            font-size: 0.95rem;
-            line-height: 1.6;
-            white-space: pre-line;
-        }
-        .loading { text-align: center; color: #EAB308; padding: 20px; font-weight: 600; }
+        .checklist-item { padding: 8px 0; border-bottom: 1px solid #161B22; font-size: 0.9rem; }
+        .pass { color: #3FB950; } .fail { color: #F85149; }
+        .loading { text-align: center; color: #EAB308; padding: 30px; font-weight: 600; }
+        .narrative-text { color: #C9D1D9; font-size: 0.95rem; line-height: 1.6; white-space: pre-line; }
+        a { color: #38BDF8; text-decoration: none; }
     </style>
 </head>
 <body>
 
-    <!-- App Header -->
     <div class="header">
         <img src="Logo.png" class="logo" alt="Logo" onerror="this.style.display='none'">
         <div class="title">ATHENAEUM</div>
     </div>
 
-    <!-- Search Section -->
     <div class="card">
         <input type="text" id="tickerInput" class="search-box" placeholder="Enter Company Name or Ticker (e.g. RELIANCE)">
         <button onclick="analyzeStock()" class="btn-analyze">Analyse Stock</button>
     </div>
 
-    <!-- Loading State -->
-    <div id="loading" class="loading" style="display:none;">
-        Analyzing financials & fetching AI narrative...
-    </div>
+    <div id="loading" class="loading" style="display:none;">Running fundamental models & AI narrative scan...</div>
 
-    <!-- Analysis Results Container -->
     <div id="results" style="display:none;">
-        
-        <!-- Main Verdict Card -->
         <div class="card">
             <div style="display:flex; justify-content:space-between; align-items:flex-start;">
                 <div>
                     <div style="color:#8B949E; font-size:0.8rem;" id="resSector">Sector</div>
-                    <div style="font-size:1.3rem; font-weight:800; color:#FFF;" id="resName">Company Name</div>
-                    <div style="color:#8B949E; font-size:0.85rem;" id="resTicker">TICKER.NS</div>
+                    <div style="font-size:1.3rem; font-weight:800; color:#FFF;" id="resName">Name</div>
+                    <div style="color:#8B949E; font-size:0.85rem;" id="resTicker">TICKER</div>
                     <div id="resBadge" class="verdict-badge">VERDICT</div>
                 </div>
                 <div style="text-align:right;">
@@ -134,26 +63,28 @@
             </div>
 
             <div class="metric-grid">
-                <div class="metric-box">
-                    <div class="metric-label">Target Price</div>
-                    <div class="metric-val" id="resTarget">₹0.00</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-label">P/E Ratio</div>
-                    <div class="metric-val" id="resPE">N/A</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-label">P/B Ratio</div>
-                    <div class="metric-val" id="resPB">N/A</div>
-                </div>
-                <div class="metric-box">
-                    <div class="metric-label">Model Used</div>
-                    <div class="metric-val" style="font-size:0.9rem; margin-top:8px;" id="resModel">DCF</div>
-                </div>
+                <div class="metric-box"><div class="metric-label">Target Price</div><div class="metric-val" id="resTarget">₹0.00</div></div>
+                <div class="metric-box"><div class="metric-label">P/E Ratio</div><div class="metric-val" id="resPE">N/A</div></div>
+                <div class="metric-box"><div class="metric-label">P/B Ratio</div><div class="metric-val" id="resPB">N/A</div></div>
+                <div class="metric-box"><div class="metric-label">Model Used</div><div class="metric-val" style="font-size:0.9rem;" id="resModel">DCF</div></div>
             </div>
         </div>
 
-        <!-- AI Narrative Card -->
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Composite Score Radar</div>
+            <div id="radarChart" style="height:220px;"></div>
+        </div>
+
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Fundamental Checklists</div>
+            <div id="checklistContainer"></div>
+        </div>
+
+        <div class="card">
+            <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Recent News & Catalysts</div>
+            <div id="newsContainer"></div>
+        </div>
+
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:12px;">AI Executive Narrative</div>
             <div class="narrative-text" id="resNarrative"></div>
@@ -165,14 +96,10 @@
             const input = document.getElementById('tickerInput').value.trim();
             if(!input) return;
 
-            const loading = document.getElementById('loading');
-            const results = document.getElementById('results');
-
-            loading.style.display = 'block';
-            results.style.display = 'none';
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('results').style.display = 'none';
 
             try {
-                // Fetch from your live Render API
                 const res = await fetch(`https://athenaeum-backend-9uht.onrender.com/api/analyze?ticker=${encodeURIComponent(input)}`);
                 const json = await res.json();
 
@@ -185,28 +112,58 @@
                     document.getElementById('resSector').innerText = `${m.sector} • ${m.industry}`;
                     document.getElementById('resPrice').innerText = `₹${m.price}`;
                     document.getElementById('resTarget').innerText = `₹${p.target_price}`;
-                    document.getElementById('resPE').innerText = typeof m.pe_ratio === 'number' ? m.pe_ratio.toFixed(2) : m.pe_ratio;
-                    document.getElementById('resPB').innerText = typeof m.pb_ratio === 'number' ? m.pb_ratio.toFixed(2) : m.pb_ratio;
+                    document.getElementById('resPE').innerText = m.pe_ratio;
+                    document.getElementById('resPB').innerText = m.pb_ratio;
                     document.getElementById('resModel').innerText = p.model_used;
                     document.getElementById('resNarrative').innerText = json.ai_narrative;
 
-                    // Set Verdict Color Badge
                     const badge = document.getElementById('resBadge');
                     badge.innerText = p.verdict;
-                    badge.className = 'verdict-badge ' + (
-                        p.verdict === 'BUY' ? 'buy' : 
-                        p.verdict === 'OBSERVE' ? 'observe' : 'dont-buy'
-                    );
+                    badge.className = 'verdict-badge ' + (p.verdict.includes('BUY') ? 'buy' : p.verdict === 'OBSERVE' ? 'observe' : 'dont-buy');
 
-                    loading.style.display = 'none';
-                    results.style.display = 'block';
-                } else {
-                    alert('Could not find stock data.');
-                    loading.style.display = 'none';
+                    // Render Radar Chart
+                    const radarData = [{
+                        type: 'scatterpolar',
+                        r: [p.fundamental_score, p.intrinsic_score, p.technical_score, p.fundamental_score],
+                        theta: ['Fundamentals', 'Valuation', 'Momentum', 'Fundamentals'],
+                        fill: 'toself',
+                        fillcolor: 'rgba(234,179,8,0.3)',
+                        line: { color: '#EAB308', width: 2 }
+                    }];
+                    const radarLayout = {
+                        polar: { bgcolor: '#0D0D0D', radialaxis: { visible: false, range: [0, 100] }, angularaxis: { color: '#8B949E' } },
+                        paper_bgcolor: '#0D0D0D', margin: { t: 10, b: 10, l: 30, r: 30 }, height: 220, showlegend: false
+                    };
+                    Plotly.newPlot('radarChart', radarData, radarLayout, {displayModeBar: false});
+
+                    // Render Checklists
+                    let checkHtml = '';
+                    const allChecks = [...m.val_checks, ...m.past_checks, ...m.health_checks, ...m.div_checks];
+                    allChecks.forEach(c => {
+                        const icon = c[1] ? '✅' : '❌';
+                        const cls = c[1] ? 'pass' : 'fail';
+                        checkHtml += `<div class="checklist-item"><span class="${cls}">${icon} <b>${c[0]}</b></span><div style="font-size:0.8rem; color:#8B949E; margin-top:2px;">${c[2]}</div></div>`;
+                    });
+                    document.getElementById('checklistContainer').innerHTML = checkHtml;
+
+                    // Render News
+                    let newsHtml = '<ul style="padding-left:20px; margin:0; font-size:0.9rem;">';
+                    if(m.recent_news && m.recent_news.length > 0) {
+                        m.recent_news.forEach(n => {
+                            newsHtml += `<li style="margin-bottom:6px;"><a href="${n.link}" target="_blank">${n.title}</a></li>`;
+                        });
+                    } else {
+                        newsHtml = '<div style="color:#8B949E; font-size:0.85em;">No recent news found.</div>';
+                    }
+                    newsHtml += '</ul>';
+                    document.getElementById('newsContainer').innerHTML = newsHtml;
+
+                    document.getElementById('loading').style.display = 'none';
+                    document.getElementById('results').style.display = 'block';
                 }
             } catch(e) {
-                alert('Error connecting to backend API.');
-                loading.style.display = 'none';
+                alert('Error fetching data from cloud backend.');
+                document.getElementById('loading').style.display = 'none';
             }
         }
     </script>
