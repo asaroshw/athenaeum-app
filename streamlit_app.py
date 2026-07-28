@@ -140,18 +140,6 @@ def fetch_google_news(query_term):
 
 # ============================================================
 # 3. SECTOR DETECTION & NORMALIZATION PROFILES  (Tier 1)
-# ------------------------------------------------------------
-# classify_sector_profile() drives which checklist thresholds and valuation-fallback
-# behavior apply, instead of one blanket formula for every company:
-#   "financial"        -> banks/NBFCs/insurers: loose D/E bar, Justified-P/B / DDM
-#                          valuation, an approximate NIM signal (see note below on
-#                          what is and is not available from this data source).
-#   "capex_intensive"  -> industrials/engineering/infra: negative trailing FCF is not
-#                          automatically treated as a red flag if backed by a
-#                          detected order book / capacity signal.
-#   "cyclical"          -> auto & auto components: net-margin bar softens if operating
-#                          margin and multi-year revenue growth are both strong.
-#   "standard"          -> everyone else: original thresholds, unchanged.
 # ============================================================
 FINANCIAL_SECTOR_KEYWORDS = [
     "financial services", "bank", "nbfc", "insurance", "capital markets",
@@ -186,17 +174,6 @@ INTEREST_INCOME_KEYS = ['Interest Income', 'Total Interest Income']
 
 # ============================================================
 # 4. QUALITATIVE SIGNAL SCANNER  (Tier 1.2/1.3 support + Tier 2.1)
-# ------------------------------------------------------------
-# Two independent, lightweight text scanners over recent_news + business_summary —
-# neither is a real NLP model, both are coarse keyword/regex signals, always labeled
-# as such wherever they surface:
-#   scan_news_sentiment()      -> catalyst/risk keyword hits -> composite score bonus
-#   extract_order_book_signal() -> order-book/capex/guidance language, and a best-effort
-#                                   regex pull of an explicit growth/guidance percentage
-#                                   if the text states one directly.
-# Deliberately generic (no company- or contract-specific keywords like a particular
-# defense contract name) so the same logic applies to any ticker, not just the
-# examples used to describe the requirement.
 # ============================================================
 CATALYST_KEYWORDS = ['acqui', 'profit', 'surge', 'turnaround', 'wins', ' win ', 'order book',
                       'expansion', 'partnership', 'record revenue', 'upgrade', 'beat estimates',
@@ -291,9 +268,6 @@ def valuation_checks(m):
     return checks
 
 def past_performance_checks(m):
-    """Tier 1.3: the net-margin bar softens for a 'cyclical' sector profile when
-    operating margin and multi-year revenue growth both independently show a strong,
-    compounding business — otherwise unchanged."""
     yoy, qoq = to_float(m.get('pat_yoy')), to_float(m.get('pat_qoq'))
     roe, margin = to_float(m.get('roe')), to_float(m.get('net_margin'))
     opm = to_float(m.get('operating_margin'))
@@ -410,7 +384,7 @@ def ddm_fair_value(dividend_per_share, ke_pct, growth_pct):
     return round((dividend_per_share * (1 + g)) / (ke - g), 2)
 
 def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None,
-                        forced_intrinsic_adjustment=0, qualitative_bonus=0):
+                      forced_intrinsic_adjustment=0, qualitative_bonus=0):
     W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.40, 0.35, 0.25
     intrinsic_score = min(max(50 + margin_of_safety * 150, 0), 100)
     intrinsic_score = min(max(intrinsic_score + forced_intrinsic_adjustment, 0), 100)
@@ -432,7 +406,11 @@ VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
     if target_price is None or not current_price:
         return verdict
+        
     downside_pct = (current_price - target_price) / current_price
+    upside_pct = (target_price - current_price) / current_price
+    
+    # 1. The Downside Veto (Prevents buying overvalued stocks)
     if downside_pct > 0.15:
         if verdict != "DON'T BUY":
             notes.append(f"Forced to DON'T BUY: the modeled target price is {round(downside_pct*100,1)}% below "
@@ -443,6 +421,15 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
             notes.append(f"Downgraded to OBSERVE: the modeled target price is {round(downside_pct*100,1)}% below "
                           f"the current price, so the model will not issue a BUY/STRONG BUY.")
             return "OBSERVE"
+            
+    # 2. THE NEW UPSIDE HALLUCINATION VETO (Protects against Penny Stock Traps)
+    if upside_pct > 1.50: # If the math claims greater than a +150% upside
+        if verdict in ["BUY", "STRONG BUY"]:
+            notes.append(f"Forced to DON'T BUY: The model calculated an absurd +{round(upside_pct*100, 1)}% upside. "
+                          f"This is a classic micro-cap value trap, almost certainly caused by distorted or unadjusted "
+                          f"accounting data on Yahoo Finance. Do not trust this mathematical target.")
+            return "DON'T BUY"
+            
     return verdict
 
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
@@ -745,11 +732,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     shares_out = info.get("sharesOutstanding")
 
     operating_margin = round((ebit_latest / revenue_latest) * 100, 2) if (ebit_latest is not None and revenue_latest) else None
-    # Tier 1.1: approximate NIM only — Total Assets stands in for average interest-
-    # earning assets, which yfinance does not expose. Capital Adequacy Ratio and NPA
-    # figures are RBI regulatory disclosures, not standard equity-fundamentals data —
-    # there is no reliable free-data-source way to compute them, so they are simply
-    # not included here rather than approximated or guessed.
+
     nim_proxy = None
     if is_fin and interest_income_latest is not None and interest_exp_latest is not None and total_assets_latest:
         nim_proxy = round(((interest_income_latest - interest_exp_latest) / total_assets_latest) * 100, 2)
@@ -765,7 +748,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     order_book_hits, growth_pct_from_news = extract_order_book_signal(recent_news, business_summary)
 
     pe_raw = info.get("trailingPE")
-    if not is_valid_metric(pe_raw) and net_inc and mcap and net_inc > 0:
+    if not is_valid_metric(pe_raw) and net_inc and mcap:
         pe_raw = round(mcap / net_inc, 2)
 
     pb_raw = info.get("priceToBook")
@@ -972,7 +955,7 @@ NO BLIND AGREEMENT MANDATE (Tier 3):
            f"fundamental {pred.get('fundamental_score')}, intrinsic {pred.get('intrinsic_score')}, "
            f"technical {pred.get('technical_score')}). Recent news headlines: {news_titles}")
     return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt,
-                                           config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
+                                          config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
 # ============================================================
 # 10. APP STATE
