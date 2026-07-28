@@ -1,8 +1,7 @@
-streamlit
+fastapi
+uvicorn
 yfinance
 pandas
-plotly
-requests
-reportlab
+numpy
 google-genai
-smartapi-python
+requests
