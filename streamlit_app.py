@@ -1115,20 +1115,23 @@ if st.session_state.report_data:
     pros = [c for c in all_checks if c[1] is True]
     cons = [c for c in all_checks if c[1] is False]
 
-    def render_pro_con_list(items):
+    def render_pro_con_list(items, is_pro=True):
         if not items: return "<div class='swf-sub'>None identified based on current data.</div>"
         html = "<ul style='padding-left: 20px; margin-bottom: 0; font-size: 0.9em;'>"
-        for label, _, _ in items:
-            html += f"<li style='margin-bottom: 5px; color: #E6E6E6;'>{label}</li>"
+        for label, _, desc in items:
+            if is_pro:
+                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b>{label}</b><br><span style='color: {MUTED}; font-size: 0.85em;'>{desc}</span></li>"
+            else:
+                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b style='color: {RED};'>Failed:</b> {label}<br><span style='color: {MUTED}; font-size: 0.85em;'>{desc}</span></li>"
         html += "</ul>"
         return html
 
     pc1, pc2 = st.columns(2)
     with pc1:
-        card("✅ Quantitative Strengths", render_pro_con_list(pros))
+        card("✅ Quantitative Strengths", render_pro_con_list(pros, is_pro=True))
     with pc2:
-        card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons))
-
+        card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons, is_pro=False))
+        
     # --- NARRATIVE SUMMARY (Renamed) ---
     styled = style_verdict_text(narrative_for(7))
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
