@@ -822,7 +822,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-   # --- STRICT STRONG BUY SECTOR ALTERNATIVE SCANNER ---
+    # --- STRICT STRONG BUY SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -848,13 +848,12 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 dte_val = float(p_dte) / 100 if p_dte else 999
                 
                 is_fin_peer = is_financial_sector(p_info.get("sector"), p_info.get("industry"))
-                debt_limit = 2.0 if is_fin_peer else 0.7  # Tighter debt control for Strong Buy
+                debt_limit = 2.0 if is_fin_peer else 0.7
                 
-                # STRICT STRONG BUY HURDLES: Exceptional ROE, low debt, attractive P/E
+                # Strict Strong Buy Hurdle: P/E < 25, ROE > 20%, Low Debt
                 if 0 < pe_val < 25 and roe_val > 20 and dte_val < debt_limit:
                     strong_buy_score = roe_val - (dte_val * 15) + (60 / pe_val)
                     
-                    # Ensure it clears the high bar equivalent to a Strong Buy composite score
                     if strong_buy_score > highest_score and strong_buy_score > 35:
                         highest_score = strong_buy_score
                         best_peer = {
@@ -868,6 +867,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 pass
                 
         metrics['best_alternative'] = best_peer
+
+    return metrics
 
 # ============================================================
 # 8. UI PLOTLY CHARTS
@@ -944,7 +945,7 @@ NO BLIND AGREEMENT MANDATE:
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
+    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4]}."
                         if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
     pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')} "
            f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
