@@ -35,7 +35,7 @@ st.set_page_config(
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-GOLD, BG, CARD_BG, BORDER = "#EAB308", "#0D1117", "#161B22", "#262B36"
+GOLD, BG, CARD_BG, BORDER = "#EAB308", "#000000", "#0D0D0D", "#1F1F1F"
 GREEN, RED, ORANGE, MUTED, BLUE, PURPLE = "#3FB950", "#F85149", "#F97316", "#8B949E", "#38BDF8", "#A855F7"
 
 st.markdown(f"""
