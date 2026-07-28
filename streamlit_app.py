@@ -822,7 +822,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- STRICT STRONG BUY SECTOR ALTERNATIVE SCANNER ---
+    # --- BALANCED HIGH-QUALITY SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -848,14 +848,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 dte_val = float(p_dte) / 100 if p_dte else 999
                 
                 is_fin_peer = is_financial_sector(p_info.get("sector"), p_info.get("industry"))
-                debt_limit = 2.0 if is_fin_peer else 0.7
+                debt_limit = 5.0 if is_fin_peer else 1.5
                 
-                # Strict Strong Buy Hurdle: P/E < 25, ROE > 20%, Low Debt
-                if 0 < pe_val < 25 and roe_val > 20 and dte_val < debt_limit:
-                    strong_buy_score = roe_val - (dte_val * 15) + (60 / pe_val)
+                # Balanced Quality Hurdle: P/E < 35, ROE > 12%, Controlled Debt (Surfaces strong alternatives without being impossible)
+                if 0 < pe_val < 35 and roe_val > 12 and dte_val < debt_limit:
+                    quality_score = roe_val - (dte_val * 5) + (30 / pe_val)
                     
-                    if strong_buy_score > highest_score and strong_buy_score > 35:
-                        highest_score = strong_buy_score
+                    if quality_score > highest_score:
+                        highest_score = quality_score
                         best_peer = {
                             "name": p_info.get("shortName", peer),
                             "ticker": peer,
