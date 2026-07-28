@@ -53,7 +53,6 @@
 
     <div id="results" style="display:none;">
         
-        <!-- Header & Price Chart Card -->
         <div style="display:grid; grid-template-columns: 1fr; gap:16px;">
             <div class="card">
                 <div style="display:flex; justify-content:space-between; align-items:flex-start;">
@@ -75,13 +74,11 @@
             </div>
         </div>
 
-        <!-- Radar Chart -->
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Composite Score Radar</div>
             <div id="radarChart" style="height:220px;"></div>
         </div>
 
-        <!-- Company Overview -->
         <div class="section-title">Company Overview</div>
         <div class="metric-grid">
             <div class="metric-box"><div class="metric-label">Target Price</div><div class="metric-val" id="resTarget">₹0.00</div></div>
@@ -93,7 +90,6 @@
             <p style="color:#C9D1D9; font-size:0.9rem; line-height:1.5; margin:0;" id="resSummary">Summary</p>
         </div>
 
-        <!-- 1. Valuation -->
         <div class="section-title">1. Valuation</div>
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Valuation Checklist</div>
@@ -104,7 +100,6 @@
             <div class="narrative-block" id="narrative1"></div>
         </div>
 
-        <!-- 2. Future Growth -->
         <div class="section-title">2. Future Growth & Outlook</div>
         <div class="metric-grid">
             <div class="metric-box"><div class="metric-label">Modeled Model</div><div class="metric-val" id="resModel" style="font-size:1rem;">DCF</div></div>
@@ -114,7 +109,6 @@
             <div class="narrative-block" id="narrative2"></div>
         </div>
 
-        <!-- 3. Past Performance -->
         <div class="section-title">3. Past Performance</div>
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Past Performance Checklist</div>
@@ -126,19 +120,17 @@
             <div class="narrative-block" id="narrative3"></div>
         </div>
 
-        <!-- 4. Financial Health -->
         <div class="section-title">4. Financial Health</div>
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Financial Health Checklist</div>
             <div id="healthChecks"></div>
-            <div style="margin-top:15px; font-weight:700; font-size:0.9rem;">Balance Sheet & Cash Flows (₹ Cr)</div>
+            <div style="margin-top:15px; font-weight:700; font-size:0.9rem;">Balance Sheet (₹ Cr)</div>
             <div id="bsTable"></div>
         </div>
         <div class="card">
             <div class="narrative-block" id="narrative4"></div>
         </div>
 
-        <!-- 5. Dividend -->
         <div class="section-title">5. Dividend</div>
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Dividend Checklist</div>
@@ -148,13 +140,11 @@
             <div class="narrative-block" id="narrative5"></div>
         </div>
 
-        <!-- 6. Management -->
         <div class="section-title">6. Management & Leadership</div>
         <div class="card">
             <div class="narrative-block" id="narrative6"></div>
         </div>
 
-        <!-- 7. Ownership Structure -->
         <div class="section-title">7. Ownership Structure</div>
         <div class="metric-grid" style="grid-template-columns: repeat(3, 1fr); margin-bottom:16px;">
             <div class="metric-box"><div class="metric-label">Promoters</div><div class="metric-val" id="ownPromoter">0%</div></div>
@@ -165,7 +155,6 @@
             <div class="narrative-block" id="narrative7"></div>
         </div>
 
-        <!-- 8. Verdict & Summary -->
         <div class="section-title">8. Verdict & Summary</div>
         <div class="card">
             <div style="color:#38BDF8; font-weight:700; margin-bottom:10px;">Recent News & Market Catalysts</div>
@@ -208,20 +197,18 @@
                     badge.innerText = p.verdict;
                     badge.className = 'verdict-badge ' + (p.verdict.includes('BUY') ? 'strong-buy' : p.verdict === 'OBSERVE' ? 'observe' : 'dont-buy');
 
-                    // Price History Chart
                     const dates = m.history.map(x => x.Date);
                     const closes = m.history.map(x => x.Close);
                     Plotly.newPlot('priceChart', [{x: dates, y: closes, type: 'scatter', mode: 'lines', line: {color: '#38BDF8', width: 2}, fill: 'tozeroy'}], {paper_bgcolor: '#0D0D0D', plot_bgcolor: '#0D0D0D', margin: {t:10, b:25, l:35, r:10}, xaxis: {color: '#8B949E'}, yaxis: {color: '#8B949E'}}, {displayModeBar: false});
 
-                    // Radar Chart
                     Plotly.newPlot('radarChart', [{type: 'scatterpolar', r: [p.fundamental_score, p.intrinsic_score, p.technical_score, p.fundamental_score], theta: ['Fundamentals', 'Valuation', 'Momentum', 'Fundamentals'], fill: 'toself', fillcolor: 'rgba(234,179,8,0.3)', line: {color: '#EAB308', width: 2}}], {polar: {bgcolor: '#0D0D0D', radialaxis: {visible: false, range: [0, 100]}, angularaxis: {color: '#8B949E'}}, paper_bgcolor: '#0D0D0D', margin: {t: 10, b: 10, l: 30, r: 30}, height: 220, showlegend: false}, {displayModeBar: false});
 
-                    // Checklists render helper
                     const renderChecklist = (arr, elementId) => {
                         let html = '';
                         arr.forEach(c => {
-                            const icon = c[1] ? '✅' : '❌';
-                            const cls = c[1] ? 'pass' : 'fail';
+                            const status = c[1] === true;
+                            const icon = status ? '✅' : '❌';
+                            const cls = status ? 'pass' : 'fail';
                             html += `<div class="checklist-item"><span class="${cls}">${icon} <b>${c[0]}</b></span><div style="font-size:0.8rem; color:#8B949E; margin-top:2px;">${c[2]}</div></div>`;
                         });
                         document.getElementById(elementId).innerHTML = html;
@@ -231,7 +218,6 @@
                     renderChecklist(m.health_checks, 'healthChecks');
                     renderChecklist(m.div_checks, 'divChecks');
 
-                    // Financial Tables
                     const renderTable = (data, elementId) => {
                         if(!data || data.length === 0) { document.getElementById(elementId).innerHTML = '<div style="color:#8B949E; font-size:0.85em;">Data unavailable</div>'; return; }
                         let html = '<table><tr><th>Particulars</th><th>Amount (₹ Cr)</th></tr>';
@@ -242,12 +228,10 @@
                     renderTable(m.pnl_df, 'pnlTable');
                     renderTable(m.bs_df, 'bsTable');
 
-                    // Ownership
                     document.getElementById('ownPromoter').innerText = `${m.shareholding.Promoters}%`;
                     document.getElementById('ownInst').innerText = `${m.shareholding.Institutions}%`;
                     document.getElementById('ownPublic').innerText = `${m.shareholding.Public}%`;
 
-                    // News
                     let newsHtml = '<ul style="padding-left:20px; margin:0; font-size:0.9rem;">';
                     if(m.recent_news && m.recent_news.length > 0) {
                         m.recent_news.forEach(n => { newsHtml += `<li style="margin-bottom:6px;"><a href="${n.link}" target="_blank">${n.title}</a></li>`; });
@@ -255,11 +239,17 @@
                     newsHtml += '</ul>';
                     document.getElementById('newsContainer').innerHTML = newsHtml;
 
-                    // Split AI Narrative into 8 sections
-                    const sections = json.ai_narrative.split(/\d+\.\s+/).filter(s => s.trim().length > 0);
+                    const rawText = json.ai_narrative;
+                    const sections = rawText.split(/(?=\d+\.\s+[A-Z&\s]+)/).filter(s => s.trim().length > 0);
+                    
                     for(let i=0; i<8; i++) {
                         const el = document.getElementById(`narrative${i+1}`);
-                        if(el) el.innerText = sections[i] ? sections[i].trim() : "Detailed analysis unavailable.";
+                        if(el) {
+                            let secText = sections[i] ? sections[i].trim() : "";
+                            secText = secText.replace(/^\d+\.\s+[A-Z&\s]+\n+/, '').trim();
+                            secText = secText.replace(/\*{1,3}/g, '');
+                            el.innerText = secText || "Analysis unavailable.";
+                        }
                     }
 
                     document.getElementById('loading').style.display = 'none';
