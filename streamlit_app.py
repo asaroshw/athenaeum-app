@@ -1166,5 +1166,4 @@ if st.session_state.report_data:
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
 
     st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an "
-               "ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan "
-               "— for educational purposes only. It is not financial advice. Press Ctrl+P (or Cmd+P) to print or save.")
+               "ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan ")
