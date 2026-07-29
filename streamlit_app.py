@@ -26,7 +26,6 @@ except ImportError:
 # ============================================================
 logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
-# Set the page tab title and icon to your new branding
 st.set_page_config(
     page_title="Athenaeum Financial Intelligence", 
     page_icon="Logo.png", 
@@ -70,7 +69,7 @@ st.markdown(f"""
 """, unsafe_allow_html=True)
 
 # ============================================================
-# TOP SECTOR PEERS (For Alternative Recommendations)
+# TOP SECTOR PEERS 
 # ============================================================
 SECTOR_PEERS = {
     "financial": ["BAJFINANCE.NS", "CHOLAFIN.NS", "SHRIRAMFIN.NS", "HDFCBANK.NS"],
@@ -788,6 +787,33 @@ def fetch_stock_data(resolved_ticker, raw_input):
         sector_profile=sector_profile, order_book_hits=order_book_hits, growth_pct_from_news=growth_pct_from_news,
     )
 
+    # Clean Institutional Float Fix
+    promoters = (info.get("heldPercentInsiders") or 0) * 100
+    institutions = (info.get("heldPercentInstitutions") or 0) * 100
+    if promoters == 0 and institutions == 0:
+        shareholding_dict = {"Data Unavailable": 100}
+    else:
+        shareholding_dict = {
+            "Promoters": promoters,
+            "Institutions": institutions,
+            "Public": max(0, 100 - (promoters + institutions))
+        }
+
+    # Fetch Additional Institutional Data (Safely)
+    try:
+        mf_df = stock.mutualfund_holders
+    except Exception:
+        mf_df = None
+        
+    try:
+        cal = stock.calendar
+        if isinstance(cal, dict):
+            cal_df = pd.DataFrame(list(cal.items()), columns=['Event', 'Date'])
+        else:
+            cal_df = cal
+    except Exception:
+        cal_df = None
+
     metrics = {
         "name": info.get("longName", resolved_ticker), "price": current_price,
         "pe_ratio": pe_raw if is_valid_metric(pe_raw) else "N/A",
@@ -813,9 +839,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "website": info.get("website", "N/A"),
         "company_officers": info.get("companyOfficers", []),
         "recent_news": recent_news,
-        "shareholding": {"Promoters": (info.get("heldPercentInsiders") or 0) * 100,
-                          "Institutions": (info.get("heldPercentInstitutions") or 0) * 100,
-                          "Public": max(0, 100 - ((info.get("heldPercentInsiders") or 0) * 100 + (info.get("heldPercentInstitutions") or 0) * 100))},
+        "shareholding": shareholding_dict,
+        "mutual_funds": mf_df,
+        "calendar": cal_df,
+        "target_mean_price": info.get("targetMeanPrice"),
+        "recommendation_mean": info.get("recommendationMean"),
+        "v_score": v_score,
+        "p_score": p_score,
+        "h_score": h_score,
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
         "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
@@ -838,20 +869,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 if p_hist.empty: continue
                 p_current_price = p_info.get("currentPrice", float(p_hist['Close'].iloc[-1]))
                 
-                # Run the actual predictive pipeline / validation checks on the peer to guarantee a STRONG BUY verdict
                 p_sector = p_info.get("sector", "N/A")
                 p_industry = p_info.get("industry", "N/A")
                 p_is_fin = is_financial_sector(p_sector, p_industry)
-                p_profile = classify_sector_profile(p_sector, p_industry)
-                
-                # Quick core calculations for peer verification
-                p_net_inc, p_total_eq = None, None
-                p_bs = peer_stock.balance_sheet
-                if p_bs is not None and not p_bs.empty:
-                    for k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity']:
-                        if k in p_bs.index:
-                            eqs = p_bs.loc[k].dropna()
-                            if len(eqs) > 0: p_total_eq = float(eqs.iloc[0]); break
                 
                 p_pe = p_info.get("trailingPE")
                 p_pb = p_info.get("priceToBook")
@@ -862,13 +882,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 roe_val = float(p_roe) * 100 if p_roe and pd.notna(p_roe) else 0
                 dte_val = float(p_dte) / 100 if p_dte and pd.notna(p_dte) else 999
                 
-                # Verify it hits strict Strong Buy financial profile criteria equivalent to composite score >= 75
-                # e.g., P/E < 30, ROE > 15%, solid balance sheet, and positive momentum
                 closes = p_hist['Close'].dropna()
                 is_uptrend = closes.iloc[-1] > closes.rolling(50).mean().iloc[-1] if len(closes) > 50 else True
                 
                 if 0 < pe_val < 30 and roe_val > 15 and dte_val < (2.0 if p_is_fin else 0.8) and is_uptrend:
-                    # Found a valid Strong Buy alternative candidate
                     best_peer = {
                         "name": p_info.get("shortName", peer),
                         "ticker": peer,
@@ -876,7 +893,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
                         "pe": round(pe_val, 1),
                         "pb": round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A"
                     }
-                    break # Stop at the first confirmed Strong Buy peer candidate
+                    break 
             except Exception:
                 pass
                 
@@ -885,7 +902,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     return metrics
 
 # ============================================================
-# 8. UI PLOTLY CHARTS
+# 8. UI PLOTLY CHARTS & NEW ANGEL ONE COMPONENTS
 # ============================================================
 def price_history_chart(hist_df, currency):
     fig = go.Figure()
@@ -918,9 +935,192 @@ def analysis_radar_chart(m, pred):
     return fig
 
 def ownership_donut(shareholding):
-    fig = go.Figure(data=[go.Pie(labels=list(shareholding.keys()), values=list(shareholding.values()), hole=.5, marker_colors=[BLUE, PURPLE, GOLD])])
+    colors = [BLUE, PURPLE, GOLD] if "Data Unavailable" not in shareholding else [MUTED]
+    fig = go.Figure(data=[go.Pie(labels=list(shareholding.keys()), values=list(shareholding.values()), hole=.5, marker_colors=colors)])
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=240, margin=dict(t=10, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.1))
     return fig
+
+# --- ANGEL ONE COMPONENT: 52-WEEK RANGE BAR ---
+def render_52week_range(current_price, low_52, high_52, currency="₹"):
+    if current_price is None or low_52 is None or high_52 is None or high_52 <= low_52: return
+    pct_position = ((current_price - low_52) / (high_52 - low_52)) * 100
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=[100], y=["Range"], orientation="h", marker=dict(color="#1F1F1F"), hoverinfo="none"))
+    fig.add_trace(go.Scatter(x=[pct_position], y=["Range"], mode="markers", marker=dict(color="#38BDF8", size=16, symbol="diamond"), name="Current Price"))
+    fig.update_layout(height=50, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 100]), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), showlegend=False)
+    st.markdown(f"<div style='color:{MUTED}; font-size:0.85em; text-align:center;'><b>52W Low:</b> {currency}{low_52:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Current:</b> <span style='color:#E6E6E6;'>{currency}{current_price:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; <b>52W High:</b> {currency}{high_52:,.2f}</div>", unsafe_allow_html=True)
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+
+# --- ANGEL ONE COMPONENT: SMART SUMMARY CARDS ---
+def render_price_summary_cards(df, current_price, low_52, high_52):
+    if df is None or df.empty or current_price is None: return
+    sma_20 = df["Close"].rolling(20).mean().iloc[-1]
+    sma_50 = df["Close"].rolling(50).mean().iloc[-1]
+    sma_200 = df["Close"].rolling(200).mean().iloc[-1]
+
+    c1, c2, c3 = st.columns(3)
+    if low_52 and high_52:
+        dist_from_low = ((current_price - low_52) / low_52) * 100
+        with c1:
+            if dist_from_low <= 5:
+                st.info(f"📍 **Near 52W Low:** Just {dist_from_low:.1f}% above 52-week low.")
+            else:
+                st.info(f"📊 **52W Position:** {((current_price - low_52) / (high_52 - low_52)) * 100:.1f}% of 52-week range.")
+    with c2:
+        if pd.notna(sma_50) and pd.notna(sma_200):
+            if current_price > sma_50 and current_price > sma_200:
+                st.success("📈 **Bullish Trend:** Trading above 50-day & 200-day SMAs.")
+            elif current_price < sma_50 and current_price < sma_200:
+                st.error("📉 **Bearish Trend:** Trading below 50-day & 200-day SMAs.")
+            else:
+                st.warning("⚖️ **Mixed Trend:** Trading between 50-day & 200-day SMAs.")
+    with c3:
+        if "Volume" in df.columns and len(df) >= 6:
+            vol_today = df["Volume"].iloc[-1]
+            vol_avg_5d = df["Volume"].iloc[-6:-1].mean()
+            vol_ratio = (vol_today / vol_avg_5d) if vol_avg_5d > 0 else 1.0
+            if vol_ratio > 1.5:
+                st.success(f"🔥 **High Volume:** Today's volume is {vol_ratio:.1f}x higher than 5-day avg.")
+            else:
+                st.info(f"💧 **Normal Volume:** Trading volume is steady ({vol_ratio:.1f}x 5-day avg).")
+
+# --- ANGEL ONE COMPONENT: SCORECARD BADGES ---
+def render_scorecard_badges(q_score, v_score, f_score):
+    def get_badge(score, is_val=False):
+        if score is None: return "N/A", "N/A", MUTED
+        rating = max(1, min(5, round((score / 100) * 5)))
+        if is_val:
+            lbl = "VERY CHEAP" if rating==5 else "ATTRACTIVE" if rating==4 else "FAIR" if rating==3 else "EXPENSIVE" if rating==2 else "VERY EXPENSIVE"
+        else:
+            lbl = "EXCELLENT" if rating==5 else "GOOD" if rating==4 else "AVERAGE" if rating==3 else "WEAK" if rating==2 else "POOR"
+        clr = GREEN if rating >= 4 else GOLD if rating == 3 else RED
+        return rating, lbl, clr
+
+    q_rat, q_lbl, q_clr = get_badge(q_score)
+    v_rat, v_lbl, v_clr = get_badge(v_score, is_val=True)
+    f_rat, f_lbl, f_clr = get_badge(f_score)
+
+    st.markdown(f"""
+    <div style="display: flex; gap: 15px; margin-bottom: 20px;">
+        <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:12px 18px; flex:1;">
+            <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Quality</div>
+            <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
+                <span style="color:{q_clr}; border:1px solid {q_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{q_lbl}</span>
+                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{q_rat}/5</span>
+            </div>
+        </div>
+        <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:12px 18px; flex:1;">
+            <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Valuation</div>
+            <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
+                <span style="color:{v_clr}; border:1px solid {v_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{v_lbl}</span>
+                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{v_rat}/5</span>
+            </div>
+        </div>
+        <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:12px 18px; flex:1;">
+            <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Financial Health</div>
+            <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
+                <span style="color:{f_clr}; border:1px solid {f_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{f_lbl}</span>
+                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{f_rat}/5</span>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- ANGEL ONE COMPONENT: VALUATION SPECTRUM ---
+def render_valuation_spectrum(current_price, fair_value, currency="₹"):
+    if not fair_value or not current_price: return
+    attractive_limit = round(fair_value * 0.85, 2)
+    expensive_limit = round(fair_value * 1.50, 2)
+    high_limit = round(fair_value * 2.50, 2)
+
+    if current_price <= attractive_limit: pos = 15
+    elif current_price >= high_limit: pos = 90
+    else: pos = 15 + ((current_price - attractive_limit) / (high_limit - attractive_limit)) * 75
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=[100], y=["Valuation"], orientation="h", marker=dict(color=[pos], colorscale=[[0.0, GREEN], [0.4, GOLD], [1.0, RED]], showscale=False), hoverinfo="none"))
+    fig.add_trace(go.Scatter(x=[pos], y=["Valuation"], mode="markers", marker=dict(color="#FFFFFF", size=18, symbol="triangle-up"), name="Current Price"))
+    fig.update_layout(height=80, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 100]), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), showlegend=False)
+
+    st.markdown(f"##### Valuation Zone — Current Price: **{currency}{current_price:,.2f}**")
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    
+    col1, col2, col3 = st.columns([1, 1, 1])
+    with col1: st.markdown(f"<div style='color:{GREEN}; font-size:0.85em;'><b>Attractive:</b> Below {currency}{attractive_limit:,.2f}</div>", unsafe_allow_html=True)
+    with col2: st.markdown(f"<div style='color:{GOLD}; font-size:0.85em; text-align:center;'><b>Fair/Exp:</b> {currency}{attractive_limit:,.2f} – {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
+    with col3: st.markdown(f"<div style='color:{RED}; font-size:0.85em; text-align:right;'><b>High:</b> Above {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
+
+# --- ANGEL ONE COMPONENT: ANALYST CONSENSUS ---
+def render_analyst_consensus(target, current, rec, currency="₹"):
+    if not target or not current: return
+    upside = ((target - current) / current) * 100
+    color = GREEN if upside > 0 else RED
+    st.markdown(f"""
+    <div style='background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:15px; margin-top:15px;'>
+        <div style='color:{MUTED}; font-size:0.85em; font-weight:600; text-transform:uppercase;'>Analyst Consensus Target</div>
+        <div style='display:flex; justify-content:space-between; align-items:flex-end; margin-top:8px;'>
+            <div style='font-size:1.8em; font-weight:800;'>{currency}{target:,.2f}</div>
+            <div style='color:{color}; font-weight:700; font-size:1.1em;'>{'+' if upside>0 else ''}{upside:.2f}% Expected</div>
+        </div>
+        <div style='color:{MUTED}; font-size:0.8em; margin-top:4px;'>Recommendation Mean: {rec or 'N/A'} (1=Strong Buy, 5=Sell)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# --- ANGEL ONE COMPONENT: HIGHLIGHTS CARD ---
+def extract_highlights(metrics, cf_df):
+    working, not_working = [], []
+    if cf_df is not None and not cf_df.empty and "Operating Cash Flow" in cf_df.index:
+        ocf_series = cf_df.loc["Operating Cash Flow"].dropna()
+        if len(ocf_series) > 0 and ocf_series.iloc[0] == ocf_series.max() and ocf_series.iloc[0] > 0:
+            working.append(f"Operating Cash Flow (Yearly) — Highest at ₹{round(ocf_series.iloc[0] / 10000000, 2):,.2f} Cr")
+    
+    ic = metrics.get('interest_coverage')
+    if is_valid_metric(ic):
+        if float(ic) > 10: working.append(f"Operating Profit to Interest — Strong coverage at {ic}x")
+        elif float(ic) < 2.5: not_working.append(f"Interest Coverage — Low buffer at {ic}x EBIT")
+        
+    dte = metrics.get('debt_to_equity')
+    if is_valid_metric(dte):
+        if float(dte) < 0.2: working.append(f"Balance Sheet Strength — Virtually debt-free (D/E: {dte})")
+        elif float(dte) > 1.5: not_working.append(f"Leverage Risk — High Debt-to-Equity at {dte}x")
+        
+    yoy = to_float(metrics.get('pat_yoy'))
+    if yoy and yoy > 20: working.append(f"Strong Earnings Growth — PAT up {yoy}% YoY")
+    elif yoy and yoy < 0: not_working.append(f"Earnings Contraction — PAT down {yoy}% YoY")
+    
+    return working, not_working
+
+def render_highlights_card(working, not_working):
+    st.markdown("### Key Drivers & Operational Highlights")
+    col_pos, col_neg = st.columns(2)
+    with col_pos:
+        st.markdown(f"##### 🟢 What's Working Well?")
+        if working:
+            for w in working: st.markdown(f"<div style='background:rgba(63,185,80,0.1); border-left:3px solid {GREEN}; padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>• {w}</div>", unsafe_allow_html=True)
+        else: st.caption("No significant positive extremes detected.")
+    with col_neg:
+        st.markdown(f"##### 🔴 What's Not Working Well?")
+        if not_working:
+            for nw in not_working: st.markdown(f"<div style='background:rgba(248,81,73,0.1); border-left:3px solid {RED}; padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>• {nw}</div>", unsafe_allow_html=True)
+        else: st.caption("No major balance sheet red flags detected.")
+
+# --- ANGEL ONE COMPONENT: CORPORATE EVENTS & MF ---
+def render_corporate_events_and_mfs(cal_df, mf_df):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### 📅 Corporate Events")
+        if cal_df is not None and not cal_df.empty:
+            st.dataframe(cal_df, use_container_width=True, hide_index=True)
+        else: st.caption("No upcoming corporate events found.")
+    with c2:
+        st.markdown("##### 🏦 Top Mutual Funds Invested")
+        if mf_df is not None and not mf_df.empty:
+            try:
+                df_clean = mf_df[["Holder", "Shares", "% Out"]].rename(columns={"Holder": "Mutual Fund Scheme", "Shares": "Shares Held", "% Out": "% Stake"})
+                df_clean["% Stake"] = df_clean["% Stake"].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
+                st.dataframe(df_clean, use_container_width=True, hide_index=True)
+            except Exception: st.dataframe(mf_df, use_container_width=True)
+        else: st.caption("No Mutual Fund scheme data available.")
 
 def custom_metric(label, value):
     st.markdown(f'<div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;"><div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">{label}</div><div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div></div>', unsafe_allow_html=True)
@@ -1044,6 +1244,12 @@ if st.session_state.report_data:
     with hcol1:
         turnaround_badge = ' <span class="swf-badge" style="margin-left:6px; color:#F97316;">TURNAROUND</span>' if m.get('is_turnaround') else ''
         st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{m["name"]}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span>{turnaround_badge}</div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{currency}{m["price"]}</div></div></div></div>', unsafe_allow_html=True)
+        # SCORECARD BADGES INSERTED HERE
+        render_scorecard_badges(m.get('p_score'), m.get('v_score'), m.get('h_score'))
+        
+        # SMART PRICE SUMMARY CARDS ABOVE CHART
+        render_price_summary_cards(m.get('history'), m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')))
+        
         hist_df = m.get('history')
         if hist_df is not None and not hist_df.empty: st.plotly_chart(price_history_chart(hist_df, currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
@@ -1072,6 +1278,10 @@ if st.session_state.report_data:
     with c2: custom_metric("P/BV Ratio", f"{m['pb_ratio']}x" if m['pb_ratio'] != "N/A" else "N/A"); custom_metric("ROE", f"{m['roe']}")
     with c3: custom_metric("EV/EBITDA", f"{m['ev_ebitda']}x" if "N/A" not in str(m['ev_ebitda']) else m['ev_ebitda']); custom_metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
     with c4: custom_metric("Debt-to-Equity", f"{m['debt_to_equity']}"); custom_metric("EBITDA Margin", f"{m.get('ebitda_margin', 'N/A')}")
+    
+    # 52-WEEK RANGE BAR INSERTED HERE
+    render_52week_range(m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')), currency)
+    
     card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{m.get('business_summary', 'Business summary not available.')}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
 
     st.markdown("---")
@@ -1082,14 +1292,26 @@ if st.session_state.report_data:
     if m.get('fair_value'):
         fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], currency)
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+        
+        # VALUATION SPECTRUM GAUGE INSERTED HERE
+        render_valuation_spectrum(m['price'], m['fair_value'], currency)
+        
         st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled {pred.get('model_used','valuation')} fair value (growth assumption used: {pred.get('growth_used','N/A')}%).")
+    
+    # ANALYST CONSENSUS INSERTED HERE
+    render_analyst_consensus(m.get('target_mean_price'), m.get('price'), m.get('recommendation_mean'), currency)
+    
     card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(0)}</p>")
 
     st.markdown("---")
     # ---------------- 2. Future Growth ----------------
     st.markdown('<div class="swf-section-title">2. Future Growth &amp; Outlook</div>', unsafe_allow_html=True)
     fg1, fg2, fg3 = st.columns(3)
-    with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", f"{currency}{pred['target_price']}")
+    
+    # DON'T BUY TARGET PRICE FIX APPLIED HERE
+    target_display = f"{currency}{pred['target_price']}" if current_rating != "DON'T BUY" else f"N/A (Rejected Model)"
+    with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", target_display)
+    
     with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
     with fg3: custom_metric("Growth Assumption Used", f"{pred.get('growth_used','N/A')}%")
     if m.get('fair_value'): st.plotly_chart(projection_path_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
@@ -1103,6 +1325,11 @@ if st.session_state.report_data:
     with pp1: custom_metric("Operating Margin (OPM)", f"{m['operating_margin']}%" if m.get('operating_margin') is not None else "N/A")
     with pp2: custom_metric("Multi-Year Revenue CAGR", f"{m['revenue_cagr']}%" if m.get('revenue_cagr') is not None else "N/A")
     if not m['pnl_df'].empty: st.markdown("##### Profit & Loss (Cr)"); st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
+    
+    # WHAT'S WORKING / NOT WORKING HIGHLIGHTS INSERTED HERE
+    working, not_working = extract_highlights(m, m.get('cf_df'))
+    render_highlights_card(working, not_working)
+    
     card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(2)}</p>")
 
     st.markdown("---")
@@ -1135,6 +1362,10 @@ if st.session_state.report_data:
     # ---------------- 7. Ownership ----------------
     st.markdown('<div class="swf-section-title">7. Ownership Structure</div>', unsafe_allow_html=True)
     st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
+    
+    # CORPORATE EVENTS & MUTUAL FUNDS INSERTED HERE
+    render_corporate_events_and_mfs(m.get('calendar'), m.get('mutual_funds'))
+    
     card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{narrative_for(6)}</p>")
 
     st.markdown("---")
@@ -1142,10 +1373,14 @@ if st.session_state.report_data:
     st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
 
+    # DON'T BUY TARGET PRICE FIX APPLIED HERE
     if current_rating in ["BUY", "STRONG BUY"]:
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
-    else:
+    elif current_rating == "OBSERVE":
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px; color:{RED};'><b>Rejected Valuation Baseline:</b> {currency}{pred['target_price']} (Do Not Trade)</div>", unsafe_allow_html=True)
+
 
     # --- RECOMMENDED SECTOR ALTERNATIVE ---
     if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
