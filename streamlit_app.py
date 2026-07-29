@@ -75,6 +75,7 @@ SECTOR_PEERS = {
     "financial": ["BAJFINANCE.NS", "CHOLAFIN.NS", "SHRIRAMFIN.NS", "HDFCBANK.NS"],
     "capex_intensive": ["LT.NS", "HAL.NS", "BEL.NS", "SIEMENS.NS"],
     "cyclical": ["BOSCHLTD.NS", "MOTHERSON.NS", "UNOMINDA.NS", "MRF.NS"],
+    "materials": ["TATASTEEL.NS", "JSWSTEEL.NS", "HINDALCO.NS", "VEDL.NS"],
     "standard": ["RELIANCE.NS", "TCS.NS", "INFY.NS", "HUL.NS"] 
 }
 
@@ -154,8 +155,9 @@ FINANCIAL_SECTOR_KEYWORDS = [
 CAPEX_INTENSIVE_KEYWORDS = [
     "industrial", "engineering", "infrastructure", "construction", "capital goods",
     "electrical equipment", "machinery", "railroad", "defense", "aerospace",
-    "building products", "specialty industrial",
+    "building products", "specialty industrial"
 ]
+MATERIALS_KEYWORDS = ["steel", "metals", "mining", "materials", "chemicals", "cement", "iron"]
 CYCLICAL_KEYWORDS = ["auto", "automobile", "tire", "tyre"]
 
 def is_financial_sector(sector, industry):
@@ -166,6 +168,8 @@ def classify_sector_profile(sector, industry):
     if is_financial_sector(sector, industry):
         return "financial"
     text = f"{sector or ''} {industry or ''}".lower()
+    if any(kw in text for kw in MATERIALS_KEYWORDS):
+        return "materials"
     if any(kw in text for kw in CAPEX_INTENSIVE_KEYWORDS):
         return "capex_intensive"
     if any(kw in text for kw in CYCLICAL_KEYWORDS):
@@ -241,34 +245,34 @@ def valuation_checks(m):
     if pe is not None:
         if pe < 0:
             checks.append(("Profitable on a P/E basis", False,
-                            f"P/E is negative ({pe}x) — the company is currently loss-making."))
+                            f"P/E is negative ({pe:.2f}x) — the company is currently loss-making."))
         else:
             threshold = 45 if (pat_yoy is not None and pat_yoy > 30) else 25
             checks.append((f"Reasonable P/E (<{threshold}x{' — growth-adjusted' if threshold==45 else ''})",
-                            pe < threshold, f"Trailing P/E of {pe}x"))
+                            pe < threshold, f"Trailing P/E of {pe:.2f}x"))
 
     if peg is not None:
         if peg < 0:
             checks.append(("Positive PEG", False,
-                            f"PEG is negative ({peg}) — implies shrinking earnings or a loss-making company."))
+                            f"PEG is negative ({peg:.2f}) — implies shrinking earnings or a loss-making company."))
         elif pe is not None and pe > 0 and pat_yoy is not None and pat_yoy > 0:
-            checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg}"))
+            checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg:.2f}"))
 
     if pb is not None:
         threshold = 3.0 if is_fin else 5.0
-        checks.append((f"Reasonable P/B (<{threshold:g}x)", 0 < pb < threshold, f"Price-to-Book of {pb}x"))
+        checks.append((f"Reasonable P/B (<{threshold:g}x)", 0 < pb < threshold, f"Price-to-Book of {pb:.2f}x"))
 
     if is_fin and pb is not None and m.get('justified_pb'):
         jpb = m['justified_pb']
         checks.append(("P/B vs Excess-ROE Justified P/B", pb < jpb,
-                        f"Actual P/B {pb}x vs a model-justified P/B of {jpb}x"))
+                        f"Actual P/B {pb:.2f}x vs a model-justified P/B of {jpb:.2f}x"))
 
     if not is_fin and ev_ebitda is not None:
         if ev_ebitda < 0:
             checks.append(("Positive EV/EBITDA", False,
-                            f"EV/EBITDA is negative ({ev_ebitda}x) — implies operating losses."))
+                            f"EV/EBITDA is negative ({ev_ebitda:.2f}x) — implies operating losses."))
         else:
-            checks.append(("Reasonable EV/EBITDA (<15x)", ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda}x"))
+            checks.append(("Reasonable EV/EBITDA (<15x)", ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda:.2f}x"))
 
     return checks
 
@@ -280,17 +284,17 @@ def past_performance_checks(m):
     sector_profile = m.get('sector_profile', 'standard')
     checks = []
     if yoy is not None:
-        checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {m.get('pat_yoy')}"))
+        checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {yoy:.2f}%"))
     if yoy is not None and qoq is not None:
         checks.append(("Accelerating Growth", qoq > yoy, "Comparing most recent quarter growth to the yearly figure"))
     if roe is not None:
-        checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {m.get('roe')}"))
+        checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {roe:.2f}%"))
     if margin is not None:
-        if sector_profile == "cyclical" and opm is not None and opm > 15 and rev_cagr is not None and rev_cagr > 8:
+        if sector_profile in ["cyclical", "materials", "capex_intensive"] and opm is not None and opm > 15 and rev_cagr is not None and rev_cagr > 8:
             checks.append(("Healthy Net Margin (cyclical-adjusted, >6%)", margin > 6,
-                            f"Net margin of {m.get('net_margin')} — bar relaxed given strong OPM/CAGR."))
+                            f"Net margin of {margin:.2f}% — bar relaxed given strong OPM/CAGR."))
         else:
-            checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {m.get('net_margin')}"))
+            checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {margin:.2f}%"))
     return checks
 
 def financial_health_checks(m):
@@ -301,17 +305,17 @@ def financial_health_checks(m):
     if de is not None:
         if de < 0:
             checks.append(("Positive Shareholder Equity", False,
-                            f"Debt-to-equity is negative ({de}) — implies negative shareholders' equity."))
+                            f"Debt-to-equity is negative ({de:.2f}) — implies negative shareholders' equity."))
         else:
             threshold, label = (10.0, "Leverage in line with a lending-book business model (D/E < 10x)") if is_fin \
                 else (1.0, "Low Leverage (D/E < 1.0)")
-            checks.append((label, de < threshold, f"Debt-to-equity of {de}"))
+            checks.append((label, de < threshold, f"Debt-to-equity of {de:.2f}"))
     if ic is not None:
-        checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic}x"))
+        checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic:.2f}x"))
     if is_fin and m.get('nim_proxy') is not None:
         nim = m['nim_proxy']
         checks.append(("Positive Net Interest Margin (approx.)", nim > 0,
-                        f"Approximate NIM of {nim}%"))
+                        f"Approximate NIM of {nim:.2f}%"))
     return checks
 
 def dividend_checks(m):
@@ -319,7 +323,7 @@ def dividend_checks(m):
     if "doesn't pay" in dy_str.lower():
         return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
     dy = to_float(dy_str)
-    return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {m.get('dividend_yield')}")]
+    return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {dy:.2f}%" if dy else "N/A")]
 
 def score_from_checks(checks):
     vals = [c[1] for c in checks if c[1] is not None]
@@ -413,20 +417,17 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
     
     if downside_pct > 0.15:
         if verdict != "DON'T BUY":
-            notes.append(f"Forced to DON'T BUY: the modeled target price is {round(downside_pct*100,1)}% below "
-                          f"the current price — a downside this large overrides the composite score entirely.")
-        return "DON'T BUY"
+            notes.append(f"Model indicates {round(downside_pct*100,1)}% downside. Treated as OBSERVE or DON'T BUY based on fundamental strength.")
+        return "DON'T BUY" if downside_pct > 0.40 else "OBSERVE"
+        
     elif downside_pct > 0:
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
-            notes.append(f"Downgraded to OBSERVE: the modeled target price is {round(downside_pct*100,1)}% below "
-                          f"the current price, so the model will not issue a BUY/STRONG BUY.")
+            notes.append(f"Downgraded to OBSERVE: the modeled target price is {round(downside_pct*100,1)}% below the current price.")
             return "OBSERVE"
             
     if upside_pct > 1.50:
         if verdict in ["BUY", "STRONG BUY"]:
-            notes.append(f"Forced to DON'T BUY: The model calculated an absurd +{round(upside_pct*100, 1)}% upside. "
-                          f"This is a classic micro-cap value trap, almost certainly caused by distorted or unadjusted "
-                          f"accounting data on Yahoo Finance. Do not trust this mathematical target.")
+            notes.append(f"Forced to DON'T BUY: Absurd upside (+{round(upside_pct*100, 1)}%) detected. Likely a data trap.")
             return "DON'T BUY"
             
     return verdict
@@ -496,46 +497,51 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             forced_intrinsic_adjustment = -30
             result["model_used"] = "No valid financial-sector inputs"
     else:
-        if fcf_history is not None and len(fcf_history) > 0:
-            avg_fcf = float(fcf_history.mean())
-        else:
-            avg_fcf = info.get('netIncomeToCommon') or 0
         shares = info.get('sharesOutstanding') or shares_outstanding
-        fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
+        trailing_eps = info.get('trailingEps')
+        effective_eps = trailing_eps
+        
+        if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
+            effective_eps = (latest_quarter_net_income / shares) * 4
+            
+        if sector_profile in ["capex_intensive", "cyclical", "materials"] and effective_eps and effective_eps > 0:
+            historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
+            target_pe = min(max(historical_pe, 15), 35)
+            intrinsic_value = round(effective_eps * target_pe, 2)
+            result["model_used"] = "Target P/E (Capex/Cyclical Adjusted)"
+            
+        elif fcf_history is not None and len(fcf_history) > 0:
+            avg_fcf = float(fcf_history.mean())
+            fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
 
-        if fcf_per_share > 0:
-            g = growth_pct if growth_pct > TERMINAL_GROWTH_PCT else TERMINAL_GROWTH_PCT + 2
-            discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, TERMINAL_GROWTH_PCT / 100
-            pv_fcf = sum(fcf_per_share * (1 + g_frac) ** t / (1 + discount_rate) ** t for t in range(1, 6))
-            fcf5 = fcf_per_share * (1 + g_frac) ** 5
-            terminal_value = (fcf5 * (1 + tg_frac)) / (discount_rate - tg_frac)
-            intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
-            result["model_used"] = "2-Stage DCF (Free Cash Flow)"
-        else:
-            trailing_eps = info.get('trailingEps')
-            effective_eps = trailing_eps
-            if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
-                effective_eps = (latest_quarter_net_income / shares) * 4
-
-            if effective_eps and effective_eps > 0:
-                historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
-                target_pe = min(historical_pe, 35)
-                intrinsic_value = round(effective_eps * target_pe, 2)
-                result["model_used"] = "Target P/E (defensive)"
-            elif book_value_per_share and book_value_per_share > 0:
-                intrinsic_value = round(book_value_per_share * 0.8, 2)
-                result["model_used"] = "Book Value Haircut (defensive)"
+            if fcf_per_share > 0:
+                g = growth_pct if growth_pct > TERMINAL_GROWTH_PCT else TERMINAL_GROWTH_PCT + 2
+                discount_rate, g_frac, tg_frac = ke_pct / 100, g / 100, TERMINAL_GROWTH_PCT / 100
+                pv_fcf = sum(fcf_per_share * (1 + g_frac) ** t / (1 + discount_rate) ** t for t in range(1, 6))
+                fcf5 = fcf_per_share * (1 + g_frac) ** 5
+                terminal_value = (fcf5 * (1 + tg_frac)) / (discount_rate - tg_frac)
+                intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
+                result["model_used"] = "2-Stage DCF (Free Cash Flow)"
             else:
                 intrinsic_value = current_price
-                base_penalty = -35
-                if sector_profile == "capex_intensive" and order_book_hits:
-                    forced_intrinsic_adjustment = round(base_penalty * 0.4, 1)
-                    result["model_used"] = "Insufficient trailing data — penalty softened (capex-intensive sector)"
-                else:
-                    forced_intrinsic_adjustment = base_penalty
-                    result["model_used"] = "Insufficient data for DCF, Target P/E, or book value"
+                forced_intrinsic_adjustment = -35
+                result["model_used"] = "Negative FCF - Valuation Penalized"
+                
+        elif effective_eps and effective_eps > 0:
+            historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
+            target_pe = min(historical_pe, 35)
+            intrinsic_value = round(effective_eps * target_pe, 2)
+            result["model_used"] = "Target P/E (defensive)"
+            
+        elif book_value_per_share and book_value_per_share > 0:
+            intrinsic_value = round(book_value_per_share * 0.8, 2)
+            result["model_used"] = "Book Value Haircut (defensive)"
+            
+        else:
+            intrinsic_value = current_price
+            forced_intrinsic_adjustment = -35
+            result["model_used"] = "Insufficient data for valuation"
 
-    # Defensive fallback if intrinsic value matches current price identically
     if intrinsic_value == current_price or not intrinsic_value:
         intrinsic_value = round(current_price * 1.12, 2)
 
@@ -718,10 +724,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
     pe_raw = info.get("trailingPE")
     if not is_valid_metric(pe_raw) and net_inc and mcap:
         pe_raw = round(mcap / net_inc, 2)
+    elif is_valid_metric(pe_raw):
+        pe_raw = round(float(pe_raw), 2)
 
     pb_raw = info.get("priceToBook")
     if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
         pb_raw = round(mcap / total_eq, 2)
+    elif is_valid_metric(pb_raw):
+        pb_raw = round(float(pb_raw), 2)
 
     roe_raw = info.get("returnOnEquity")
     if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
@@ -731,6 +741,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     peg_raw = info.get("pegRatio")
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and pat_yoy_pct and pat_yoy_pct > 0:
         peg_raw = round(to_float(pe_raw) / pat_yoy_pct, 2)
+    elif is_valid_metric(peg_raw):
+        peg_raw = round(float(peg_raw), 2)
 
     ev_ebitda = "N/A"
     if is_fin:
@@ -741,6 +753,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
             ev_val = mcap + (info.get('totalDebt') or 0) - (info.get('totalCash') or 0)
         if is_valid_metric(ebitda_val) and is_valid_metric(ev_val) and ebitda_val != 0:
             ev_ebitda = round(ev_val / ebitda_val, 2)
+        elif is_valid_metric(ev_ebitda):
+            ev_ebitda = round(float(ev_ebitda), 2)
 
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (is_valid_metric(ebitda_val) and revenue_latest) else "N/A"
     interest_coverage = round(ebit_latest / interest_exp_latest, 2) if (ebit_latest is not None and interest_exp_latest) else "N/A"
@@ -787,7 +801,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
         sector_profile=sector_profile, order_book_hits=order_book_hits, growth_pct_from_news=growth_pct_from_news,
     )
 
-    # Clean Institutional Float Fix
     promoters = (info.get("heldPercentInsiders") or 0) * 100
     institutions = (info.get("heldPercentInstitutions") or 0) * 100
     if promoters == 0 and institutions == 0:
@@ -799,7 +812,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
             "Public": max(0, 100 - (promoters + institutions))
         }
 
-    # Fetch Additional Institutional Data (Safely)
     try:
         mf_df = stock.mutualfund_holders
     except Exception:
@@ -819,7 +831,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "pe_ratio": pe_raw if is_valid_metric(pe_raw) else "N/A",
         "pb_ratio": pb_raw if is_valid_metric(pb_raw) else "N/A",
         "peg_ratio": peg_raw if is_valid_metric(peg_raw) else "N/A",
-        "ev_ebitda": ev_ebitda,
+        "ev_ebitda": ev_ebitda if is_valid_metric(ev_ebitda) else ev_ebitda,
         "roe": f"{round(roe_raw*100, 2)}%" if roe_is_known else "N/A",
         "ebitda_margin": f"{ebitda_margin}%" if ebitda_margin != "N/A" else "N/A",
         "operating_margin": operating_margin, "revenue_cagr": revenue_cagr_pct, "nim_proxy": nim_proxy,
@@ -1048,7 +1060,7 @@ def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     col1, col2, col3 = st.columns([1, 1, 1])
     with col1: st.markdown(f"<div style='color:{GREEN}; font-size:0.85em;'><b>Attractive:</b> Below {currency}{attractive_limit:,.2f}</div>", unsafe_allow_html=True)
     with col2: st.markdown(f"<div style='color:{GOLD}; font-size:0.85em; text-align:center;'><b>Fair/Exp:</b> {currency}{attractive_limit:,.2f} – {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
-    with col3: st.markdown(f"<div style='color:{RED}; font-size:0.85em; text-align:right;'><b>High:</b> Above {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
+    with col3: st.markdown(f"<div style='color:{RED}; font-size:0.85em; text-align:right;'><b>High:</b> Above {currency}{high_limit:,.2f}</div>", unsafe_allow_html=True)
 
 # --- ANGEL ONE COMPONENT: ANALYST CONSENSUS ---
 def render_analyst_consensus(target, current, rec, currency="₹"):
@@ -1076,17 +1088,17 @@ def extract_highlights(metrics, cf_df):
     
     ic = metrics.get('interest_coverage')
     if is_valid_metric(ic):
-        if float(ic) > 10: working.append(f"Operating Profit to Interest — Strong coverage at {ic}x")
-        elif float(ic) < 2.5: not_working.append(f"Interest Coverage — Low buffer at {ic}x EBIT")
+        if float(ic) > 10: working.append(f"Operating Profit to Interest — Strong coverage at {float(ic):.2f}x")
+        elif float(ic) < 2.5: not_working.append(f"Interest Coverage — Low buffer at {float(ic):.2f}x EBIT")
         
     dte = metrics.get('debt_to_equity')
     if is_valid_metric(dte):
-        if float(dte) < 0.2: working.append(f"Balance Sheet Strength — Virtually debt-free (D/E: {dte})")
-        elif float(dte) > 1.5: not_working.append(f"Leverage Risk — High Debt-to-Equity at {dte}x")
+        if float(dte) < 0.2: working.append(f"Balance Sheet Strength — Virtually debt-free (D/E: {float(dte):.2f})")
+        elif float(dte) > 1.5: not_working.append(f"Leverage Risk — High Debt-to-Equity at {float(dte):.2f}x")
         
     yoy = to_float(metrics.get('pat_yoy'))
-    if yoy and yoy > 20: working.append(f"Strong Earnings Growth — PAT up {yoy}% YoY")
-    elif yoy and yoy < 0: not_working.append(f"Earnings Contraction — PAT down {yoy}% YoY")
+    if yoy and yoy > 20: working.append(f"Strong Earnings Growth — PAT up {yoy:.2f}% YoY")
+    elif yoy and yoy < 0: not_working.append(f"Earnings Contraction — PAT down {yoy:.2f}% YoY")
     
     return working, not_working
 
@@ -1110,7 +1122,10 @@ def render_corporate_events_and_mfs(cal_df, mf_df):
     with c1:
         st.markdown("##### 📅 Corporate Events")
         if cal_df is not None and not cal_df.empty:
-            st.dataframe(cal_df, use_container_width=True, hide_index=True)
+            # Filter out the non-event strings from the calendar dictionary dump
+            mask = cal_df['Event'].astype(str).str.contains('High|Low|Average|Revenue', case=False, na=False)
+            cal_df_clean = cal_df[~mask]
+            st.dataframe(cal_df_clean, use_container_width=True, hide_index=True)
         else: st.caption("No upcoming corporate events found.")
     with c2:
         st.markdown("##### 🏦 Top Mutual Funds Invested")
@@ -1161,12 +1176,16 @@ NO BLIND AGREEMENT MANDATE:
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
     order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
                         if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
+    
+    # Hide the broken target price from the AI if the model vetoed it
+    target_display = f"{metrics['currency']}{pred.get('target_price')}" if pred.get('verdict') != "DON'T BUY" else "N/A (Model Rejected due to strict veto)"
+    
     pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')} "
            f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
            f"Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. "
            f"EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. "
            f"Valuation model used: {pred.get('model_used')}. Forward growth assumption used in the model: "
-           f"{pred.get('growth_used')}%. Quantitative Target Price: {metrics['currency']}{pred.get('target_price')}. "
+           f"{pred.get('growth_used')}%. Quantitative Target Price: {target_display}. "
            f"System Verdict: {pred.get('verdict')} (composite score {pred.get('composite_score')}/100 — "
            f"fundamental {pred.get('fundamental_score')}, intrinsic {pred.get('intrinsic_score')}, "
            f"technical {pred.get('technical_score')}). Recent news headlines: {news_titles}")
