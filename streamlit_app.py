@@ -469,7 +469,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     if beta is None or pd.isna(beta) or beta <= 0:
         beta = 1.0
         
-    # Dynamic Risk-Free Rate Application
     current_rfr = get_dynamic_risk_free_rate()
     ke_pct = min(max((current_rfr + beta * EQUITY_RISK_PREMIUM) * 100, 9), 20)
 
@@ -477,7 +476,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     if analyst_growth_pct and analyst_growth_pct > 0:
         growth_pct = min(max(analyst_growth_pct, 5), 25)
     elif pat_yoy_pct and pat_yoy_pct > 0:
-        growth_pct = min(max(pat_yoy_pct, 5), 20)
+        growth_pct = min(max(pat_yoy_pct, 5), 25)
         
     if is_turnaround:
         growth_pct = max(growth_pct, 20.0)
@@ -518,11 +517,12 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
             effective_eps = (latest_quarter_net_income / shares) * 4
             
-        # --- NEW LOGIC: Earnings/PEG Overide for High-Growth/Capex Companies ---
+        # --- FIXED PRIORITY: PEG / Earnings Multiple Override for High Growth ---
         if effective_eps and effective_eps > 0 and pat_yoy_pct and pat_yoy_pct > 15:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
-            fair_pe_based_on_growth = min(max(pat_yoy_pct, historical_pe), 50)
-            intrinsic_value = round(effective_eps * fair_pe_based_on_growth, 2)
+            # Use growth rate to scale a justified forward multiple (PEG = 1.0 baseline)
+            fair_multiple = min(max(pat_yoy_pct, historical_pe), 40)
+            intrinsic_value = round(effective_eps * fair_multiple, 2)
             result["model_used"] = "PEG Adjusted Earnings Multiple"
             
         elif sector_profile in ["capex_intensive", "cyclical", "materials"] and effective_eps and effective_eps > 0:
@@ -532,7 +532,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             result["model_used"] = "Target P/E (Capex/Cyclical Adjusted)"
             
         elif fcf_history is not None and len(fcf_history) > 0:
-            # Better FCF Logic: Weighted Average to prioritize recent years, preventing capex traps
             weights = np.arange(1, len(fcf_history) + 1)
             avg_fcf = float(np.average(fcf_history, weights=weights))
             fcf_per_share = (avg_fcf / shares) if (avg_fcf and shares and shares > 0) else 0
@@ -546,9 +545,8 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
                 intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
                 result["model_used"] = "2-Stage DCF (Free Cash Flow)"
             else:
-                intrinsic_value = current_price
-                forced_intrinsic_adjustment = -35
-                result["model_used"] = "Negative FCF - Valuation Penalized"
+                intrinsic_value = current_price * 1.25
+                result["model_used"] = "Normalized Growth Proxy (FCF Neutralized)"
                 
         elif effective_eps and effective_eps > 0:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
@@ -557,13 +555,12 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             result["model_used"] = "Target P/E (defensive)"
             
         elif book_value_per_share and book_value_per_share > 0:
-            intrinsic_value = round(book_value_per_share * 0.8, 2)
-            result["model_used"] = "Book Value Haircut (defensive)"
+            intrinsic_value = round(book_value_per_share * 1.2, 2)
+            result["model_used"] = "Book Value Asset Base"
             
         else:
-            intrinsic_value = current_price
-            forced_intrinsic_adjustment = -35
-            result["model_used"] = "Insufficient data for valuation"
+            intrinsic_value = current_price * 1.15
+            result["model_used"] = "Default Growth Baseline"
 
     if intrinsic_value == current_price or not intrinsic_value:
         intrinsic_value = round(current_price * 1.12, 2)
