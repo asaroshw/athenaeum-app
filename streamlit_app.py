@@ -1257,7 +1257,7 @@ def get_base64_image(image_path):
         return None
 
 # Load the new full-width banner image
-banner_b64 = get_base64_image("Logo64.png")
+banner_b64 = get_base64_image("Logo64.jpg")
 
 if banner_b64:
     # Render as a full-width responsive banner
