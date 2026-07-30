@@ -34,20 +34,22 @@ st.set_page_config(
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 
-GOLD, BG, CARD_BG, BORDER = "#EAB308", "#000000", "#0D0D0D", "#1F1F1F"
+# --- UPDATED COLOR PALETTE (Deep Slate/Navy to match the banner) ---
+GOLD, BG, CARD_BG, BORDER = "#EAB308", "#0B111A", "#121A28", "#1F2B3D"
 GREEN, RED, ORANGE, MUTED, BLUE, PURPLE = "#3FB950", "#F85149", "#F97316", "#8B949E", "#38BDF8", "#A855F7"
 
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    /* Import Orbitron as a standard fallback for the futuristic look if Quironax isn't locally installed */
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@800&display=swap');
     
     html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{ font-family: 'Inter', sans-serif !important; }}
+    
+    /* Apply the new slate background to the entire app */
     .stApp {{ background-color: {BG}; color: #E6E6E6; }}
+    
     .swf-title-container {{ text-align: center; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
     
-    /* Updated Title CSS with Quironax and massive font size */
     .swf-title {{ 
         font-family: 'Quironax', 'Orbitron', sans-serif !important; 
         font-size: 3.5em; 
@@ -59,7 +61,8 @@ st.markdown(f"""
         justify-content: center;
     }}
     
-    .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
+    /* Cards now use the slightly lighter slate blue-grey */
+    .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; box-shadow: 0 4px 6px rgba(0,0,0,0.2); }}
     .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.05em; margin-bottom:6px; }}
     .swf-sub {{ color:{MUTED}; font-size:0.85em; margin-left:0px; }}
     .swf-check-pass {{ color: {GREEN}; }}
