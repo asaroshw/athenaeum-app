@@ -5,3 +5,8 @@ pandas
 numpy
 google-genai
 requests
+streamlit
+plotly
+requests
+beautifulsoup4
+statsmodels
