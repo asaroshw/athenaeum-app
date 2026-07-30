@@ -1255,12 +1255,12 @@ def get_base64_image(image_path):
 
 logo_b64 = get_base64_image("Logo.png")
 
-# --- UI UPDATE: Logo perfectly integrates as the 'A' in ATHENAEUM ---
+# --- UI UPDATE: Enlarged, centered logo integration ---
 if logo_b64:
     st.markdown(f'''
     <div class="swf-title-container" style="padding: 10px 0 30px 0;">
-        <div class="swf-title">
-            <img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; filter: invert(1); margin-right: 2px; margin-bottom: 4px;">
+        <div class="swf-title" style="display: flex; align-items: center; justify-content: center;">
+            <img src="data:image/png;base64,{logo_b64}" style="height: 2.2em; filter: invert(1); margin-right: 8px;">
             <span>THENAEUM FINANCIAL INTELLIGENCE</span>
         </div>
     </div>
