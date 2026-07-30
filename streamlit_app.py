@@ -1256,22 +1256,21 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-logo_b64 = get_base64_image("Logo.png")
+# Load the new full-width banner image
+banner_b64 = get_base64_image("Logo64.png")
 
-# --- UI UPDATE: Drop-cap aligned logo ---
-if logo_b64:
+if banner_b64:
+    # Render as a full-width responsive banner
     st.markdown(f'''
-    <div class="swf-title-container" style="padding: 10px 0 30px 0;">
-        <div class="swf-title" style="display: flex; align-items: flex-end; justify-content: center;">
-            <img src="data:image/png;base64,{logo_b64}" style="height: 1.8em; filter: invert(1); margin-right: 4px; transform: translateY(6px);">
-            <span style="line-height: 0.85;">THENAEUM FINANCIAL INTELLIGENCE</span>
-        </div>
+    <div style="width: 100%; text-align: center; margin-bottom: 25px; border-bottom: 1px solid {BORDER}; padding-bottom: 20px;">
+        <img src="data:image/png;base64,{banner_b64}" style="width: 100%; max-height: 220px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
     </div>
     ''', unsafe_allow_html=True)
 else:
+    # Fallback to pure text if the image isn't found
     st.markdown('''
     <div class="swf-title-container" style="padding: 10px 0 30px 0;">
-        <div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div>
+        <div class="swf-title" style="font-size: 3em;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
     </div>
     ''', unsafe_allow_html=True)
     
