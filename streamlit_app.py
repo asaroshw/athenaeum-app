@@ -40,10 +40,25 @@ GREEN, RED, ORANGE, MUTED, BLUE, PURPLE = "#3FB950", "#F85149", "#F97316", "#8B9
 st.markdown(f"""
 <style>
     @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
+    /* Import Orbitron as a standard fallback for the futuristic look if Quironax isn't locally installed */
+    @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@800&display=swap');
+    
     html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{ font-family: 'Inter', sans-serif !important; }}
     .stApp {{ background-color: {BG}; color: #E6E6E6; }}
-    .swf-title-container {{ text-align: center; padding: 10px 0 20px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
-    .swf-title {{ font-size: 1.85em; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; }}
+    .swf-title-container {{ text-align: center; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
+    
+    /* Updated Title CSS with Quironax and massive font size */
+    .swf-title {{ 
+        font-family: 'Quironax', 'Orbitron', sans-serif !important; 
+        font-size: 3.5em; 
+        font-weight: 800; 
+        color: #FFFFFF; 
+        letter-spacing: 2px; 
+        display: flex; 
+        align-items: center; 
+        justify-content: center;
+    }}
+    
     .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
     .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.05em; margin-bottom:6px; }}
     .swf-sub {{ color:{MUTED}; font-size:0.85em; margin-left:0px; }}
@@ -153,7 +168,7 @@ def get_dynamic_risk_free_rate():
         if not hist.empty:
             return float(hist['Close'].iloc[-1]) / 100.0
     except: pass
-    return 0.065 # Fallback to 6.5%
+    return 0.065
 
 # ============================================================
 # 3. SECTOR DETECTION & NORMALIZATION PROFILES
@@ -418,7 +433,7 @@ def composite_verdict(fundamental_score, margin_of_safety, drift, arima_directio
 
 VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
-def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
+def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth_rate=8.0):
     if target_price is None or not current_price:
         return verdict
         
@@ -435,9 +450,12 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes):
             notes.append(f"Downgraded to OBSERVE: the modeled target price is {round(downside_pct*100,1)}% below the current price.")
             return "OBSERVE"
             
-    if upside_pct > 1.50:
+    # --- DYNAMIC UPSIDE CEILING BASED ON GROWTH ---
+    max_allowed_upside = 2.50 if (growth_rate and growth_rate >= 25) else 1.50
+    
+    if upside_pct > max_allowed_upside:
         if verdict in ["BUY", "STRONG BUY"]:
-            notes.append(f"Forced to DON'T BUY: Absurd upside (+{round(upside_pct*100, 1)}%) detected. Likely a data trap.")
+            notes.append(f"Forced to DON'T BUY: Extreme upside (+{round(upside_pct*100, 1)}%) exceeds growth-adjusted ceiling (+{int(max_allowed_upside*100)}%).")
             return "DON'T BUY"
             
     return verdict
@@ -520,7 +538,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         # --- FIXED PRIORITY: PEG / Earnings Multiple Override for High Growth ---
         if effective_eps and effective_eps > 0 and pat_yoy_pct and pat_yoy_pct > 15:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
-            # Use growth rate to scale a justified forward multiple (PEG = 1.0 baseline)
+            # Use growth rate to scale a justified forward multiple
             fair_multiple = min(max(pat_yoy_pct, historical_pe), 40)
             intrinsic_value = round(effective_eps * fair_multiple, 2)
             result["model_used"] = "PEG Adjusted Earnings Multiple"
@@ -605,7 +623,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         forced_intrinsic_adjustment=forced_intrinsic_adjustment, qualitative_bonus=qualitative_bonus,
     )
 
-    verdict = apply_tiered_sanity_veto(verdict, target_price, current_price, notes)
+    verdict = apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth_rate=growth_pct)
 
     result.update({
         "verdict": verdict, "target_price": target_price,
@@ -697,7 +715,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
         cf = stock.cashflow
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
-            # Dropna and reverse to ensure chronological or at least clean iteration
             fcf_history = cf.loc['Free Cash Flow'].dropna()
 
         if fin is not None and not fin.empty:
@@ -1238,15 +1255,22 @@ def get_base64_image(image_path):
 
 logo_b64 = get_base64_image("Logo.png")
 
+# --- UI UPDATE: Logo perfectly integrates as the 'A' in ATHENAEUM ---
 if logo_b64:
     st.markdown(f'''
-    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 20px 0;">
-        <img src="data:image/png;base64,{logo_b64}" style="height: 48px; filter: invert(1); vertical-align: middle;">
-        <div class="swf-title" style="letter-spacing: 1.5px;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
+    <div class="swf-title-container" style="padding: 10px 0 30px 0;">
+        <div class="swf-title">
+            <img src="data:image/png;base64,{logo_b64}" style="height: 1.1em; filter: invert(1); margin-right: 2px; margin-bottom: 4px;">
+            <span>THENAEUM FINANCIAL INTELLIGENCE</span>
+        </div>
     </div>
     ''', unsafe_allow_html=True)
 else:
-    st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
+    st.markdown('''
+    <div class="swf-title-container" style="padding: 10px 0 30px 0;">
+        <div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div>
+    </div>
+    ''', unsafe_allow_html=True)
 
 col_input, col_btn = st.columns([4, 1])
 with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
