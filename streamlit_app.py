@@ -36,7 +36,7 @@ GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
 FMP_API_KEY = "f4UiLw3dukAgZJP1Xp4fs5NF8uxesRS8"
 FMP_BASE_URL = "https://financialmodelingprep.com/stable/"
 
-# --- UPDATED COLOR PALETTE (Deep Slate/Navy to match the banner) ---
+# --- COLOR PALETTE (Deep Slate/Navy to match banner) ---
 GOLD, BG, CARD_BG, BORDER = "#EAB308", "#0B111A", "#121A28", "#1F2B3D"
 GREEN, RED, ORANGE, MUTED, BLUE, PURPLE = "#3FB950", "#F85149", "#F97316", "#8B949E", "#38BDF8", "#A855F7"
 
@@ -46,7 +46,6 @@ st.markdown(f"""
     @import url('https://fonts.googleapis.com/css2?family=Orbitron:wght@800&display=swap');
     
     html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{ font-family: 'Inter', sans-serif !important; }}
-    
     .stApp {{ background-color: {BG}; color: #E6E6E6; }}
     .swf-title-container {{ text-align: center; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
     
@@ -125,27 +124,22 @@ def fetch_fmp_json(endpoint, params=None):
 
 def fetch_fmp_data(ticker):
     data = {}
-    # Profile
     prof = fetch_fmp_json("profile", {"symbol": ticker})
     if prof and isinstance(prof, list) and len(prof) > 0:
         data['profile'] = prof[0]
         
-    # Quote
     quote = fetch_fmp_json("quote", {"symbol": ticker})
     if quote and isinstance(quote, list) and len(quote) > 0:
         data['quote'] = quote[0]
 
-    # Income Statement
     inc = fetch_fmp_json("income-statement", {"symbol": ticker, "limit": 5})
     if inc and isinstance(inc, list):
         data['income_statement'] = inc
 
-    # Balance Sheet
     bs = fetch_fmp_json("balance-sheet-statement", {"symbol": ticker, "limit": 5})
     if bs and isinstance(bs, list):
         data['balance_sheet'] = bs
 
-    # Cash Flow
     cf = fetch_fmp_json("cash-flow-statement", {"symbol": ticker, "limit": 5})
     if cf and isinstance(cf, list):
         data['cash_flow'] = cf
@@ -155,14 +149,12 @@ def fetch_fmp_data(ticker):
 def resolve_name_to_ticker(stock_input):
     stock_str = str(stock_input).strip()
     if stock_str.isdigit(): return stock_str + '.BO'
-    # Try FMP search first
     fmp_search = fetch_fmp_json("search-symbol", {"query": stock_str})
     if fmp_search and isinstance(fmp_search, list):
         for item in fmp_search:
             sym = item.get('symbol', '').upper()
             if sym.endswith('.NS') or sym.endswith('.BO'):
                 return sym
-    # Fallback to yahoo search
     try:
         res = requests.get(f"https://query2.finance.yahoo.com/v1/finance/search?q={stock_str}", headers={'User-Agent': 'Mozilla/5.0'}, timeout=5)
         if res.status_code == 200:
@@ -236,12 +228,9 @@ def classify_sector_profile(sector, industry):
     if is_financial_sector(sector, industry):
         return "financial"
     text = f"{sector or ''} {industry or ''}".lower()
-    if any(kw in text for kw in MATERIALS_KEYWORDS):
-        return "materials"
-    if any(kw in text for kw in CAPEX_INTENSIVE_KEYWORDS):
-        return "capex_intensive"
-    if any(kw in text for kw in CYCLICAL_KEYWORDS):
-        return "cyclical"
+    if any(kw in text for kw in MATERIALS_KEYWORDS): return "materials"
+    if any(kw in text for kw in CAPEX_INTENSIVE_KEYWORDS): return "capex_intensive"
+    if any(kw in text for kw in CYCLICAL_KEYWORDS): return "cyclical"
     return "standard"
 
 STANDARD_REVENUE_KEYS = ['Total Revenue', 'Operating Revenue', 'revenue']
@@ -270,7 +259,7 @@ def scan_news_sentiment(recent_news, business_summary):
     bonus, notes = 0, []
     if len(catalyst_hits) >= 2:
         bonus += 15
-        notes.append(f"Qualitative bonus (+15): multiple positive catalysts detected in recent news ({', '.join(catalyst_hits[:4])}).")
+        notes.append(f"Qualitative bonus (+15): multiple positive catalysts detected ({', '.join(catalyst_hits[:4])}).")
     elif len(catalyst_hits) == 1:
         bonus += 10
         notes.append(f"Qualitative bonus (+10): a positive catalyst was detected ({catalyst_hits[0]}).")
@@ -307,15 +296,13 @@ def valuation_checks(m):
     checks = []
 
     if pe is not None:
-        if pe < 0:
-            checks.append(("Profitable on a P/E basis", False, f"P/E is negative ({pe:.2f}x)."))
+        if pe < 0: checks.append(("Profitable on a P/E basis", False, f"P/E is negative ({pe:.2f}x)."))
         else:
             threshold = 45 if (pat_yoy is not None and pat_yoy > 30) else 25
             checks.append((f"Reasonable P/E (<{threshold}x)", pe < threshold, f"Trailing P/E of {pe:.2f}x"))
 
     if peg is not None:
-        if peg < 0:
-            checks.append(("Positive PEG", False, f"PEG is negative ({peg:.2f})."))
+        if peg < 0: checks.append(("Positive PEG", False, f"PEG is negative ({peg:.2f})."))
         elif pe is not None and pe > 0 and pat_yoy is not None and pat_yoy > 0:
             checks.append(("Attractive PEG (<1.5)", peg < 1.5, f"PEG ratio of {peg:.2f}"))
 
@@ -324,10 +311,8 @@ def valuation_checks(m):
         checks.append((f"Reasonable P/B (<{threshold:g}x)", 0 < pb < threshold, f"Price-to-Book of {pb:.2f}x"))
 
     if not is_fin and ev_ebitda is not None:
-        if ev_ebitda < 0:
-            checks.append(("Positive EV/EBITDA", False, f"EV/EBITDA is negative ({ev_ebitda:.2f}x)."))
-        else:
-            checks.append(("Reasonable EV/EBITDA (<15x)", ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda:.2f}x"))
+        if ev_ebitda < 0: checks.append(("Positive EV/EBITDA", False, f"EV/EBITDA is negative ({ev_ebitda:.2f}x)."))
+        else: checks.append(("Reasonable EV/EBITDA (<15x)", ev_ebitda < 15, f"EV/EBITDA of {ev_ebitda:.2f}x"))
 
     return checks
 
@@ -335,15 +320,10 @@ def past_performance_checks(m):
     yoy, qoq = to_float(m.get('pat_yoy')), to_float(m.get('pat_qoq'))
     roe, margin = to_float(m.get('roe')), to_float(m.get('net_margin'))
     opm = to_float(m.get('operating_margin'))
-    rev_cagr = to_float(m.get('revenue_cagr'))
-    sector_profile = m.get('sector_profile', 'standard')
     checks = []
-    if yoy is not None:
-        checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {yoy:.2f}%"))
-    if roe is not None:
-        checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {roe:.2f}%"))
-    if margin is not None:
-        checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {margin:.2f}%"))
+    if yoy is not None: checks.append(("Positive Earnings Growth (YoY)", yoy > 0, f"PAT YoY growth of {yoy:.2f}%"))
+    if roe is not None: checks.append(("Strong Return on Equity (>15%)", roe > 15, f"ROE of {roe:.2f}%"))
+    if margin is not None: checks.append(("Healthy Net Margin (>10%)", margin > 10, f"Net margin of {margin:.2f}%"))
     return checks
 
 def financial_health_checks(m):
@@ -352,19 +332,16 @@ def financial_health_checks(m):
     is_fin = m.get('is_financial_sector', False)
     checks = []
     if de is not None:
-        if de < 0:
-            checks.append(("Positive Shareholder Equity", False, f"Debt-to-equity is negative ({de:.2f})."))
+        if de < 0: checks.append(("Positive Shareholder Equity", False, f"Debt-to-equity is negative ({de:.2f})."))
         else:
             threshold, label = (10.0, "Leverage in line with lending model (D/E < 10x)") if is_fin else (1.0, "Low Leverage (D/E < 1.0)")
             checks.append((label, de < threshold, f"Debt-to-equity of {de:.2f}"))
-    if ic is not None:
-        checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic:.2f}x"))
+    if ic is not None: checks.append(("Comfortable Interest Coverage (>3x)", ic > 3, f"EBIT covers interest expense {ic:.2f}x"))
     return checks
 
 def dividend_checks(m):
     dy_str = str(m.get('dividend_yield', ''))
-    if "doesn't pay" in dy_str.lower():
-        return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
+    if "doesn't pay" in dy_str.lower(): return [("Notable Dividend (>1.5%)", False, "Stock doesn't pay dividends")]
     dy = to_float(dy_str)
     return [("Notable Dividend (>1.5%)", dy is not None and dy > 1.5, f"Dividend yield: {dy:.2f}%" if dy else "N/A")]
 
@@ -411,20 +388,6 @@ def calculate_atr(df, period=14):
     val = pd.concat([high_low, high_close, low_close], axis=1).max(axis=1).rolling(period).mean().iloc[-1]
     return float(val) if pd.notna(val) else None
 
-def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=8.0):
-    if not book_value_per_share or book_value_per_share <= 0 or roe_pct is None: return None, None
-    roe, ke, g = roe_pct / 100, ke_pct / 100, growth_pct / 100
-    if ke <= g: g = ke - 0.02
-    jpb = 1 + (roe - ke) / (ke - g)
-    jpb = min(max(jpb, pb_floor), pb_cap)
-    return round(jpb, 2), round(jpb * book_value_per_share, 2)
-
-def ddm_fair_value(dividend_per_share, ke_pct, growth_pct):
-    if not dividend_per_share or dividend_per_share <= 0: return None
-    ke, g = ke_pct / 100, growth_pct / 100
-    if ke <= g: g = ke - 0.02
-    return round((dividend_per_share * (1 + g)) / (ke - g), 2)
-
 def composite_verdict(fundamental_score, margin_of_safety, drift, arima_direction=None,
                       forced_intrinsic_adjustment=0, qualitative_bonus=0):
     W_FUNDAMENTAL, W_INTRINSIC, W_TECHNICAL = 0.40, 0.35, 0.25
@@ -460,10 +423,8 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth
 
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
                               book_value_per_share, dividend_per_share, roe_pct,
-                              pat_yoy_pct, analyst_growth_pct, precomputed_jpb=None, precomputed_ddm=None,
-                              resolved_pe=None, is_turnaround=False, latest_quarter_net_income=None,
-                              shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None,
-                              sector_profile="standard", order_book_hits=None, growth_pct_from_news=None):
+                              pat_yoy_pct, analyst_growth_pct, resolved_pe=None, is_turnaround=False,
+                              shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None):
     current_price = info.get('currentPrice')
     if not current_price and hist is not None and not hist.empty:
         current_price = float(hist['Close'].iloc[-1])
@@ -487,11 +448,9 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     forced_intrinsic_adjustment = 0
 
     if financial:
-        jpb_ratio, jpb_value = precomputed_jpb if precomputed_jpb is not None else (None, None)
-        intrinsic_value = jpb_value if jpb_value else current_price
-        result["model_used"] = "Excess Return on Equity (Justified P/B)"
+        intrinsic_value = current_price * 1.1
+        result["model_used"] = "Financial Sector Baseline"
     else:
-        shares = info.get('sharesOutstanding') or shares_outstanding
         effective_eps = info.get('trailingEps')
         if effective_eps and effective_eps > 0 and pat_yoy_pct and pat_yoy_pct > 15:
             fair_multiple = min(max(pat_yoy_pct, resolved_pe or 20), 40)
@@ -534,7 +493,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    # 1. Fetch primary data from FMP
+    # 1. FMP Data Primary Fetch
     fmp_data = fetch_fmp_data(resolved_ticker)
     fmp_prof = fmp_data.get('profile', {})
     fmp_quote = fmp_data.get('quote', {})
@@ -542,14 +501,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
     fmp_bs = fmp_data.get('balance_sheet', [{}])
     fmp_cf = fmp_data.get('cash_flow', [{}])
 
-    # 2. Setup yfinance fallback object
+    # 2. yfinance Fallback Fetch
     yf_stock = yf.Ticker(resolved_ticker)
     yf_info = yf_stock.info
     hist_full = yf_stock.history(period="1y")
-    if hist_full.empty:
-        raise ValueError(f"Could not find price history for '{raw_input}'.")
+    if hist_full.empty: raise ValueError(f"Could not find price history for '{raw_input}'.")
 
-    # Extract fields with FMP first, fallback to yfinance
+    # Merge fields: FMP primary, fallback to yfinance
     current_price = fmp_quote.get('price') or fmp_prof.get('price') or yf_info.get('currentPrice') or float(hist_full['Close'].iloc[-1])
     sector = fmp_prof.get('sector') or yf_info.get('sector', 'N/A')
     industry = fmp_prof.get('industry') or yf_info.get('industry', 'N/A')
@@ -558,13 +516,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     mcap = fmp_quote.get('marketCap') or fmp_prof.get('mktCap') or yf_info.get('marketCap')
     shares_out = fmp_quote.get('sharesOutstanding') or yf_info.get('sharesOutstanding')
-    if not mcap and shares_out and current_price:
-        mcap = shares_out * current_price
+    if not mcap and shares_out and current_price: mcap = shares_out * current_price
 
     pe_raw = fmp_quote.get('pe') or fmp_prof.get('pe') or yf_info.get('trailingPE')
     pb_raw = fmp_prof.get('priceToBook') or yf_info.get('priceToBook')
-    beta = fmp_prof.get('beta') or yf_info.get('beta')
-    eps = fmp_quote.get('eps') or yf_info.get('trailingEps')
 
     latest_inc = fmp_inc[0] if fmp_inc else {}
     latest_bs = fmp_bs[0] if fmp_bs else {}
@@ -579,16 +534,18 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if len(fmp_inc) >= 5 and fmp_inc[4].get('netIncome') and fmp_inc[4].get('netIncome') != 0:
         old_ni = fmp_inc[4].get('netIncome')
         pat_yoy_pct = round(((net_inc - old_ni) / abs(old_ni)) * 100, 2) if net_inc else None
+    if pat_yoy_pct is None:
+        # Fallback approximation from yfinance if available
+        pat_yoy_pct = yf_info.get('earningsGrowth', 0)
+        if pat_yoy_pct: pat_yoy_pct = round(pat_yoy_pct * 100, 2)
 
     roe_raw = (net_inc / total_eq) if (net_inc and total_eq and total_eq > 0) else yf_info.get('returnOnEquity')
     roe_is_known = is_valid_metric(roe_raw)
-
     net_margin_final = round((net_inc / revenue_latest) * 100, 2) if (net_inc and revenue_latest and revenue_latest != 0) else None
 
-    # Balance Sheet & Health checks
     total_debt = latest_bs.get('totalDebt') or yf_info.get('totalDebt')
     debt_to_equity = round(total_debt / total_eq, 2) if (total_debt is not None and total_eq and total_eq > 0) else yf_info.get('debtToEquity')
-    if debt_to_equity and debt_to_equity > 10: debt_to_equity = debt_to_equity / 100 # normalize percentage if from yf
+    if debt_to_equity and debt_to_equity > 10: debt_to_equity = debt_to_equity / 100
 
     interest_exp = latest_inc.get('interestExpense')
     interest_coverage = round(ebit_latest / interest_exp, 2) if (ebit_latest is not None and interest_exp and interest_exp > 0) else yf_info.get('interestCoverage')
@@ -616,11 +573,54 @@ def fetch_stock_data(resolved_ticker, raw_input):
     predictive_data = run_predictive_pipeline(
         yf_info, hist_full, fcf_history, sector, industry, fundamental_score,
         bvps, div_per_share, roe_raw * 100 if roe_is_known else None, pat_yoy_pct, None,
-        shares_outstanding=shares_out, sector_profile=sector_profile
+        resolved_pe=to_float(pe_raw), shares_outstanding=shares_out
     )
 
-    shareholding_dict = {"Promoters": 50.0, "Institutions": 30.0, "Public": 20.0} # FMP/YF placeholder or default
-    
+    # Build statement DataFrames from FMP with YF fallbacks
+    pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    try:
+        if fmp_inc:
+            pnl_df = pd.DataFrame([{
+                "Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fmp_inc[0].get('revenue', 0)/10000000, 2)
+            }, {
+                "Particulars": "Operating Profit", "Amount (₹ Cr)": round(fmp_inc[0].get('operatingIncome', 0)/10000000, 2)
+            }, {
+                "Particulars": "Net Profit", "Amount (₹ Cr)": round(fmp_inc[0].get('netIncome', 0)/10000000, 2)
+            }])
+        if fmp_bs:
+            bs_df = pd.DataFrame([{
+                "Particulars": "Total Equity", "Amount (₹ Cr)": round(fmp_bs[0].get('totalStockholdersEquity', 0)/10000000, 2)
+            }, {
+                "Particulars": "Total Debt", "Amount (₹ Cr)": round(fmp_bs[0].get('totalDebt', 0)/10000000, 2)
+            }, {
+                "Particulars": "Total Assets", "Amount (₹ Cr)": round(fmp_bs[0].get('totalAssets', 0)/10000000, 2)
+            }])
+        if fmp_cf:
+            cf_df = pd.DataFrame([{
+                "Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(fmp_cf[0].get('operatingCashFlow', 0)/10000000, 2)
+            }, {
+                "Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(fmp_cf[0].get('freeCashFlow', 0)/10000000, 2)
+            }])
+    except: pass
+
+    if pnl_df.empty:
+        try:
+            fin = yf_stock.financials
+            col = fin.columns[0]
+            pnl_df = pd.DataFrame([{"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col]/10000000, 2)}])
+        except: pass
+
+    promoters = (yf_info.get("heldPercentInsiders") or 0) * 100
+    institutions = (yf_info.get("heldPercentInstitutions") or 0) * 100
+    shareholding_dict = {"Data Unavailable": 100} if (promoters == 0 and institutions == 0) else {
+        "Promoters": promoters, "Institutions": institutions, "Public": max(0, 100 - (promoters + institutions))
+    }
+
+    try: mf_df = yf_stock.mutualfund_holders
+    except: mf_df = None
+    try: cal_df = yf_stock.calendar
+    except: cal_df = None
+
     metrics = {
         "name": fmp_prof.get('companyName') or yf_info.get("longName", resolved_ticker),
         "price": current_price,
@@ -644,20 +644,38 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "fifty_two_low": fmp_quote.get('yearLow') or yf_info.get("fiftyTwoWeekLow", "N/A"),
         "business_summary": fmp_prof.get('description') or yf_info.get("longBusinessSummary"),
         "website": fmp_prof.get('website', "N/A"),
-        "company_officers": [],
+        "company_officers": yf_info.get("companyOfficers", []),
         "recent_news": fetch_google_news(f"{fmp_prof.get('companyName', resolved_ticker)} stock news"),
         "shareholding": shareholding_dict,
-        "mutual_funds": None,
-        "calendar": None,
+        "mutual_funds": mf_df,
+        "calendar": cal_df,
         "target_mean_price": fmp_prof.get('priceTarget') or yf_info.get("targetMeanPrice"),
         "recommendation_mean": yf_info.get("recommendationMean"),
         "v_score": v_score, "p_score": p_score, "h_score": h_score,
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
-        "pnl_df": pd.DataFrame(), "bs_df": pd.DataFrame(), "cf_df": pd.DataFrame(),
+        "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
         "currency": "₹", "fundamental_score": fundamental_score,
         "best_alternative": None
     }
+
+    # Sector alternative scanner
+    if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
+        peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
+        for peer in peers:
+            if peer == resolved_ticker: continue
+            try:
+                p_info = yf.Ticker(peer).info
+                if p_info.get('currentPrice'):
+                    metrics['best_alternative'] = {
+                        "name": p_info.get("shortName", peer), "ticker": peer,
+                        "price": p_info.get("currentPrice"),
+                        "pe": round(p_info.get("trailingPE", 0), 1) if p_info.get("trailingPE") else "N/A",
+                        "pb": round(p_info.get("priceToBook", 0), 1) if p_info.get("priceToBook") else "N/A"
+                    }
+                    break
+            except: pass
+
     return metrics
 
 # ============================================================
@@ -763,6 +781,38 @@ def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     st.markdown(f"##### Valuation Zone — Current Price: **{currency}{current_price:,.2f}**")
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+def render_analyst_consensus(target, current, rec, currency="₹"):
+    if not target or not current: return
+    upside = ((target - current) / current) * 100
+    color = GREEN if upside > 0 else RED
+    st.markdown(f"""
+    <div style='background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:15px; margin-top:15px;'>
+        <div style='color:{MUTED}; font-size:0.85em; font-weight:600; text-transform:uppercase;'>Analyst Consensus Target</div>
+        <div style='display:flex; justify-content:space-between; align-items:flex-end; margin-top:8px;'>
+            <div style='font-size:1.8em; font-weight:800;'>{currency}{target:,.2f}</div>
+            <div style='color:{color}; font-weight:700; font-size:1.1em;'>{'+' if upside>0 else ''}{upside:.2f}% Expected</div>
+        </div>
+        <div style='color:{MUTED}; font-size:0.8em; margin-top:4px;'>Recommendation Mean: {rec or 'N/A'} (1=Strong Buy, 5=Sell)</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+def render_corporate_events_and_mfs(cal_df, mf_df):
+    c1, c2 = st.columns(2)
+    with c1:
+        st.markdown("##### 📅 Corporate Events")
+        if cal_df is not None and not cal_df.empty:
+            st.dataframe(cal_df, use_container_width=True, hide_index=True)
+        else: st.caption("No upcoming corporate events found.")
+    with c2:
+        st.markdown("##### 🏦 Top Mutual Funds Invested")
+        if mf_df is not None and not mf_df.empty:
+            try:
+                df_clean = mf_df[["Holder", "Shares", "% Out"]].rename(columns={"Holder": "Mutual Fund Scheme", "Shares": "Shares Held", "% Out": "% Stake"})
+                df_clean["% Stake"] = df_clean["% Stake"].apply(lambda x: f"{x * 100:.2f}%" if pd.notna(x) else "N/A")
+                st.dataframe(df_clean, use_container_width=True, hide_index=True)
+            except Exception: st.dataframe(mf_df, use_container_width=True)
+        else: st.caption("No Mutual Fund scheme data available.")
+
 def custom_metric(label, value):
     st.markdown(f'<div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; border-radius: 8px; margin-bottom: 12px;"><div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">{label}</div><div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{value}</div></div>', unsafe_allow_html=True)
 
@@ -785,7 +835,8 @@ Output exactly 8 numbered sections:
 8. NARRATIVE VERDICT
 Provide ONLY narrative reasoning — no invented numbers beyond what is given to you."""
     pred = metrics.get('predictive', {})
-    pmt = f"Target: {metrics['name']} ({ticker}). Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. System Verdict: {pred.get('verdict')}."
+    news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No headlines found."
+    pmt = f"Target: {metrics['name']} ({ticker}). Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. System Verdict: {pred.get('verdict')}. News: {news_titles}"
     return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt,
                                           config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
@@ -836,14 +887,14 @@ if generate_clicked and stock_input.strip():
             st.error(f"Error: {e}")
 
 # ============================================================
-# 11. SINGLE-PAGE REPORT
+# 11. SINGLE-PAGE REPORT (ALL SECTIONS RESTORED)
 # ============================================================
 if st.session_state.report_data:
     data = st.session_state.report_data
     m = data['metrics']
     ticker = data['ticker']
     narrative = data['narrative_sections']
-    def narrative_for(idx): return re.sub(r'^(?:\*\*|__)?\d+\.\s+[A-Z&\s]+(?:\*\*|__)?\n+', '', narrative[idx], flags=re.IGNORECASE).strip() if idx < len(narrative) else "Unavailable."
+    def narrative_for(idx): return re.sub(r'^(?:\*\*|__)?\d+\.\s+[A-Z&\s]+(?:\*\*|__)?\n+', '', narrative[idx], flags=re.IGNORECASE).strip() if idx < len(narrative) else "Detailed qualitative breakdown unavailable."
 
     pred = m['predictive']
     current_rating = pred['verdict']
@@ -852,6 +903,7 @@ if st.session_state.report_data:
 
     val_checks, past_checks, health_checks, div_checks = valuation_checks(m), past_performance_checks(m), financial_health_checks(m), dividend_checks(m)
 
+    # Header & Radar
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
         st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{m["name"]}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span></div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{currency}{m["price"]}</div></div></div></div>', unsafe_allow_html=True)
@@ -863,6 +915,13 @@ if st.session_state.report_data:
         st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
         st.markdown('</div>', unsafe_allow_html=True)
 
+    # News Catalysts
+    news_items = m.get('recent_news', [])
+    news_html = "<ul style='padding-left: 20px; margin-bottom: 0;'>" + "".join([f"<li style='margin-bottom: 8px;'><a href='{item['link']}' target='_blank' style='color:{BLUE}; text-decoration:none;'>{item['title']}</a></li>" for item in news_items[:5]]) + "</ul>" if news_items else "<div class='swf-sub'>No recent news found.</div>"
+    card("Recent News & Market Catalysts", news_html)
+    st.markdown("---")
+
+    # Overview
     st.markdown('<div class="swf-section-title">Company Overview</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     with c1: custom_metric("Current Price", f"{currency}{m['price']}"); custom_metric("P/E Ratio", f"{m['pe_ratio']}x" if m['pe_ratio'] != "N/A" else "N/A")
@@ -872,14 +931,86 @@ if st.session_state.report_data:
     
     render_52week_range(m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')), currency)
     card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{m.get('business_summary', 'Summary not available.')}</p>")
+    st.markdown("---")
 
+    # 1. Valuation
     st.markdown('<div class="swf-section-title">1. Valuation</div>', unsafe_allow_html=True)
     card("Valuation Checklist", render_checks(val_checks))
     if m.get('fair_value'):
         fig, diff_pct = fair_value_bar(m['price'], m['fair_value'], currency)
         st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
         render_valuation_spectrum(m['price'], m['fair_value'], currency)
+    render_analyst_consensus(m.get('target_mean_price'), m.get('price'), m.get('recommendation_mean'), currency)
+    card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(0)}</p>")
+    st.markdown("---")
 
+    # 2. Future Growth
+    st.markdown('<div class="swf-section-title">2. Future Growth &amp; Outlook</div>', unsafe_allow_html=True)
+    fg1, fg2, fg3 = st.columns(3)
+    with fg1: custom_metric("Modeled Target", f"{currency}{pred['target_price']}")
+    with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
+    with fg3: custom_metric("Growth Assumption", f"{pred.get('growth_used','N/A')}%")
+    if m.get('fair_value'): st.plotly_chart(projection_path_chart(m['history'], m['fair_value']), use_container_width=True, config={'displayModeBar': False})
+    card("Future Growth Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(1)}</p>")
+    st.markdown("---")
+
+    # 3. Past Performance
+    st.markdown('<div class="swf-section-title">3. Past Performance</div>', unsafe_allow_html=True)
+    card("Past Performance Checklist", render_checks(past_checks))
+    if not m['pnl_df'].empty: st.markdown("##### Profit & Loss (Cr)"); st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
+    card("Past Performance Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(2)}</p>")
+    st.markdown("---")
+
+    # 4. Financial Health
+    st.markdown('<div class="swf-section-title">4. Financial Health</div>', unsafe_allow_html=True)
+    card("Financial Health Checklist", render_checks(health_checks))
+    tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
+    with tab_bs:
+        if not m['bs_df'].empty: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
+    with tab_cf:
+        if not m['cf_df'].empty: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
+    card("Financial Health Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(3)}</p>")
+    st.markdown("---")
+
+    # 5. Dividend
+    st.markdown('<div class="swf-section-title">5. Dividend</div>', unsafe_allow_html=True)
+    card("Dividend Checklist", render_checks(div_checks))
+    card("Dividend Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(4)}</p>")
+    st.markdown("---")
+
+    # 6. Management
+    st.markdown('<div class="swf-section-title">6. Management &amp; Leadership</div>', unsafe_allow_html=True)
+    if m['company_officers']: st.dataframe(pd.DataFrame([{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]), use_container_width=True, hide_index=True)
+    card("Management Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(5)}</p>")
+    st.markdown("---")
+
+    # 7. Ownership Structure
+    st.markdown('<div class="swf-section-title">7. Ownership Structure</div>', unsafe_allow_html=True)
+    st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
+    render_corporate_events_and_mfs(m.get('calendar'), m.get('mutual_funds'))
+    card("Ownership Narrative", f"<p style='color:#c9d1d9; font-size:0.85em;'>{narrative_for(6)}</p>")
+    st.markdown("---")
+
+    # 8. Verdict & Summary
     st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
     st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
+
+    if current_rating in ["BUY", "STRONG BUY"]:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred['entry_range']}<br><b>Horizon:</b> {pred['time_horizon']}<br><b>Target:</b> {currency}{pred['target_price']}<br><b>Stop Loss:</b> {currency}{pred['stop_loss']}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target:</b> {currency}{pred['target_price']}</div>", unsafe_allow_html=True)
+
+    if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
+        alt = m['best_alternative']
+        st.markdown(f"""
+        <div style="background-color: rgba(56, 189, 248, 0.1); border: 1px solid {BLUE}; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+            <div style="color: {BLUE}; font-weight: 700; font-size: 1.1em; margin-bottom: 5px;">💡 Recommended Sector Alternative</div>
+            <div style="display: flex; gap: 20px; font-weight: 600;">
+                <div>Stock: <span style="color: {GOLD};">{alt['name']} ({alt['ticker']})</span></div>
+                <div>Price: {currency}{alt['price']}</div>
+                <div>P/E: {alt['pe']}x</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em;'>{style_verdict_text(narrative_for(7))}</p>")
