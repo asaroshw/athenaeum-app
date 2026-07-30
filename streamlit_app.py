@@ -1255,13 +1255,13 @@ def get_base64_image(image_path):
 
 logo_b64 = get_base64_image("Logo.png")
 
-# --- UI UPDATE: Enlarged, centered logo integration ---
+# --- UI UPDATE: Drop-cap aligned logo ---
 if logo_b64:
     st.markdown(f'''
     <div class="swf-title-container" style="padding: 10px 0 30px 0;">
-        <div class="swf-title" style="display: flex; align-items: center; justify-content: center;">
-            <img src="data:image/png;base64,{logo_b64}" style="height: 2.2em; filter: invert(1); margin-right: 8px;">
-            <span>THENAEUM FINANCIAL INTELLIGENCE</span>
+        <div class="swf-title" style="display: flex; align-items: flex-end; justify-content: center;">
+            <img src="data:image/png;base64,{logo_b64}" style="height: 1.8em; filter: invert(1); margin-right: 4px; transform: translateY(6px);">
+            <span style="line-height: 0.85;">THENAEUM FINANCIAL INTELLIGENCE</span>
         </div>
     </div>
     ''', unsafe_allow_html=True)
@@ -1271,7 +1271,7 @@ else:
         <div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div>
     </div>
     ''', unsafe_allow_html=True)
-
+    
 col_input, col_btn = st.columns([4, 1])
 with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
