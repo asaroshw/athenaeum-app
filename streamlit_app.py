@@ -189,17 +189,17 @@ def classify_sector_profile(sector, industry):
 
 STANDARD_REVENUE_KEYS = ['Total Revenue', 'Operating Revenue']
 BANK_REVENUE_KEYS = ['Total Revenue', 'Total Operating Income', 'Interest Income',
-                      'Total Interest Income', 'Operating Revenue']
+                     'Total Interest Income', 'Operating Revenue']
 INTEREST_INCOME_KEYS = ['Interest Income', 'Total Interest Income']
 
 # ============================================================
 # 4. QUALITATIVE SIGNAL SCANNER
 # ============================================================
 CATALYST_KEYWORDS = ['acqui', 'profit', 'surge', 'turnaround', 'wins', ' win ', 'order book',
-                      'expansion', 'partnership', 'record revenue', 'upgrade', 'beat estimates',
-                      'demerger', 'stake sale', 'contract']
+                     'expansion', 'partnership', 'record revenue', 'upgrade', 'beat estimates',
+                     'demerger', 'stake sale', 'contract']
 RISK_KEYWORDS = ['fraud', 'resign', 'default', 'probe', 'raid', 'downgrade', 'scam',
-                  'investigation', 'lawsuit', 'bankruptcy', 'insolvency', 'delisting']
+                 'investigation', 'lawsuit', 'bankruptcy', 'insolvency', 'delisting']
 ORDER_BOOK_KEYWORDS = ['order book', 'order win', 'wins order', 'contract win', 'crore order',
                         'export order', 'multi-year contract', 'l1 bidder', 'lowest bidder',
                         'capex expansion', 'capacity expansion', 'new plant', 'guidance']
@@ -214,14 +214,14 @@ def scan_news_sentiment(recent_news, business_summary):
     if len(catalyst_hits) >= 2:
         bonus += 15
         notes.append(f"Qualitative bonus (+15): multiple positive catalysts detected in recent "
-                      f"news/business summary ({', '.join(catalyst_hits[:4])}).")
+                     f"news/business summary ({', '.join(catalyst_hits[:4])}).")
     elif len(catalyst_hits) == 1:
         bonus += 10
         notes.append(f"Qualitative bonus (+10): a positive catalyst was detected ({catalyst_hits[0]}).")
     if risk_hits:
         bonus -= 20
         notes.append(f"Qualitative penalty (-20): risk keyword(s) detected in recent news "
-                      f"({', '.join(risk_hits[:3])}) — treat with caution.")
+                     f"({', '.join(risk_hits[:3])}) — treat with caution.")
     return bonus, notes
 
 def extract_order_book_signal(recent_news, business_summary):
@@ -419,28 +419,12 @@ def composite_verdict(fundamental_score, margin_of_safety, drift, arima_directio
 VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
 def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth_pct=None):
-    """Dynamic upside ceiling tied to verified growth rate (Fix 2).
-
-    The old static 150% ceiling falsely rejected valid high-growth compounders:
-    a 50% PAT compounder projected over a 2-3 year horizon produces ~160%+ upside
-    by pure arithmetic — penalizing that with a 'data trap' label is wrong.
-
-    New logic:
-      growth_pct >= 25%  -> ceiling 250% (legitimate compounder headroom)
-      growth_pct >= 15%  -> ceiling 200% (above-average growth, some headroom)
-      otherwise           -> ceiling 150% (standard, original behaviour)
-
-    Extreme upside above ceiling is now flagged as OBSERVE (possible data anomaly)
-    rather than DON'T BUY — it prevents a trade while still surfacing the signal
-    for human review instead of silently burying it.
-    """
     if target_price is None or not current_price:
         return verdict
 
     downside_pct = (current_price - target_price) / current_price
     upside_pct   = (target_price - current_price) / current_price
 
-    # Downside arm — unchanged behaviour
     if downside_pct > 0.40:
         if verdict != "DON'T BUY":
             notes.append(f"Model indicates {round(downside_pct*100,1)}% downside. Forced to DON'T BUY.")
@@ -456,35 +440,32 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth
             notes.append(f"Downgraded to OBSERVE: modeled target is {round(downside_pct*100,1)}% below current price.")
             return "OBSERVE"
 
-    # Upside arm — dynamic ceiling (Fix 2)
     g = growth_pct if (growth_pct and growth_pct > 0) else 0
     if g >= 25:
-        max_upside = 2.50  # 250% for verified high-growth compounders
+        max_upside = 2.50 
     elif g >= 15:
-        max_upside = 2.00  # 200% for above-average growers
+        max_upside = 2.00 
     else:
-        max_upside = 1.50  # 150% default (unchanged for standard companies)
+        max_upside = 1.50 
 
     if upside_pct > max_upside:
         notes.append(
             f"Upside of +{round(upside_pct*100,1)}% exceeds the growth-adjusted ceiling of "
             f"{round(max_upside*100,0):.0f}% (growth_pct={round(g,1)}%). "
-            f"Flagged as a possible data anomaly — downgraded to OBSERVE for human review. "
-            f"If the target price is independently justified, override manually."
+            f"Flagged as a possible data anomaly — downgraded to OBSERVE for human review."
         )
-        # OBSERVE, not DON'T BUY: the signal is surfaced rather than buried
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
             return "OBSERVE"
 
     return verdict
 
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
-                              book_value_per_share, dividend_per_share, roe_pct,
-                              pat_yoy_pct, analyst_growth_pct,
-                              precomputed_jpb=None, precomputed_ddm=None,
-                              resolved_pe=None, is_turnaround=False, latest_quarter_net_income=None,
-                              shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None,
-                              sector_profile="standard", order_book_hits=None, growth_pct_from_news=None):
+                            book_value_per_share, dividend_per_share, roe_pct,
+                            pat_yoy_pct, analyst_growth_pct,
+                            precomputed_jpb=None, precomputed_ddm=None,
+                            resolved_pe=None, is_turnaround=False, latest_quarter_net_income=None,
+                            shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None,
+                            sector_profile="standard", order_book_hits=None, growth_pct_from_news=None):
     current_price = info.get('currentPrice')
     if not current_price and hist is not None and not hist.empty:
         current_price = float(hist['Close'].iloc[-1])
@@ -530,7 +511,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
 
     if financial:
         jpb_ratio, jpb_value = (precomputed_jpb if precomputed_jpb is not None
-                                  else justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share))
+                                else justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share))
         ddm_val = precomputed_ddm if precomputed_ddm is not None else ddm_fair_value(dividend_per_share, ke_pct, growth_pct)
         if jpb_value and ddm_val:
             intrinsic_value = (jpb_value + ddm_val) / 2
@@ -542,8 +523,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             intrinsic_value = ddm_val
             result["model_used"] = "Dividend Discount Model (DDM)"
         else:
-            # No Justified P/B, no DDM: force a 30% haircut so this path generates
-            # a genuine negative margin of safety rather than a misleading 0%.
             intrinsic_value = round(current_price * 0.70, 2)
             forced_intrinsic_adjustment = -30
             result["model_used"] = "Defensive Haircut — financial sector (no P/B or DDM inputs)"
@@ -555,10 +534,8 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
             effective_eps = (latest_quarter_net_income / shares) * 4
             
-        # --- FIXED PRIORITY: PEG / Earnings Multiple Override for High Growth ---
         if effective_eps and effective_eps > 0 and pat_yoy_pct and pat_yoy_pct > 15:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
-            # Use growth rate to scale a justified forward multiple (PEG = 1.0 baseline)
             fair_multiple = min(max(pat_yoy_pct, historical_pe), 40)
             intrinsic_value = round(effective_eps * fair_multiple, 2)
             result["model_used"] = "PEG Adjusted Earnings Multiple"
@@ -583,10 +560,6 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
                 intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
                 result["model_used"] = "2-Stage DCF (Free Cash Flow)"
             else:
-                # FCF is negative or zero — capex-distorted companies should not get a
-                # free +25% markup just for having negative FCF. Use a book-value haircut
-                # if available (still conservative), or fall through to book/EPS paths below.
-                # Setting intrinsic_value = None here lets the elif chain pick it up.
                 intrinsic_value = None
                 result["model_used"] = "FCF Negative — falling through to earnings/book-value fallback"
                 
@@ -597,25 +570,15 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             result["model_used"] = "Target P/E (defensive)"
             
         elif book_value_per_share and book_value_per_share > 0:
-            # 0.8× haircut: when no earnings/FCF model is available, we cannot justify
-            # paying a premium over book — a distressed or uncertain scenario demands a
-            # discount, not a markup.
             intrinsic_value = round(book_value_per_share * 0.8, 2)
             result["model_used"] = "Book Value Haircut (defensive — no FCF/EPS model available)"
 
         else:
-            # Nothing to model on — apply a 25% haircut to current price to force a
-            # meaningful negative margin of safety rather than a misleading neutral one.
             intrinsic_value = round(current_price * 0.75, 2)
             result["model_used"] = "Defensive Haircut (no reliable data for any valuation model)"
 
-    # Guard: a legitimate fallback (e.g. FCF Neutralized = 1.25×) may produce a value
-    # that coincidentally equals current_price only if 1.25×price == price, which is
-    # impossible. The only real case where intrinsic_value == current_price is the
-    # "no data at all" sentinel — apply a defensive haircut rather than a silent 12%
-    # bump that creates a false 0% margin of safety (Bug 1 from previous report).
     if not intrinsic_value or intrinsic_value <= 0:
-        intrinsic_value = round(current_price * 0.75, 2)   # 25% haircut as a floor
+        intrinsic_value = round(current_price * 0.75, 2)   
         result["model_used"] = "Defensive Haircut (no reliable valuation data)"
 
     target_price = round(intrinsic_value, 2)
@@ -623,12 +586,19 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
 
     atr = calculate_atr(hist)
     support = calculate_vwap_support(hist) or (current_price * 0.92)
-    entry_low = round(support, 2)
-    entry_high = round(support + (0.5 * atr if atr else current_price * 0.02), 2)
+    
+    # --- REALISTIC ENTRY PRICE & STOP LOSS BOUNDS ---
+    support_floor = current_price * 0.85
+    effective_support = max(support, support_floor)
+    
+    entry_low = round(effective_support, 2)
+    entry_high = round(entry_low + (0.5 * atr if atr else current_price * 0.02), 2)
     if entry_low > current_price:
         entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
+        
     raw_stop_loss = entry_low - (1.5 * atr if atr else entry_low * 0.05)
-    stop_loss = round(max(current_price * 0.5, raw_stop_loss), 2)
+    stop_loss_floor = entry_low * 0.80
+    stop_loss = round(max(current_price * 0.5, max(stop_loss_floor, raw_stop_loss)), 2)
 
     momentum, horizon, drift = "NEUTRAL", "3-5 Years", None
     try:
@@ -671,16 +641,160 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     return result
 
 # ============================================================
-# 7. MASTER DATA FETCH
+# 7. MASTER DATA FETCH (FMP PRIMARY + YFINANCE FALLBACK)
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    stock = yf.Ticker(resolved_ticker)
-    hist_full = stock.history(period="1y")
-    if hist_full.empty: raise ValueError(f"Could not find '{raw_input}'.")
+    fmp_key = st.secrets.get("FMP_API_KEY", "")
+    info = {}
+    hist_full = pd.DataFrame()
+    pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    fcf_history = None
+    net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, None
+    revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
+    pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
+    latest_quarter_net_income = None
+    revenue_cagr_pct = None
+    mf_df, cal_df = None, None
+    
+    fmp_success = False
+    if fmp_key:
+        try:
+            fmp_ticker = resolved_ticker.upper()
+            prof_res = requests.get(f"https://financialmodelingprep.com/api/v3/profile/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            quote_res = requests.get(f"https://financialmodelingprep.com/api/v3/quote/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            hist_res = requests.get(f"https://financialmodelingprep.com/api/v3/historical-price-full/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            
+            if prof_res.status_code == 200 and quote_res.status_code == 200:
+                prof_data = prof_res.json()
+                quote_data = quote_res.json()
+                if prof_data and quote_data:
+                    p = prof_data[0]
+                    q = quote_data[0]
+                    info["longName"] = p.get("companyName", resolved_ticker)
+                    info["sector"] = p.get("sector", "N/A")
+                    info["industry"] = p.get("industry", "N/A")
+                    info["longBusinessSummary"] = p.get("description", "")
+                    info["website"] = p.get("website", "N/A")
+                    info["beta"] = to_float(p.get("beta", 1.0))
+                    info["dividendRate"] = to_float(p.get("lastDiv", 0))
+                    
+                    current_price = to_float(q.get("price"))
+                    info["currentPrice"] = current_price
+                    info["marketCap"] = to_float(q.get("marketCap"))
+                    info["trailingPE"] = to_float(q.get("pe"))
+                    info["sharesOutstanding"] = to_float(q.get("sharesOutstanding"))
+                    info["fiftyTwoWeekHigh"] = to_float(q.get("yearHigh"))
+                    info["fiftyTwoWeekLow"] = to_float(q.get("yearLow"))
+                    
+            if hist_res.status_code == 200:
+                h_data = hist_res.json().get("historical", [])
+                if h_data:
+                    df_h = pd.DataFrame(h_data)
+                    df_h['date'] = pd.to_datetime(df_h['date'])
+                    df_h = df_h.sort_values('date').reset_index(drop=True)
+                    df_h = df_h.rename(columns={'date': 'Date', 'close': 'Close', 'high': 'High', 'low': 'Low', 'open': 'Open', 'volume': 'Volume'})
+                    hist_full = df_h[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
+            
+            inc_res = requests.get(f"https://financialmodelingprep.com/api/v3/income-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            bs_res = requests.get(f"https://financialmodelingprep.com/api/v3/balance-sheet-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            cf_res = requests.get(f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            q_inc_res = requests.get(f"https://financialmodelingprep.com/api/v3/income-statement/{fmp_ticker}?period=quarter&limit=8&apikey={fmp_key}", timeout=5)
+            
+            if inc_res.status_code == 200 and bs_res.status_code == 200 and cf_res.status_code == 200:
+                inc_list = inc_res.json()
+                bs_list = bs_res.json()
+                cf_list = cf_res.json()
+                q_inc_list = q_inc_res.json() if q_inc_res.status_code == 200 else []
+                
+                if inc_list:
+                    latest_inc = inc_list[0]
+                    revenue_latest = to_float(latest_inc.get("revenue"))
+                    ebit_latest = to_float(latest_inc.get("operatingIncome"))
+                    ebitda_val = to_float(latest_inc.get("ebitda"))
+                    interest_exp_latest = to_float(latest_inc.get("interestExpense"))
+                    net_inc = to_float(latest_inc.get("netIncome"))
+                    info["trailingEps"] = to_float(latest_inc.get("eps"))
+                    
+                    if len(inc_list) >= 2 and to_float(inc_list[-1].get("revenue")) and to_float(inc_list[-1].get("revenue")) > 0:
+                        years = len(inc_list) - 1
+                        rev_latest_val = to_float(inc_list[0].get("revenue"))
+                        rev_oldest_val = to_float(inc_list[-1].get("revenue"))
+                        revenue_cagr_pct = round((((rev_latest_val / rev_oldest_val) ** (1 / years)) - 1) * 100, 2)
+                        
+                    pnl_df = pd.DataFrame([
+                        {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(revenue_latest / 10000000, 2) if revenue_latest else "—"},
+                        {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(ebit_latest / 10000000, 2) if ebit_latest else "—"},
+                        {"Particulars": "Net Profit", "Amount (₹ Cr)": round(net_inc / 10000000, 2) if net_inc else "—"}
+                    ])
 
-    info = stock.info
-    current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
+                if q_inc_list and len(q_inc_list) >= 5:
+                    latest_q = q_inc_list[0]
+                    prev_q = q_inc_list[1]
+                    year_ago_q = q_inc_list[4]
+                    latest_quarter_net_income = to_float(latest_q.get("netIncome"))
+                    
+                    q_ni_curr = to_float(latest_q.get("netIncome"))
+                    q_ni_prev = to_float(prev_q.get("netIncome"))
+                    q_ni_yago = to_float(year_ago_q.get("netIncome"))
+                    
+                    if q_ni_prev and q_ni_prev != 0:
+                        pat_qoq = round(((q_ni_curr - q_ni_prev) / abs(q_ni_prev)) * 100, 2)
+                    if q_ni_yago and q_ni_yago != 0:
+                        pat_yoy_pct = round(((q_ni_curr - q_ni_yago) / abs(q_ni_yago)) * 100, 2)
+                        
+                    q_rev_curr = to_float(latest_q.get("revenue"))
+                    if q_rev_curr and q_rev_curr != 0 and q_ni_curr is not None:
+                        net_margin_final = round((q_ni_curr / q_rev_curr) * 100, 2)
+
+                if bs_list:
+                    latest_bs = bs_list[0]
+                    total_eq = to_float(latest_bs.get("totalStockholdersEquity"))
+                    total_assets_latest = to_float(latest_bs.get("totalAssets"))
+                    total_debt = to_float(latest_bs.get("totalDebt"))
+                    
+                    info["priceToBook"] = to_float(quote_data[0].get("priceToBook") if quote_data else (info.get("marketCap") / total_eq if info.get("marketCap") and total_eq else None))
+                    info["debtToEquity"] = round((total_debt / total_eq) * 100, 2) if total_debt is not None and total_eq and total_eq > 0 else None
+                    info["bookValue"] = round(total_eq / info.get("sharesOutstanding"), 2) if total_eq and info.get("sharesOutstanding") else None
+                    
+                    bs_df = pd.DataFrame([
+                        {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
+                        {"Particulars": "Total Debt", "Amount (₹ Cr)": round(total_debt / 10000000, 2) if total_debt else "—"},
+                        {"Particulars": "Total Assets", "Amount (₹ Cr)": round(total_assets_latest / 10000000, 2) if total_assets_latest else "—"}
+                    ])
+
+                if cf_list:
+                    fcf_series_list = []
+                    for cf_item in cf_list:
+                        fcf_val = to_float(cf_item.get("freeCashFlow"))
+                        if fcf_val is not None: fcf_series_list.append(fcf_val)
+                    if fcf_series_list:
+                        fcf_history = pd.Series(fcf_series_list)
+                    
+                    latest_cf = cf_list[0]
+                    ocf_latest = to_float(latest_cf.get("operatingCashFlow"))
+                    fcf_latest = to_float(latest_cf.get("freeCashFlow"))
+                    cf_df = pd.DataFrame([
+                        {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(ocf_latest / 10000000, 2) if ocf_latest else "—"},
+                        {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(fcf_latest / 10000000, 2) if fcf_latest else "—"}
+                    ])
+
+                fmp_success = True
+        except Exception:
+            fmp_success = False
+
+    # Fallback to yfinance if FMP failed, key is missing, or historical data is empty
+    stock = None
+    if not fmp_success or hist_full.empty or not info.get("currentPrice"):
+        stock = yf.Ticker(resolved_ticker)
+        hist_full = stock.history(period="1y")
+        if hist_full.empty: raise ValueError(f"Could not find '{raw_input}'.")
+
+        info = stock.info
+        current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
+        info["currentPrice"] = current_price
+    
+    current_price = info.get("currentPrice")
     currency_symbol = "₹"
 
     sector = info.get("sector", "N/A")
@@ -689,93 +803,86 @@ def fetch_stock_data(resolved_ticker, raw_input):
     sector_profile = classify_sector_profile(sector, industry)
     revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
 
-    pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
-    revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
-    fcf_history = None
-    pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
-    latest_quarter_net_income = None
-    revenue_cagr_pct = None
+    # Fallback filling for financial statements if FMP didn't provide them
+    if pnl_df.empty and stock:
+        try:
+            q_fin = stock.quarterly_financials
+            if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
+                ni_series = q_fin.loc['Net Income'].dropna()
+                if len(ni_series) > 0:
+                    net_inc = float(ni_series.iloc[:4].sum())
+                    latest_quarter_net_income = float(ni_series.iloc[0])
+                if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
+                    pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
+                if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
+                    pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
+                rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
+                if rev_key_found and len(ni_series) > 0:
+                    rev_series = q_fin.loc[rev_key_found].dropna()
+                    if len(rev_series) > 0 and rev_series.iloc[0] != 0:
+                        net_margin_final = round((ni_series.iloc[0] / rev_series.iloc[0]) * 100, 2)
 
-    try:
-        q_fin = stock.quarterly_financials
-        if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
-            ni_series = q_fin.loc['Net Income'].dropna()
-            if len(ni_series) > 0:
-                net_inc = float(ni_series.iloc[:4].sum())
-                latest_quarter_net_income = float(ni_series.iloc[0])
-            if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
-                pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
-            if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
-                pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
-            rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
-            if rev_key_found and len(ni_series) > 0:
-                rev_series = q_fin.loc[rev_key_found].dropna()
-                if len(rev_series) > 0 and rev_series.iloc[0] != 0:
-                    net_margin_final = round((ni_series.iloc[0] / rev_series.iloc[0]) * 100, 2)
+            fin = stock.financials
+            if fin is not None and not fin.empty:
+                rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
+                if rev_key_found and pd.notna(fin.loc[rev_key_found].iloc[0]):
+                    revenue_latest = float(fin.loc[rev_key_found].iloc[0])
+                    rev_series_annual = fin.loc[rev_key_found].dropna()
+                    if len(rev_series_annual) >= 2 and rev_series_annual.iloc[-1] > 0:
+                        years = len(rev_series_annual) - 1
+                        revenue_cagr_pct = round((((rev_series_annual.iloc[0] / rev_series_annual.iloc[-1]) ** (1 / years)) - 1) * 100, 2)
+                for k in ['EBIT', 'Operating Income']:
+                    if k in fin.index and pd.notna(fin.loc[k].iloc[0]):
+                        ebit_latest = float(fin.loc[k].iloc[0]); break
+                if 'Interest Expense' in fin.index:
+                    ie_series = fin.loc['Interest Expense'].dropna()
+                    if len(ie_series) > 0:
+                        interest_exp_latest = float(ie_series.iloc[0])
+                ii_key_found = next((k for k in INTEREST_INCOME_KEYS if k in fin.index), None)
+                if ii_key_found:
+                    ii_series = fin.loc[ii_key_found].dropna()
+                    if len(ii_series) > 0:
+                        interest_income_latest = float(ii_series.iloc[0])
 
-        fin = stock.financials
-        if fin is not None and not fin.empty:
-            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
-            if rev_key_found and pd.notna(fin.loc[rev_key_found].iloc[0]):
-                revenue_latest = float(fin.loc[rev_key_found].iloc[0])
-                rev_series_annual = fin.loc[rev_key_found].dropna()
-                if len(rev_series_annual) >= 2 and rev_series_annual.iloc[-1] > 0:
-                    years = len(rev_series_annual) - 1
-                    revenue_cagr_pct = round((((rev_series_annual.iloc[0] / rev_series_annual.iloc[-1]) ** (1 / years)) - 1) * 100, 2)
-            for k in ['EBIT', 'Operating Income']:
-                if k in fin.index and pd.notna(fin.loc[k].iloc[0]):
-                    ebit_latest = float(fin.loc[k].iloc[0]); break
-            if 'Interest Expense' in fin.index:
-                ie_series = fin.loc['Interest Expense'].dropna()
-                if len(ie_series) > 0:
-                    interest_exp_latest = float(ie_series.iloc[0])
-            ii_key_found = next((k for k in INTEREST_INCOME_KEYS if k in fin.index), None)
-            if ii_key_found:
-                ii_series = fin.loc[ii_key_found].dropna()
-                if len(ii_series) > 0:
-                    interest_income_latest = float(ii_series.iloc[0])
+            bs = stock.balance_sheet
+            if bs is not None and not bs.empty:
+                for k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity']:
+                    if k in bs.index:
+                        eq_series = bs.loc[k].dropna()
+                        if len(eq_series) > 0:
+                            total_eq = float(eq_series.iloc[0]); break
+                if 'Total Assets' in bs.index:
+                    ta_series = bs.loc['Total Assets'].dropna()
+                    if len(ta_series) > 0:
+                        total_assets_latest = float(ta_series.iloc[0])
 
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            for k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity']:
-                if k in bs.index:
-                    eq_series = bs.loc[k].dropna()
-                    if len(eq_series) > 0:
-                        total_eq = float(eq_series.iloc[0]); break
-            if 'Total Assets' in bs.index:
-                ta_series = bs.loc['Total Assets'].dropna()
-                if len(ta_series) > 0:
-                    total_assets_latest = float(ta_series.iloc[0])
+            cf = stock.cashflow
+            if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
+                fcf_history = cf.loc['Free Cash Flow'].dropna()
 
-        cf = stock.cashflow
-        if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
-            # Dropna and reverse to ensure chronological or at least clean iteration
-            fcf_history = cf.loc['Free Cash Flow'].dropna()
-
-        if fin is not None and not fin.empty:
-            col = fin.columns[0]
-            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
-            pnl_df = pd.DataFrame([
-                {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fin.loc[rev_key_found, col] / 10000000, 2) if rev_key_found else "—"},
-                {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(fin.loc['Operating Income', col] / 10000000, 2) if 'Operating Income' in fin.index else "—"},
-                {"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col] / 10000000, 2) if 'Net Income' in fin.index else "—"}
-            ])
-        if bs is not None and not bs.empty:
-            col = bs.columns[0]
-            bs_df = pd.DataFrame([
-                {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
-                {"Particulars": "Total Debt", "Amount (₹ Cr)": round(bs.loc['Total Debt', col] / 10000000, 2) if 'Total Debt' in bs.index else "—"},
-                {"Particulars": "Total Assets", "Amount (₹ Cr)": round(bs.loc['Total Assets', col] / 10000000, 2) if 'Total Assets' in bs.index else "—"}
-            ])
-        if cf is not None and not cf.empty:
-            col = cf.columns[0]
-            cf_df = pd.DataFrame([
-                {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(cf.loc['Operating Cash Flow', col] / 10000000, 2) if 'Operating Cash Flow' in cf.index else "—"},
-                {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(cf.loc['Free Cash Flow', col] / 10000000, 2) if 'Free Cash Flow' in cf.index else "—"}
-            ])
-    except Exception:
-        pass
+            if fin is not None and not fin.empty:
+                col = fin.columns[0]
+                rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
+                pnl_df = pd.DataFrame([
+                    {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fin.loc[rev_key_found, col] / 10000000, 2) if rev_key_found else "—"},
+                    {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(fin.loc['Operating Income', col] / 10000000, 2) if 'Operating Income' in fin.index else "—"},
+                    {"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col] / 10000000, 2) if 'Net Income' in fin.index else "—"}
+                ])
+            if bs is not None and not bs.empty:
+                col = bs.columns[0]
+                bs_df = pd.DataFrame([
+                    {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
+                    {"Particulars": "Total Debt", "Amount (₹ Cr)": round(bs.loc['Total Debt', col] / 10000000, 2) if 'Total Debt' in bs.index else "—"},
+                    {"Particulars": "Total Assets", "Amount (₹ Cr)": round(bs.loc['Total Assets', col] / 10000000, 2) if 'Total Assets' in bs.index else "—"}
+                ])
+            if cf is not None and not cf.empty:
+                col = cf.columns[0]
+                cf_df = pd.DataFrame([
+                    {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(cf.loc['Operating Cash Flow', col] / 10000000, 2) if 'Operating Cash Flow' in cf.index else "—"},
+                    {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(cf.loc['Free Cash Flow', col] / 10000000, 2) if 'Free Cash Flow' in cf.index else "—"}
+                ])
+        except Exception:
+            pass
 
     shares_out = info.get("sharesOutstanding")
     mcap = info.get("marketCap")
@@ -899,19 +1006,14 @@ def fetch_stock_data(resolved_ticker, raw_input):
             "Public": max(0, 100 - (promoters + institutions))
         }
 
-    try:
-        mf_df = stock.mutualfund_holders
-    except Exception:
-        mf_df = None
-        
-    try:
-        cal = stock.calendar
-        if isinstance(cal, dict):
-            cal_df = pd.DataFrame(list(cal.items()), columns=['Event', 'Date'])
-        else:
-            cal_df = cal
-    except Exception:
-        cal_df = None
+    mf_df, cal_df = None, None
+    if stock:
+        try: mf_df = stock.mutualfund_holders
+        except Exception: pass
+        try:
+            cal = stock.calendar
+            cal_df = pd.DataFrame(list(cal.items()), columns=['Event', 'Date']) if isinstance(cal, dict) else cal
+        except Exception: pass
 
     metrics = {
         "name": info.get("longName", resolved_ticker), "price": current_price,
@@ -952,50 +1054,35 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- TRUE STRONG BUY SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
         best_peer = None
-        
         for peer in peers:
             if peer == resolved_ticker: continue 
             try:
                 peer_stock = yf.Ticker(peer)
                 p_info = peer_stock.info
                 p_hist = peer_stock.history(period="1y")
-                
                 if p_hist.empty: continue
                 p_current_price = p_info.get("currentPrice", float(p_hist['Close'].iloc[-1]))
-                
-                p_sector = p_info.get("sector", "N/A")
-                p_industry = p_info.get("industry", "N/A")
-                p_is_fin = is_financial_sector(p_sector, p_industry)
-                
                 p_pe = p_info.get("trailingPE")
                 p_pb = p_info.get("priceToBook")
                 p_roe = p_info.get("returnOnEquity")
                 p_dte = p_info.get("debtToEquity")
-                
                 pe_val = float(p_pe) if p_pe and p_pe > 0 else 999
                 roe_val = float(p_roe) * 100 if p_roe and pd.notna(p_roe) else 0
                 dte_val = float(p_dte) / 100 if p_dte and pd.notna(p_dte) else 999
-                
                 closes = p_hist['Close'].dropna()
                 is_uptrend = closes.iloc[-1] > closes.rolling(50).mean().iloc[-1] if len(closes) > 50 else True
-                
-                if 0 < pe_val < 30 and roe_val > 15 and dte_val < (2.0 if p_is_fin else 0.8) and is_uptrend:
+                if 0 < pe_val < 30 and roe_val > 15 and dte_val < 0.8 and is_uptrend:
                     best_peer = {
                         "name": p_info.get("shortName", peer),
-                        "ticker": peer,
-                        "price": p_current_price,
-                        "pe": round(pe_val, 1),
-                        "pb": round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A"
+                        "ticker": peer, "price": p_current_price,
+                        "pe": round(pe_val, 1), "pb": round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A"
                     }
                     break 
-            except Exception:
-                pass
-                
+            except Exception: pass
         metrics['best_alternative'] = best_peer
 
     return metrics
@@ -1039,7 +1126,6 @@ def ownership_donut(shareholding):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=240, margin=dict(t=10, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.1))
     return fig
 
-# --- ANGEL ONE COMPONENT: 52-WEEK RANGE BAR ---
 def render_52week_range(current_price, low_52, high_52, currency="₹"):
     if current_price is None or low_52 is None or high_52 is None or high_52 <= low_52: return
     pct_position = ((current_price - low_52) / (high_52 - low_52)) * 100
@@ -1050,10 +1136,8 @@ def render_52week_range(current_price, low_52, high_52, currency="₹"):
     st.markdown(f"<div style='color:{MUTED}; font-size:0.85em; text-align:center;'><b>52W Low:</b> {currency}{low_52:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Current:</b> <span style='color:#E6E6E6;'>{currency}{current_price:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; <b>52W High:</b> {currency}{high_52:,.2f}</div>", unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
-# --- ANGEL ONE COMPONENT: SMART SUMMARY CARDS ---
 def render_price_summary_cards(df, current_price, low_52, high_52):
     if df is None or df.empty or current_price is None: return
-    sma_20 = df["Close"].rolling(20).mean().iloc[-1]
     sma_50 = df["Close"].rolling(50).mean().iloc[-1]
     sma_200 = df["Close"].rolling(200).mean().iloc[-1]
 
@@ -1083,7 +1167,6 @@ def render_price_summary_cards(df, current_price, low_52, high_52):
             else:
                 st.info(f"💧 **Normal Volume:** Trading volume is steady ({vol_ratio:.1f}x 5-day avg).")
 
-# --- ANGEL ONE COMPONENT: SCORECARD BADGES ---
 def render_scorecard_badges(q_score, v_score, f_score):
     def get_badge(score, is_val=False):
         if score is None: return "N/A", "N/A", MUTED
@@ -1125,7 +1208,6 @@ def render_scorecard_badges(q_score, v_score, f_score):
     </div>
     """, unsafe_allow_html=True)
 
-# --- ANGEL ONE COMPONENT: VALUATION SPECTRUM ---
 def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     if not fair_value or not current_price: return
     attractive_limit = round(fair_value * 0.85, 2)
@@ -1149,7 +1231,6 @@ def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     with col2: st.markdown(f"<div style='color:{GOLD}; font-size:0.85em; text-align:center;'><b>Fair/Exp:</b> {currency}{attractive_limit:,.2f} – {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
     with col3: st.markdown(f"<div style='color:{RED}; font-size:0.85em; text-align:right;'><b>High:</b> Above {currency}{high_limit:,.2f}</div>", unsafe_allow_html=True)
 
-# --- ANGEL ONE COMPONENT: ANALYST CONSENSUS ---
 def render_analyst_consensus(target, current, rec, currency="₹"):
     if not target or not current: return
     upside = ((target - current) / current) * 100
@@ -1165,7 +1246,6 @@ def render_analyst_consensus(target, current, rec, currency="₹"):
     </div>
     """, unsafe_allow_html=True)
 
-# --- ANGEL ONE COMPONENT: HIGHLIGHTS CARD ---
 def extract_highlights(metrics, cf_df):
     working, not_working = [], []
     if cf_df is not None and not cf_df.empty and "Operating Cash Flow" in cf_df.index:
@@ -1203,7 +1283,6 @@ def render_highlights_card(working, not_working):
             for nw in not_working: st.markdown(f"<div style='background:rgba(248,81,73,0.1); border-left:3px solid {RED}; padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>• {nw}</div>", unsafe_allow_html=True)
         else: st.caption("No major balance sheet red flags detected.")
 
-# --- ANGEL ONE COMPONENT: CORPORATE EVENTS & MF ---
 def render_corporate_events_and_mfs(cal_df, mf_df):
     c1, c2 = st.columns(2)
     with c1:
@@ -1260,7 +1339,7 @@ NO BLIND AGREEMENT MANDATE:
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
+    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4]}."
                         if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
     
     target_display = f"{metrics['currency']}{pred.get('target_price')}" if pred.get('verdict') != "DON'T BUY" else "N/A (Model Rejected due to strict veto)"
@@ -1477,8 +1556,6 @@ if st.session_state.report_data:
     else:
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px; color:{RED};'><b>Rejected Valuation Baseline:</b> {currency}{pred['target_price']} (Do Not Trade)</div>", unsafe_allow_html=True)
 
-
-    # --- RECOMMENDED SECTOR ALTERNATIVE ---
     if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
         alt = m['best_alternative']
         st.markdown(
@@ -1498,7 +1575,6 @@ if st.session_state.report_data:
             """, unsafe_allow_html=True
         )
 
-    # --- PROS AND CONS CARDS ---
     all_checks = val_checks + past_checks + health_checks + div_checks
     pros = [c for c in all_checks if c[1] is True]
     cons = [c for c in all_checks if c[1] is False]
@@ -1520,7 +1596,6 @@ if st.session_state.report_data:
     with pc2:
         card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons, is_pro=False))
 
-    # --- NARRATIVE SUMMARY ---
     styled = style_verdict_text(narrative_for(7))
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
 
