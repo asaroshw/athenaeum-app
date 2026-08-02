@@ -21,6 +21,15 @@ try:
 except ImportError:
     HAS_ARIMA = False
 
+hide_st_style = """
+            <style>
+            #MainMenu {visibility: hidden;}
+            footer {visibility: hidden;}
+            header {visibility: hidden;}
+            </style>
+            """
+st.markdown(hide_st_style, unsafe_allow_html=True)
+
 # ============================================================
 # 1. SETUP & CONFIGURATION
 # ============================================================
