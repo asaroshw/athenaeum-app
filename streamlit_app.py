@@ -21,15 +21,6 @@ try:
 except ImportError:
     HAS_ARIMA = False
 
-hide_st_style = """
-            <style>
-            #MainMenu {visibility: hidden;}
-            footer {visibility: hidden;}
-            header {visibility: hidden;}
-            </style>
-            """
-st.markdown(hide_st_style, unsafe_allow_html=True)
-
 # ============================================================
 # 1. SETUP & CONFIGURATION
 # ============================================================
@@ -37,16 +28,13 @@ logging.getLogger('yfinance').setLevel(logging.CRITICAL)
 
 st.set_page_config(
     page_title="Athenaeum Financial Intelligence", 
-    page_icon="Logo64.png", 
+    page_icon="Logo.png", 
     layout="wide"
 )
 
 GEMINI_KEY = st.secrets.get("GEMINI_API_KEY", "")
-FMP_API_KEY = st.secrets.get("FMP_API_KEY", "")
-FMP_BASE_URL = "https://financialmodelingprep.com/api/v3/"
 
-# --- RESTORED DEEP SLATE COLOR PALETTE ---
-GOLD, BG, CARD_BG, BORDER = "#EAB308", "#0B111A", "#121A28", "#1F2B3D"
+GOLD, BG, CARD_BG, BORDER = "#EAB308", "#000000", "#0D0D0D", "#1F1F1F"
 GREEN, RED, ORANGE, MUTED, BLUE, PURPLE = "#3FB950", "#F85149", "#F97316", "#8B949E", "#38BDF8", "#A855F7"
 
 st.markdown(f"""
@@ -92,42 +80,8 @@ SECTOR_PEERS = {
 }
 
 # ============================================================
-# 2. CORE UTILITIES & FMP FETCHERS
+# 2. CORE UTILITIES
 # ============================================================
-def fetch_fmp_json(endpoint, params=None):
-    try:
-        p = params or {}
-        p['apikey'] = FMP_API_KEY
-        query_str = urllib.parse.urlencode(p)
-        url = f"{FMP_BASE_URL}{endpoint}?{query_str}"
-        res = requests.get(url, timeout=6)
-        if res.status_code == 200:
-            return res.json()
-    except Exception:
-        pass
-    return None
-
-def fetch_fmp_data(ticker):
-    data = {}
-    if not FMP_API_KEY: return data
-    
-    prof = fetch_fmp_json(f"profile/{ticker}")
-    if prof and isinstance(prof, list) and len(prof) > 0: data['profile'] = prof[0]
-        
-    quote = fetch_fmp_json(f"quote/{ticker}")
-    if quote and isinstance(quote, list) and len(quote) > 0: data['quote'] = quote[0]
-
-    inc = fetch_fmp_json(f"income-statement/{ticker}", {"limit": 5})
-    if inc and isinstance(inc, list): data['income_statement'] = inc
-
-    bs = fetch_fmp_json(f"balance-sheet-statement/{ticker}", {"limit": 5})
-    if bs and isinstance(bs, list): data['balance_sheet'] = bs
-
-    cf = fetch_fmp_json(f"cash-flow-statement/{ticker}", {"limit": 5})
-    if cf and isinstance(cf, list): data['cash_flow'] = cf
-
-    return data
-
 def to_float(val):
     if val in [None, "N/A", "", "None", "Stock doesn't pay dividends"]: return None
     if isinstance(val, bool) or (isinstance(val, float) and pd.isna(val)): return None
@@ -138,6 +92,15 @@ def to_float(val):
 def is_valid_metric(val):
     if val in [None, "N/A", "", "-", "--", "None", "0", "0.00%", "0.00"]: return False
     return to_float(val) is not None
+
+def fmt_indian_currency(val, currency="₹"):
+    if not is_valid_metric(val): return "N/A"
+    try:
+        num = float(str(val).replace(',', '').replace('₹', '').replace('%', '').strip())
+        if abs(num) >= 10000000: return f"{currency}{num/10000000:,.2f} Cr"
+        elif abs(num) >= 100000: return f"{currency}{num/100000:,.2f} Lakh"
+        return f"{currency}{num:,.2f}"
+    except: return f"{currency} {val}"
 
 def resolve_name_to_ticker(stock_input):
     stock_str = str(stock_input).strip()
@@ -183,13 +146,14 @@ def fetch_google_news(query_term):
 
 @st.cache_data(ttl=3600)
 def get_dynamic_risk_free_rate():
+    """Fetches the 10-Year Indian Government Bond yield, falls back to 6.5%."""
     try:
         bond = yf.Ticker("^IGB")
         hist = bond.history(period="5d")
         if not hist.empty:
             return float(hist['Close'].iloc[-1]) / 100.0
     except: pass
-    return 0.065 
+    return 0.065 # Fallback to 6.5%
 
 # ============================================================
 # 3. SECTOR DETECTION & NORMALIZATION PROFILES
@@ -455,12 +419,28 @@ def composite_verdict(fundamental_score, margin_of_safety, drift, arima_directio
 VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
 def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth_pct=None):
+    """Dynamic upside ceiling tied to verified growth rate (Fix 2).
+
+    The old static 150% ceiling falsely rejected valid high-growth compounders:
+    a 50% PAT compounder projected over a 2-3 year horizon produces ~160%+ upside
+    by pure arithmetic — penalizing that with a 'data trap' label is wrong.
+
+    New logic:
+      growth_pct >= 25%  -> ceiling 250% (legitimate compounder headroom)
+      growth_pct >= 15%  -> ceiling 200% (above-average growth, some headroom)
+      otherwise           -> ceiling 150% (standard, original behaviour)
+
+    Extreme upside above ceiling is now flagged as OBSERVE (possible data anomaly)
+    rather than DON'T BUY — it prevents a trade while still surfacing the signal
+    for human review instead of silently burying it.
+    """
     if target_price is None or not current_price:
         return verdict
 
     downside_pct = (current_price - target_price) / current_price
     upside_pct   = (target_price - current_price) / current_price
 
+    # Downside arm — unchanged behaviour
     if downside_pct > 0.40:
         if verdict != "DON'T BUY":
             notes.append(f"Model indicates {round(downside_pct*100,1)}% downside. Forced to DON'T BUY.")
@@ -476,17 +456,23 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth
             notes.append(f"Downgraded to OBSERVE: modeled target is {round(downside_pct*100,1)}% below current price.")
             return "OBSERVE"
 
+    # Upside arm — dynamic ceiling (Fix 2)
     g = growth_pct if (growth_pct and growth_pct > 0) else 0
-    if g >= 25: max_upside = 2.50
-    elif g >= 15: max_upside = 2.00 
-    else: max_upside = 1.50 
+    if g >= 25:
+        max_upside = 2.50  # 250% for verified high-growth compounders
+    elif g >= 15:
+        max_upside = 2.00  # 200% for above-average growers
+    else:
+        max_upside = 1.50  # 150% default (unchanged for standard companies)
 
     if upside_pct > max_upside:
         notes.append(
             f"Upside of +{round(upside_pct*100,1)}% exceeds the growth-adjusted ceiling of "
             f"{round(max_upside*100,0):.0f}% (growth_pct={round(g,1)}%). "
             f"Flagged as a possible data anomaly — downgraded to OBSERVE for human review. "
+            f"If the target price is independently justified, override manually."
         )
+        # OBSERVE, not DON'T BUY: the signal is surfaced rather than buried
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
             return "OBSERVE"
 
@@ -556,9 +542,11 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             intrinsic_value = ddm_val
             result["model_used"] = "Dividend Discount Model (DDM)"
         else:
-            intrinsic_value = current_price
+            # No Justified P/B, no DDM: force a 30% haircut so this path generates
+            # a genuine negative margin of safety rather than a misleading 0%.
+            intrinsic_value = round(current_price * 0.70, 2)
             forced_intrinsic_adjustment = -30
-            result["model_used"] = "No valid financial-sector inputs"
+            result["model_used"] = "Defensive Haircut — financial sector (no P/B or DDM inputs)"
     else:
         shares = info.get('sharesOutstanding') or shares_outstanding
         trailing_eps = info.get('trailingEps')
@@ -567,8 +555,10 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         if is_turnaround and latest_quarter_net_income and latest_quarter_net_income > 0 and shares:
             effective_eps = (latest_quarter_net_income / shares) * 4
             
+        # --- FIXED PRIORITY: PEG / Earnings Multiple Override for High Growth ---
         if effective_eps and effective_eps > 0 and pat_yoy_pct and pat_yoy_pct > 15:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
+            # Use growth rate to scale a justified forward multiple (PEG = 1.0 baseline)
             fair_multiple = min(max(pat_yoy_pct, historical_pe), 40)
             intrinsic_value = round(effective_eps * fair_multiple, 2)
             result["model_used"] = "PEG Adjusted Earnings Multiple"
@@ -593,8 +583,12 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
                 intrinsic_value = pv_fcf + terminal_value / (1 + discount_rate) ** 5
                 result["model_used"] = "2-Stage DCF (Free Cash Flow)"
             else:
-                intrinsic_value = current_price * 1.25
-                result["model_used"] = "Normalized Growth Proxy (FCF Neutralized)"
+                # FCF is negative or zero — capex-distorted companies should not get a
+                # free +25% markup just for having negative FCF. Use a book-value haircut
+                # if available (still conservative), or fall through to book/EPS paths below.
+                # Setting intrinsic_value = None here lets the elif chain pick it up.
+                intrinsic_value = None
+                result["model_used"] = "FCF Negative — falling through to earnings/book-value fallback"
                 
         elif effective_eps and effective_eps > 0:
             historical_pe = resolved_pe if (resolved_pe and resolved_pe > 0) else 20.0
@@ -603,15 +597,26 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
             result["model_used"] = "Target P/E (defensive)"
             
         elif book_value_per_share and book_value_per_share > 0:
-            intrinsic_value = round(book_value_per_share * 1.2, 2)
-            result["model_used"] = "Book Value Asset Base"
-            
-        else:
-            intrinsic_value = current_price * 1.15
-            result["model_used"] = "Default Growth Baseline"
+            # 0.8× haircut: when no earnings/FCF model is available, we cannot justify
+            # paying a premium over book — a distressed or uncertain scenario demands a
+            # discount, not a markup.
+            intrinsic_value = round(book_value_per_share * 0.8, 2)
+            result["model_used"] = "Book Value Haircut (defensive — no FCF/EPS model available)"
 
-    if intrinsic_value == current_price or not intrinsic_value:
-        intrinsic_value = round(current_price * 1.12, 2)
+        else:
+            # Nothing to model on — apply a 25% haircut to current price to force a
+            # meaningful negative margin of safety rather than a misleading neutral one.
+            intrinsic_value = round(current_price * 0.75, 2)
+            result["model_used"] = "Defensive Haircut (no reliable data for any valuation model)"
+
+    # Guard: a legitimate fallback (e.g. FCF Neutralized = 1.25×) may produce a value
+    # that coincidentally equals current_price only if 1.25×price == price, which is
+    # impossible. The only real case where intrinsic_value == current_price is the
+    # "no data at all" sentinel — apply a defensive haircut rather than a silent 12%
+    # bump that creates a false 0% margin of safety (Bug 1 from previous report).
+    if not intrinsic_value or intrinsic_value <= 0:
+        intrinsic_value = round(current_price * 0.75, 2)   # 25% haircut as a floor
+        result["model_used"] = "Defensive Haircut (no reliable valuation data)"
 
     target_price = round(intrinsic_value, 2)
     margin_of_safety = (intrinsic_value - current_price) / current_price if current_price else 0
@@ -666,27 +671,20 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     return result
 
 # ============================================================
-# 7. MASTER DATA FETCH (FMP PRIMARY, YAHOO FALLBACK)
+# 7. MASTER DATA FETCH
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    # 1. Primary FMP Fetch
-    fmp_data = fetch_fmp_data(resolved_ticker)
-    fmp_prof = fmp_data.get('profile', {})
-    fmp_quote = fmp_data.get('quote', {})
-    
-    # 2. Yahoo Finance Fallback
     stock = yf.Ticker(resolved_ticker)
     hist_full = stock.history(period="1y")
     if hist_full.empty: raise ValueError(f"Could not find '{raw_input}'.")
-    info = stock.info
 
-    # 3. Merging Variables (FMP Priority)
-    current_price = fmp_quote.get('price') or fmp_prof.get('price') or info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
+    info = stock.info
+    current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
     currency_symbol = "₹"
 
-    sector = fmp_prof.get('sector') or info.get("sector", "N/A")
-    industry = fmp_prof.get('industry') or info.get("industry", "N/A")
+    sector = info.get("sector", "N/A")
+    industry = info.get("industry", "N/A")
     is_fin = is_financial_sector(sector, industry)
     sector_profile = classify_sector_profile(sector, industry)
     revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
@@ -752,6 +750,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
         cf = stock.cashflow
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
+            # Dropna and reverse to ensure chronological or at least clean iteration
             fcf_history = cf.loc['Free Cash Flow'].dropna()
 
         if fin is not None and not fin.empty:
@@ -778,10 +777,10 @@ def fetch_stock_data(resolved_ticker, raw_input):
     except Exception:
         pass
 
-    # Merge remaining FMP variables
-    shares_out = fmp_quote.get('sharesOutstanding') or info.get("sharesOutstanding")
-    mcap = fmp_quote.get('marketCap') or fmp_prof.get('mktCap') or info.get("marketCap")
+    shares_out = info.get("sharesOutstanding")
+    mcap = info.get("marketCap")
     
+    # --- FIX: Indian Market Cap / Shares Sanity Check ---
     if mcap and shares_out and current_price:
         calculated_mcap = shares_out * current_price
         if abs(calculated_mcap - mcap) / mcap > 0.15:
@@ -797,32 +796,39 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     trailing_earnings_negative = (net_inc is not None and net_inc < 0) or (info.get('trailingEps') and info.get('trailingEps') < 0)
     
+    # --- FIX: Turnaround strictly needs positive operating profit ---
     is_turnaround = bool(trailing_earnings_negative and (
         (pat_qoq is not None and pat_qoq > 50) or 
         (latest_quarter_net_income is not None and latest_quarter_net_income > 0 and ebit_latest is not None and ebit_latest > 0)
     ))
 
     recent_news = fetch_google_news(f"{info.get('longName', resolved_ticker)} stock news")
-    business_summary = fmp_prof.get('description') or info.get("longBusinessSummary")
+    business_summary = info.get("longBusinessSummary")
     qualitative_bonus, qualitative_notes = scan_news_sentiment(recent_news, business_summary)
     order_book_hits, growth_pct_from_news = extract_order_book_signal(recent_news, business_summary)
 
-    pe_raw = fmp_quote.get('pe') or fmp_prof.get('pe') or info.get("trailingPE")
-    if not is_valid_metric(pe_raw) and net_inc and mcap: pe_raw = round(mcap / net_inc, 2)
-    elif is_valid_metric(pe_raw): pe_raw = round(float(pe_raw), 2)
+    pe_raw = info.get("trailingPE")
+    if not is_valid_metric(pe_raw) and net_inc and mcap:
+        pe_raw = round(mcap / net_inc, 2)
+    elif is_valid_metric(pe_raw):
+        pe_raw = round(float(pe_raw), 2)
 
-    pb_raw = fmp_prof.get('priceToBook') or info.get("priceToBook")
-    if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0: pb_raw = round(mcap / total_eq, 2)
-    elif is_valid_metric(pb_raw): pb_raw = round(float(pb_raw), 2)
+    pb_raw = info.get("priceToBook")
+    if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
+        pb_raw = round(mcap / total_eq, 2)
+    elif is_valid_metric(pb_raw):
+        pb_raw = round(float(pb_raw), 2)
 
     roe_raw = info.get("returnOnEquity")
-    if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0: roe_raw = net_inc / total_eq
+    if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
+        roe_raw = net_inc / total_eq
     roe_is_known = is_valid_metric(roe_raw)
 
     peg_raw = info.get("pegRatio")
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and pat_yoy_pct and pat_yoy_pct > 0:
         peg_raw = round(to_float(pe_raw) / pat_yoy_pct, 2)
-    elif is_valid_metric(peg_raw): peg_raw = round(float(peg_raw), 2)
+    elif is_valid_metric(peg_raw):
+        peg_raw = round(float(peg_raw), 2)
 
     ev_ebitda = "N/A"
     if is_fin:
@@ -860,8 +866,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if not is_valid_metric(bvps) and total_eq and shares_out:
         bvps = total_eq / shares_out
     bvps = bvps if is_valid_metric(bvps) else None
-    
-    div_per_share = fmp_quote.get('lastDividend') or info.get("dividendRate")
+    div_per_share = info.get("dividendRate")
 
     jpb_ratio = jpb_value = ddm_val = None
     if is_fin:
@@ -894,17 +899,22 @@ def fetch_stock_data(resolved_ticker, raw_input):
             "Public": max(0, 100 - (promoters + institutions))
         }
 
-    try: mf_df = stock.mutualfund_holders
-    except Exception: mf_df = None
+    try:
+        mf_df = stock.mutualfund_holders
+    except Exception:
+        mf_df = None
         
     try:
         cal = stock.calendar
-        if isinstance(cal, dict): cal_df = pd.DataFrame(list(cal.items()), columns=['Event', 'Date'])
-        else: cal_df = cal
-    except Exception: cal_df = None
+        if isinstance(cal, dict):
+            cal_df = pd.DataFrame(list(cal.items()), columns=['Event', 'Date'])
+        else:
+            cal_df = cal
+    except Exception:
+        cal_df = None
 
     metrics = {
-        "name": fmp_prof.get('companyName') or info.get("longName", resolved_ticker), "price": current_price,
+        "name": info.get("longName", resolved_ticker), "price": current_price,
         "pe_ratio": pe_raw if is_valid_metric(pe_raw) else "N/A",
         "pb_ratio": pb_raw if is_valid_metric(pb_raw) else "N/A",
         "peg_ratio": peg_raw if is_valid_metric(peg_raw) else "N/A",
@@ -915,23 +925,23 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "debt_to_equity": debt_to_equity,
         "interest_coverage": interest_coverage,
         "net_margin": f"{net_margin_final}%" if net_margin_final is not None else "N/A",
-        "dividend_yield": f"{round(fmp_quote.get('dividendYield',0)*100,2)}%" if fmp_quote.get('dividendYield') else (f"{round(info.get('dividendYield',0)*100,2)}%" if is_valid_metric(info.get('dividendYield')) else "N/A"),
+        "dividend_yield": f"{round(info.get('dividendYield',0)*100,2)}%" if is_valid_metric(info.get('dividendYield')) else "N/A",
         "pat_yoy": f"{pat_yoy_pct}%" if pat_yoy_pct is not None else "N/A",
         "pat_qoq": f"{pat_qoq}%" if pat_qoq is not None else "N/A",
         "market_cap": mcap, "sector": sector, "industry": industry,
         "is_financial_sector": is_fin, "justified_pb": jpb_ratio, "is_turnaround": is_turnaround,
         "sector_profile": sector_profile, "order_book_hits": order_book_hits,
         "growth_pct_from_news": growth_pct_from_news,
-        "fifty_two_high": fmp_quote.get('yearHigh') or info.get("fiftyTwoWeekHigh", "N/A"),
-        "fifty_two_low": fmp_quote.get('yearLow') or info.get("fiftyTwoWeekLow", "N/A"),
+        "fifty_two_high": info.get("fiftyTwoWeekHigh", "N/A"),
+        "fifty_two_low": info.get("fiftyTwoWeekLow", "N/A"),
         "business_summary": business_summary,
-        "website": fmp_prof.get('website') or info.get("website", "N/A"),
+        "website": info.get("website", "N/A"),
         "company_officers": info.get("companyOfficers", []),
         "recent_news": recent_news,
         "shareholding": shareholding_dict,
         "mutual_funds": mf_df,
         "calendar": cal_df,
-        "target_mean_price": fmp_prof.get('priceTarget') or info.get("targetMeanPrice"),
+        "target_mean_price": info.get("targetMeanPrice"),
         "recommendation_mean": info.get("recommendationMean"),
         "v_score": v_score,
         "p_score": p_score,
@@ -1029,6 +1039,7 @@ def ownership_donut(shareholding):
     fig.update_layout(template='plotly_dark', paper_bgcolor=BG, plot_bgcolor=BG, height=240, margin=dict(t=10, b=10, l=10, r=10), legend=dict(orientation="h", y=-0.1))
     return fig
 
+# --- ANGEL ONE COMPONENT: 52-WEEK RANGE BAR ---
 def render_52week_range(current_price, low_52, high_52, currency="₹"):
     if current_price is None or low_52 is None or high_52 is None or high_52 <= low_52: return
     pct_position = ((current_price - low_52) / (high_52 - low_52)) * 100
@@ -1039,6 +1050,7 @@ def render_52week_range(current_price, low_52, high_52, currency="₹"):
     st.markdown(f"<div style='color:{MUTED}; font-size:0.85em; text-align:center;'><b>52W Low:</b> {currency}{low_52:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Current:</b> <span style='color:#E6E6E6;'>{currency}{current_price:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; <b>52W High:</b> {currency}{high_52:,.2f}</div>", unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
+# --- ANGEL ONE COMPONENT: SMART SUMMARY CARDS ---
 def render_price_summary_cards(df, current_price, low_52, high_52):
     if df is None or df.empty or current_price is None: return
     sma_20 = df["Close"].rolling(20).mean().iloc[-1]
@@ -1071,6 +1083,7 @@ def render_price_summary_cards(df, current_price, low_52, high_52):
             else:
                 st.info(f"💧 **Normal Volume:** Trading volume is steady ({vol_ratio:.1f}x 5-day avg).")
 
+# --- ANGEL ONE COMPONENT: SCORECARD BADGES ---
 def render_scorecard_badges(q_score, v_score, f_score):
     def get_badge(score, is_val=False):
         if score is None: return "N/A", "N/A", MUTED
@@ -1112,6 +1125,7 @@ def render_scorecard_badges(q_score, v_score, f_score):
     </div>
     """, unsafe_allow_html=True)
 
+# --- ANGEL ONE COMPONENT: VALUATION SPECTRUM ---
 def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     if not fair_value or not current_price: return
     attractive_limit = round(fair_value * 0.85, 2)
@@ -1135,6 +1149,7 @@ def render_valuation_spectrum(current_price, fair_value, currency="₹"):
     with col2: st.markdown(f"<div style='color:{GOLD}; font-size:0.85em; text-align:center;'><b>Fair/Exp:</b> {currency}{attractive_limit:,.2f} – {currency}{expensive_limit:,.2f}</div>", unsafe_allow_html=True)
     with col3: st.markdown(f"<div style='color:{RED}; font-size:0.85em; text-align:right;'><b>High:</b> Above {currency}{high_limit:,.2f}</div>", unsafe_allow_html=True)
 
+# --- ANGEL ONE COMPONENT: ANALYST CONSENSUS ---
 def render_analyst_consensus(target, current, rec, currency="₹"):
     if not target or not current: return
     upside = ((target - current) / current) * 100
@@ -1150,6 +1165,7 @@ def render_analyst_consensus(target, current, rec, currency="₹"):
     </div>
     """, unsafe_allow_html=True)
 
+# --- ANGEL ONE COMPONENT: HIGHLIGHTS CARD ---
 def extract_highlights(metrics, cf_df):
     working, not_working = [], []
     if cf_df is not None and not cf_df.empty and "Operating Cash Flow" in cf_df.index:
@@ -1187,6 +1203,7 @@ def render_highlights_card(working, not_working):
             for nw in not_working: st.markdown(f"<div style='background:rgba(248,81,73,0.1); border-left:3px solid {RED}; padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>• {nw}</div>", unsafe_allow_html=True)
         else: st.caption("No major balance sheet red flags detected.")
 
+# --- ANGEL ONE COMPONENT: CORPORATE EVENTS & MF ---
 def render_corporate_events_and_mfs(cal_df, mf_df):
     c1, c2 = st.columns(2)
     with c1:
@@ -1272,13 +1289,13 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-# --- RESTORED LOGO64 BANNER ---
-logo_b64 = get_base64_image("Logo64.png")
+logo_b64 = get_base64_image("Logo.png")
 
 if logo_b64:
     st.markdown(f'''
-    <div style="width: 100%; text-align: center; margin-bottom: 25px; border-bottom: 1px solid {BORDER}; padding-bottom: 20px;">
-        <img src="data:image/png;base64,{logo_b64}" style="width: 100%; max-height: 220px; object-fit: cover; border-radius: 8px; box-shadow: 0 4px 12px rgba(0,0,0,0.5);">
+    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 20px 0;">
+        <img src="data:image/png;base64,{logo_b64}" style="height: 48px; filter: invert(1); vertical-align: middle;">
+        <div class="swf-title" style="letter-spacing: 1.5px;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
     </div>
     ''', unsafe_allow_html=True)
 else:
