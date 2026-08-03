@@ -1446,8 +1446,8 @@ logo_b64 = get_base64_image("Logo64.jpg")
 
 if logo_b64:
     st.markdown(f'''
-    <div style="padding: 10px 0 20px 0; width: 100%;">
-        <img src="data:image/jpeg;base64,{logo_b64}" style="width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: block;">
+    <div style="width: 100%; padding-bottom: 20px;">
+        <img src="data:image/jpeg;base64,{logo_b64}" style="width: 100% !important; min-width: 100% !important; height: auto !important; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: block;">
     </div>
     ''', unsafe_allow_html=True)
 else:
