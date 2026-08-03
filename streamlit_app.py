@@ -675,107 +675,246 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
 # ============================================================
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    stock = yf.Ticker(resolved_ticker)
-    hist_full = stock.history(period="1y")
-    if hist_full.empty: raise ValueError(f"Could not find '{raw_input}'.")
+    fmp_key = st.secrets.get("FMP_API_KEY", "")
+    
+    info = {}
+    hist_full = pd.DataFrame()
+    pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
+    net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, None
+    revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
+    fcf_history = None
+    pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
+    latest_quarter_net_income = None
+    revenue_cagr_pct = None
+    
+    fmp_success = False
+    if fmp_key:
+        try:
+            fmp_ticker = resolved_ticker.upper()
+            prof_res = requests.get(f"https://financialmodelingprep.com/api/v3/profile/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            quote_res = requests.get(f"https://financialmodelingprep.com/api/v3/quote/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            hist_res = requests.get(f"https://financialmodelingprep.com/api/v3/historical-price-full/{fmp_ticker}?apikey={fmp_key}", timeout=5)
+            
+            if prof_res.status_code == 200 and quote_res.status_code == 200:
+                prof_data = prof_res.json()
+                quote_data = quote_res.json()
+                if prof_data and quote_data:
+                    p = prof_data[0]
+                    q = quote_data[0]
+                    info["longName"] = p.get("companyName", resolved_ticker)
+                    info["sector"] = p.get("sector", "N/A")
+                    info["industry"] = p.get("industry", "N/A")
+                    info["longBusinessSummary"] = p.get("description", "")
+                    info["website"] = p.get("website", "N/A")
+                    info["beta"] = to_float(p.get("beta", 1.0))
+                    info["dividendRate"] = to_float(p.get("lastDiv", 0))
+                    info["currentPrice"] = to_float(q.get("price"))
+                    info["marketCap"] = to_float(q.get("marketCap"))
+                    info["trailingPE"] = to_float(q.get("pe"))
+                    info["sharesOutstanding"] = to_float(q.get("sharesOutstanding"))
+                    info["fiftyTwoWeekHigh"] = to_float(q.get("yearHigh"))
+                    info["fiftyTwoWeekLow"] = to_float(q.get("yearLow"))
+                    
+            if hist_res.status_code == 200:
+                h_data = hist_res.json().get("historical", [])
+                if h_data:
+                    df_h = pd.DataFrame(h_data)
+                    df_h['date'] = pd.to_datetime(df_h['date'])
+                    df_h = df_h.sort_values('date').reset_index(drop=True)
+                    df_h = df_h.rename(columns={'date': 'Date', 'close': 'Close', 'high': 'High', 'low': 'Low', 'open': 'Open', 'volume': 'Volume'})
+                    hist_full = df_h[['Date', 'Open', 'High', 'Low', 'Close', 'Volume']]
+            
+            inc_res = requests.get(f"https://financialmodelingprep.com/api/v3/income-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            bs_res = requests.get(f"https://financialmodelingprep.com/api/v3/balance-sheet-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            cf_res = requests.get(f"https://financialmodelingprep.com/api/v3/cash-flow-statement/{fmp_ticker}?limit=5&apikey={fmp_key}", timeout=5)
+            q_inc_res = requests.get(f"https://financialmodelingprep.com/api/v3/income-statement/{fmp_ticker}?period=quarter&limit=8&apikey={fmp_key}", timeout=5)
+            
+            if inc_res.status_code == 200 and bs_res.status_code == 200 and cf_res.status_code == 200:
+                inc_list = inc_res.json()
+                bs_list = bs_res.json()
+                cf_list = cf_res.json()
+                q_inc_list = q_inc_res.json() if q_inc_res.status_code == 200 else []
+                
+                if inc_list:
+                    latest_inc = inc_list[0]
+                    revenue_latest = to_float(latest_inc.get("revenue"))
+                    ebit_latest = to_float(latest_inc.get("operatingIncome"))
+                    ebitda_val = to_float(latest_inc.get("ebitda"))
+                    interest_exp_latest = to_float(latest_inc.get("interestExpense"))
+                    net_inc = to_float(latest_inc.get("netIncome"))
+                    info["trailingEps"] = to_float(latest_inc.get("eps"))
+                    
+                    if len(inc_list) >= 2 and to_float(inc_list[-1].get("revenue")) and to_float(inc_list[-1].get("revenue")) > 0:
+                        years = len(inc_list) - 1
+                        rev_latest_val = to_float(inc_list[0].get("revenue"))
+                        rev_oldest_val = to_float(inc_list[-1].get("revenue"))
+                        revenue_cagr_pct = round((((rev_latest_val / rev_oldest_val) ** (1 / years)) - 1) * 100, 2)
+                        
+                    pnl_df = pd.DataFrame([
+                        {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(revenue_latest / 10000000, 2) if revenue_latest else "—"},
+                        {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(ebit_latest / 10000000, 2) if ebit_latest else "—"},
+                        {"Particulars": "Net Profit", "Amount (₹ Cr)": round(net_inc / 10000000, 2) if net_inc else "—"}
+                    ])
 
-    info = stock.info
-    current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
+                if q_inc_list and len(q_inc_list) >= 5:
+                    latest_q = q_inc_list[0]
+                    prev_q = q_inc_list[1]
+                    year_ago_q = q_inc_list[4]
+                    latest_quarter_net_income = to_float(latest_q.get("netIncome"))
+                    
+                    q_ni_curr = to_float(latest_q.get("netIncome"))
+                    q_ni_prev = to_float(prev_q.get("netIncome"))
+                    q_ni_yago = to_float(year_ago_q.get("netIncome"))
+                    
+                    if q_ni_prev and q_ni_prev != 0:
+                        pat_qoq = round(((q_ni_curr - q_ni_prev) / abs(q_ni_prev)) * 100, 2)
+                    if q_ni_yago and q_ni_yago != 0:
+                        pat_yoy_pct = round(((q_ni_curr - q_ni_yago) / abs(q_ni_yago)) * 100, 2)
+                        
+                    q_rev_curr = to_float(latest_q.get("revenue"))
+                    if q_rev_curr and q_rev_curr != 0 and q_ni_curr is not None:
+                        net_margin_final = round((q_ni_curr / q_rev_curr) * 100, 2)
+
+                if bs_list:
+                    latest_bs = bs_list[0]
+                    total_eq = to_float(latest_bs.get("totalStockholdersEquity"))
+                    total_assets_latest = to_float(latest_bs.get("totalAssets"))
+                    total_debt = to_float(latest_bs.get("totalDebt"))
+                    
+                    info["priceToBook"] = to_float(quote_data[0].get("priceToBook") if quote_data else (info.get("marketCap") / total_eq if info.get("marketCap") and total_eq else None))
+                    info["debtToEquity"] = round((total_debt / total_eq) * 100, 2) if total_debt is not None and total_eq and total_eq > 0 else None
+                    info["bookValue"] = round(total_eq / info.get("sharesOutstanding"), 2) if total_eq and info.get("sharesOutstanding") else None
+                    
+                    bs_df = pd.DataFrame([
+                        {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
+                        {"Particulars": "Total Debt", "Amount (₹ Cr)": round(total_debt / 10000000, 2) if total_debt else "—"},
+                        {"Particulars": "Total Assets", "Amount (₹ Cr)": round(total_assets_latest / 10000000, 2) if total_assets_latest else "—"}
+                    ])
+
+                if cf_list:
+                    fcf_series_list = []
+                    for cf_item in cf_list:
+                        fcf_val = to_float(cf_item.get("freeCashFlow"))
+                        if fcf_val is not None: fcf_series_list.append(fcf_val)
+                    if fcf_series_list:
+                        fcf_history = pd.Series(fcf_series_list)
+                    
+                    latest_cf = cf_list[0]
+                    ocf_latest = to_float(latest_cf.get("operatingCashFlow"))
+                    fcf_latest = to_float(latest_cf.get("freeCashFlow"))
+                    cf_df = pd.DataFrame([
+                        {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(ocf_latest / 10000000, 2) if ocf_latest else "—"},
+                        {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(fcf_latest / 10000000, 2) if fcf_latest else "—"}
+                    ])
+
+            if info.get("currentPrice") and not hist_full.empty:
+                fmp_success = True
+        except Exception:
+            fmp_success = False
+
+    stock = None
+    if not fmp_success:
+        stock = yf.Ticker(resolved_ticker)
+        hist_full = stock.history(period="1y")
+        if hist_full.empty: raise ValueError(f"Could not find '{raw_input}'.")
+
+        info = stock.info
+        current_price = info.get("currentPrice", round(float(hist_full['Close'].iloc[-1]), 2))
+        info["currentPrice"] = current_price
+        ebitda_val = info.get('ebitda')
+
+        sector = info.get("sector", "N/A")
+        industry = info.get("industry", "N/A")
+        is_fin = is_financial_sector(sector, industry)
+        revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
+
+        try:
+            q_fin = stock.quarterly_financials
+            if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
+                ni_series = q_fin.loc['Net Income'].dropna()
+                if len(ni_series) > 0:
+                    net_inc = float(ni_series.iloc[:4].sum())
+                    latest_quarter_net_income = float(ni_series.iloc[0])
+                if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
+                    pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
+                if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
+                    pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
+                rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
+                if rev_key_found and len(ni_series) > 0:
+                    rev_series = q_fin.loc[rev_key_found].dropna()
+                    if len(rev_series) > 0 and rev_series.iloc[0] != 0:
+                        net_margin_final = round((ni_series.iloc[0] / rev_series.iloc[0]) * 100, 2)
+
+            fin = stock.financials
+            if fin is not None and not fin.empty:
+                rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
+                if rev_key_found and pd.notna(fin.loc[rev_key_found].iloc[0]):
+                    revenue_latest = float(fin.loc[rev_key_found].iloc[0])
+                    rev_series_annual = fin.loc[rev_key_found].dropna()
+                    if len(rev_series_annual) >= 2 and rev_series_annual.iloc[-1] > 0:
+                        years = len(rev_series_annual) - 1
+                        revenue_cagr_pct = round((((rev_series_annual.iloc[0] / rev_series_annual.iloc[-1]) ** (1 / years)) - 1) * 100, 2)
+                for k in ['EBIT', 'Operating Income']:
+                    if k in fin.index and pd.notna(fin.loc[k].iloc[0]):
+                        ebit_latest = float(fin.loc[k].iloc[0]); break
+                if 'Interest Expense' in fin.index:
+                    ie_series = fin.loc['Interest Expense'].dropna()
+                    if len(ie_series) > 0:
+                        interest_exp_latest = float(ie_series.iloc[0])
+                ii_key_found = next((k for k in INTEREST_INCOME_KEYS if k in fin.index), None)
+                if ii_key_found:
+                    ii_series = fin.loc[ii_key_found].dropna()
+                    if len(ii_series) > 0:
+                        interest_income_latest = float(ii_series.iloc[0])
+
+            bs = stock.balance_sheet
+            if bs is not None and not bs.empty:
+                for k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity']:
+                    if k in bs.index:
+                        eq_series = bs.loc[k].dropna()
+                        if len(eq_series) > 0:
+                            total_eq = float(eq_series.iloc[0]); break
+                if 'Total Assets' in bs.index:
+                    ta_series = bs.loc['Total Assets'].dropna()
+                    if len(ta_series) > 0:
+                        total_assets_latest = float(ta_series.iloc[0])
+
+            cf = stock.cashflow
+            if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
+                # Dropna and reverse to ensure chronological or at least clean iteration
+                fcf_history = cf.loc['Free Cash Flow'].dropna()
+
+            if fin is not None and not fin.empty:
+                col = fin.columns[0]
+                rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
+                pnl_df = pd.DataFrame([
+                    {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fin.loc[rev_key_found, col] / 10000000, 2) if rev_key_found else "—"},
+                    {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(fin.loc['Operating Income', col] / 10000000, 2) if 'Operating Income' in fin.index else "—"},
+                    {"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col] / 10000000, 2) if 'Net Income' in fin.index else "—"}
+                ])
+            if bs is not None and not bs.empty:
+                col = bs.columns[0]
+                bs_df = pd.DataFrame([
+                    {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
+                    {"Particulars": "Total Debt", "Amount (₹ Cr)": round(bs.loc['Total Debt', col] / 10000000, 2) if 'Total Debt' in bs.index else "—"},
+                    {"Particulars": "Total Assets", "Amount (₹ Cr)": round(bs.loc['Total Assets', col] / 10000000, 2) if 'Total Assets' in bs.index else "—"}
+                ])
+            if cf is not None and not cf.empty:
+                col = cf.columns[0]
+                cf_df = pd.DataFrame([
+                    {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(cf.loc['Operating Cash Flow', col] / 10000000, 2) if 'Operating Cash Flow' in cf.index else "—"},
+                    {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(cf.loc['Free Cash Flow', col] / 10000000, 2) if 'Free Cash Flow' in cf.index else "—"}
+                ])
+        except Exception:
+            pass
+
+    current_price = info.get("currentPrice")
     currency_symbol = "₹"
 
     sector = info.get("sector", "N/A")
     industry = info.get("industry", "N/A")
     is_fin = is_financial_sector(sector, industry)
     sector_profile = classify_sector_profile(sector, industry)
-    revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
-
-    pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
-    net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
-    revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
-    fcf_history = None
-    pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
-    latest_quarter_net_income = None
-    revenue_cagr_pct = None
-
-    try:
-        q_fin = stock.quarterly_financials
-        if q_fin is not None and not q_fin.empty and 'Net Income' in q_fin.index:
-            ni_series = q_fin.loc['Net Income'].dropna()
-            if len(ni_series) > 0:
-                net_inc = float(ni_series.iloc[:4].sum())
-                latest_quarter_net_income = float(ni_series.iloc[0])
-            if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
-                pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
-            if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
-                pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
-            rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
-            if rev_key_found and len(ni_series) > 0:
-                rev_series = q_fin.loc[rev_key_found].dropna()
-                if len(rev_series) > 0 and rev_series.iloc[0] != 0:
-                    net_margin_final = round((ni_series.iloc[0] / rev_series.iloc[0]) * 100, 2)
-
-        fin = stock.financials
-        if fin is not None and not fin.empty:
-            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
-            if rev_key_found and pd.notna(fin.loc[rev_key_found].iloc[0]):
-                revenue_latest = float(fin.loc[rev_key_found].iloc[0])
-                rev_series_annual = fin.loc[rev_key_found].dropna()
-                if len(rev_series_annual) >= 2 and rev_series_annual.iloc[-1] > 0:
-                    years = len(rev_series_annual) - 1
-                    revenue_cagr_pct = round((((rev_series_annual.iloc[0] / rev_series_annual.iloc[-1]) ** (1 / years)) - 1) * 100, 2)
-            for k in ['EBIT', 'Operating Income']:
-                if k in fin.index and pd.notna(fin.loc[k].iloc[0]):
-                    ebit_latest = float(fin.loc[k].iloc[0]); break
-            if 'Interest Expense' in fin.index:
-                ie_series = fin.loc['Interest Expense'].dropna()
-                if len(ie_series) > 0:
-                    interest_exp_latest = float(ie_series.iloc[0])
-            ii_key_found = next((k for k in INTEREST_INCOME_KEYS if k in fin.index), None)
-            if ii_key_found:
-                ii_series = fin.loc[ii_key_found].dropna()
-                if len(ii_series) > 0:
-                    interest_income_latest = float(ii_series.iloc[0])
-
-        bs = stock.balance_sheet
-        if bs is not None and not bs.empty:
-            for k in ['Stockholders Equity', 'Total Stockholder Equity', 'Common Stock Equity']:
-                if k in bs.index:
-                    eq_series = bs.loc[k].dropna()
-                    if len(eq_series) > 0:
-                        total_eq = float(eq_series.iloc[0]); break
-            if 'Total Assets' in bs.index:
-                ta_series = bs.loc['Total Assets'].dropna()
-                if len(ta_series) > 0:
-                    total_assets_latest = float(ta_series.iloc[0])
-
-        cf = stock.cashflow
-        if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
-            # Dropna and reverse to ensure chronological or at least clean iteration
-            fcf_history = cf.loc['Free Cash Flow'].dropna()
-
-        if fin is not None and not fin.empty:
-            col = fin.columns[0]
-            rev_key_found = next((k for k in revenue_keys if k in fin.index), None)
-            pnl_df = pd.DataFrame([
-                {"Particulars": "Net Sales / Total Income", "Amount (₹ Cr)": round(fin.loc[rev_key_found, col] / 10000000, 2) if rev_key_found else "—"},
-                {"Particulars": "Operating Profit", "Amount (₹ Cr)": round(fin.loc['Operating Income', col] / 10000000, 2) if 'Operating Income' in fin.index else "—"},
-                {"Particulars": "Net Profit", "Amount (₹ Cr)": round(fin.loc['Net Income', col] / 10000000, 2) if 'Net Income' in fin.index else "—"}
-            ])
-        if bs is not None and not bs.empty:
-            col = bs.columns[0]
-            bs_df = pd.DataFrame([
-                {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
-                {"Particulars": "Total Debt", "Amount (₹ Cr)": round(bs.loc['Total Debt', col] / 10000000, 2) if 'Total Debt' in bs.index else "—"},
-                {"Particulars": "Total Assets", "Amount (₹ Cr)": round(bs.loc['Total Assets', col] / 10000000, 2) if 'Total Assets' in bs.index else "—"}
-            ])
-        if cf is not None and not cf.empty:
-            col = cf.columns[0]
-            cf_df = pd.DataFrame([
-                {"Particulars": "Operating Cash Flow", "Amount (₹ Cr)": round(cf.loc['Operating Cash Flow', col] / 10000000, 2) if 'Operating Cash Flow' in cf.index else "—"},
-                {"Particulars": "Free Cash Flow", "Amount (₹ Cr)": round(cf.loc['Free Cash Flow', col] / 10000000, 2) if 'Free Cash Flow' in cf.index else "—"}
-            ])
-    except Exception:
-        pass
 
     shares_out = info.get("sharesOutstanding")
     mcap = info.get("marketCap")
