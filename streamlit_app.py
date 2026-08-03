@@ -1260,8 +1260,13 @@ NO BLIND AGREEMENT MANDATE:
     pred = metrics.get('predictive', {})
     news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
     turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4]}."
-                        if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
+    hits_list = metrics.get('order_book_hits') or []
+    hits_str = ", ".join(hits_list[:4])
+    order_book_note = (
+        f" Forward catalyst signal(s) detected in recent news: {hits_str}."
+        if hits_list
+        else " No explicit order-book/guidance signal detected in recent news."
+    )
     
     target_display = f"{metrics['currency']}{pred.get('target_price')}" if pred.get('verdict') != "DON'T BUY" else "N/A (Model Rejected due to strict veto)"
     
