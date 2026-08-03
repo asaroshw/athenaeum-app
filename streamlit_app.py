@@ -21,6 +21,15 @@ try:
 except ImportError:
     HAS_ARIMA = False
 
+st.markdown("""
+    <style>
+        header[data-testid="stHeader"] { display: none !important; }
+        [data-testid="stToolbar"] { display: none !important; }
+        .stDeployButton { display: none !important; }
+        footer { display: none !important; }
+    </style>
+""", unsafe_allow_html=True)
+
 # ============================================================
 # 1. SETUP & CONFIGURATION
 # ============================================================
@@ -1437,8 +1446,8 @@ logo_b64 = get_base64_image("Logo64.jpg")
 
 if logo_b64:
     st.markdown(f'''
-    <div class="swf-title-container" style="text-align: center; padding: 10px 0 20px 0;">
-        <img src="data:image/jpeg;base64,{logo_b64}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
+    <div style="padding: 10px 0 20px 0; width: 100%;">
+        <img src="data:image/jpeg;base64,{logo_b64}" style="width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: block;">
     </div>
     ''', unsafe_allow_html=True)
 else:
