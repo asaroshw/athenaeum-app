@@ -1442,15 +1442,10 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-logo_b64 = get_base64_image("Logo64.jpg")
-
-if logo_b64:
-    st.markdown(f'''
-    <div style="width: 100%; padding-bottom: 20px;">
-        <img src="data:image/jpeg;base64,{logo_b64}" style="width: 100% !important; min-width: 100% !important; height: auto !important; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3); display: block;">
-    </div>
-    ''', unsafe_allow_html=True)
-else:
+try:
+    st.image("Logo64.jpg", use_container_width=True)
+    st.markdown("<div style='margin-bottom: 20px;'></div>", unsafe_allow_html=True)
+except Exception:
     st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
     
 col_input, col_btn = st.columns([4, 1])
