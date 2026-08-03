@@ -1433,18 +1433,17 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-logo_b64 = get_base64_image("Logo.png")
+logo_b64 = get_base64_image("Logo64.jpg")
 
 if logo_b64:
     st.markdown(f'''
-    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 20px 0;">
-        <img src="data:image/png;base64,{logo_b64}" style="height: 48px; filter: invert(1); vertical-align: middle;">
-        <div class="swf-title" style="letter-spacing: 1.5px;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
+    <div class="swf-title-container" style="text-align: center; padding: 10px 0 20px 0;">
+        <img src="data:image/jpeg;base64,{logo_b64}" style="max-width: 100%; height: auto; border-radius: 8px; box-shadow: 0 4px 6px rgba(0,0,0,0.3);">
     </div>
     ''', unsafe_allow_html=True)
 else:
     st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
-
+    
 col_input, col_btn = st.columns([4, 1])
 with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
 with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
