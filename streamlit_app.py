@@ -452,7 +452,8 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth
         notes.append(
             f"Upside of +{round(upside_pct*100,1)}% exceeds the growth-adjusted ceiling of "
             f"{round(max_upside*100,0):.0f}% (growth_pct={round(g,1)}%). "
-            f"Flagged as a possible data anomaly — downgraded to OBSERVE for human review."
+            f"Flagged as a possible data anomaly — downgraded to OBSERVE for human review. "
+            f"If the target price is independently justified, override manually."
         )
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
             return "OBSERVE"
@@ -1082,7 +1083,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
                         "pe": round(pe_val, 1), "pb": round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A"
                     }
                     break 
-            except Exception: pass
+            except Exception:
+                pass
         metrics['best_alternative'] = best_peer
 
     return metrics
@@ -1556,6 +1558,8 @@ if st.session_state.report_data:
     else:
         st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px; color:{RED};'><b>Rejected Valuation Baseline:</b> {currency}{pred['target_price']} (Do Not Trade)</div>", unsafe_allow_html=True)
 
+
+    # --- RECOMMENDED SECTOR ALTERNATIVE ---
     if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
         alt = m['best_alternative']
         st.markdown(
@@ -1575,6 +1579,7 @@ if st.session_state.report_data:
             """, unsafe_allow_html=True
         )
 
+    # --- PROS AND CONS CARDS ---
     all_checks = val_checks + past_checks + health_checks + div_checks
     pros = [c for c in all_checks if c[1] is True]
     cons = [c for c in all_checks if c[1] is False]
@@ -1596,6 +1601,7 @@ if st.session_state.report_data:
     with pc2:
         card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons, is_pro=False))
 
+    # --- NARRATIVE SUMMARY ---
     styled = style_verdict_text(narrative_for(7))
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
 
