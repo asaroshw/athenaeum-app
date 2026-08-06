@@ -1670,6 +1670,8 @@ if st.session_state.report_data:
     # --- NARRATIVE SUMMARY ---
     styled = style_verdict_text(narrative_for(7))
     card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{styled}</p>")
-
+if m.get('best_alternative'):
+    alt = m['best_alternative']
+    st.info(f"💡 **Better Sector Alternative:** Consider **{alt['name']}** ({alt['ticker']}) — Trading at {alt['pe']}x P/E with {alt['pb']}x P/B.")
     st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an "
                "ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan ")
