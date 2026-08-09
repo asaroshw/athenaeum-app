@@ -15,6 +15,15 @@ from google import genai
 from google.genai import types
 import base64
 
+hide_streamlit_style = """
+<style>
+    #MainMenu {visibility: hidden;}
+    footer {visibility: hidden;}
+    header {visibility: hidden;}
+</style>
+"""
+st.markdown(hide_streamlit_style, unsafe_allow_html=True)
+
 try:
     from statsmodels.tsa.arima.model import ARIMA
     HAS_ARIMA = True
@@ -53,10 +62,7 @@ st.markdown(f"""
     .swf-badge {{ background:{CARD_BG}; border:1px solid {BORDER}; padding:5px 12px; border-radius:6px; font-weight:700; font-size:0.85em; }}
     .swf-tag {{ background:#1c2333; border:1px solid {BORDER}; color:{MUTED}; padding:3px 9px; border-radius:5px; font-size:0.78em; margin-right:6px; display:inline-block; }}
     .swf-section-title {{ font-size: 1.6em; font-weight: 800; color: #FFFFFF; margin-top: 10px; padding-top: 14px; border-top: 2px solid {BORDER}; }}
-    #MainMenu {visibility: hidden;}
-footer {visibility: hidden;}
-header {visibility: hidden;}
-
+    
     @media print {{
         section[data-testid="stSidebar"], header[data-testid="stHeader"], #MainMenu, footer,
         div[data-testid="stTextInput"], div[data-testid="stButton"], .stSpinner {{ display: none !important; }}
