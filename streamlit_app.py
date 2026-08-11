@@ -15,15 +15,6 @@ from google import genai
 from google.genai import types
 import base64
 
-hide_streamlit_style = """
-<style>
-    #MainMenu {visibility: hidden;}
-    footer {visibility: hidden;}
-    header {visibility: hidden;}
-</style>
-"""
-st.markdown(hide_streamlit_style, unsafe_allow_html=True)
-
 try:
     from statsmodels.tsa.arima.model import ARIMA
     HAS_ARIMA = True
@@ -62,7 +53,7 @@ st.markdown(f"""
     .swf-badge {{ background:{CARD_BG}; border:1px solid {BORDER}; padding:5px 12px; border-radius:6px; font-weight:700; font-size:0.85em; }}
     .swf-tag {{ background:#1c2333; border:1px solid {BORDER}; color:{MUTED}; padding:3px 9px; border-radius:5px; font-size:0.78em; margin-right:6px; display:inline-block; }}
     .swf-section-title {{ font-size: 1.6em; font-weight: 800; color: #FFFFFF; margin-top: 10px; padding-top: 14px; border-top: 2px solid {BORDER}; }}
-    
+
     @media print {{
         section[data-testid="stSidebar"], header[data-testid="stHeader"], #MainMenu, footer,
         div[data-testid="stTextInput"], div[data-testid="stButton"], .stSpinner {{ display: none !important; }}
@@ -155,14 +146,36 @@ def fetch_google_news(query_term):
 
 @st.cache_data(ttl=3600)
 def get_dynamic_risk_free_rate():
-    """Fetches the 10-Year Indian Government Bond yield, falls back to 6.5%."""
-    try:
-        bond = yf.Ticker("^IGB")
-        hist = bond.history(period="5d")
-        if not hist.empty:
-            return float(hist['Close'].iloc[-1]) / 100.0
-    except: pass
-    return 0.065 # Fallback to 6.5%
+    """Indian 10Y G-Sec yield. FMP PRIMARY → yfinance FALLBACK → static 6.5%."""
+    FMP_KEY = st.secrets.get("FMP_API_KEY", "")
+    # PRIMARY: FMP treasury / economic indicator endpoint
+    if FMP_KEY:
+        for symbol in ["IN10Y", "%5EINBMK", "GSIN10YR"]:
+            try:
+                r = requests.get(
+                    f"https://financialmodelingprep.com/api/v3/historical-price-full"
+                    f"/{symbol}?timeseries=5&apikey={FMP_KEY}",
+                    headers={"Accept": "application/json"}, timeout=6)
+                if r.status_code == 200:
+                    hist = r.json().get("historical", [])
+                    if hist:
+                        yield_val = float(hist[0].get("close", 0))
+                        if 3.0 <= yield_val <= 15.0:           # sanity-check range
+                            return yield_val / 100.0
+            except Exception:
+                pass
+    # FALLBACK: yfinance for Indian 10Y G-Sec
+    for yf_sym in ["^IGB", "IN=F", "GSPC"]:
+        try:
+            bond = yf.Ticker(yf_sym)
+            hist = bond.history(period="5d")
+            if not hist.empty:
+                val = float(hist["Close"].iloc[-1])
+                if 3.0 <= val <= 15.0:
+                    return val / 100.0
+        except Exception:
+            pass
+    return 0.065  # static default — RBI repo rate neighbourhood
 
 # ============================================================
 # 3. SECTOR DETECTION & NORMALIZATION PROFILES
@@ -1061,51 +1074,94 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- TRUE STRONG BUY SECTOR ALTERNATIVE SCANNER ---
+    # --- SECTOR ALTERNATIVE SCANNER — FMP PRIMARY, yfinance FALLBACK ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
         best_peer = None
-        
+
         for peer in peers:
-            if peer == resolved_ticker: continue 
+            if peer == resolved_ticker:
+                continue
             try:
-                peer_stock = yf.Ticker(peer)
-                p_info = peer_stock.info
-                p_hist = peer_stock.history(period="1y")
-                
-                if p_hist.empty: continue
-                p_current_price = p_info.get("currentPrice", float(p_hist['Close'].iloc[-1]))
-                
-                p_sector = p_info.get("sector", "N/A")
+                # PRIMARY: FMP data for the peer ticker
+                p_fmp = fetch_fmp_data(_fmp_ticker(peer))
+
+                # Merge FMP with yfinance fallback for any missing fields
+                p_yf_info = {}
+                p_hist = pd.DataFrame()
+                if not p_fmp or p_fmp.get("currentPrice") is None:
+                    try:
+                        p_stock = yf.Ticker(peer)
+                        p_yf_info = p_stock.info
+                        p_hist = p_stock.history(period="1y")
+                    except Exception:
+                        pass
+                else:
+                    # FMP has data — only fetch yfinance history if FMP history missing
+                    if p_fmp.get("fmp_history") is not None and not p_fmp["fmp_history"].empty:
+                        p_hist = p_fmp["fmp_history"]
+                    else:
+                        try:
+                            p_hist = yf.Ticker(peer).history(period="1y")
+                        except Exception:
+                            pass
+
+                if p_hist is None or (hasattr(p_hist, 'empty') and p_hist.empty):
+                    continue
+
+                # Merge: FMP wins, yfinance fills gaps
+                p_info = {**p_yf_info, **{k: v for k, v in p_fmp.items()
+                                            if v is not None and k != "fmp_history"}}
+
+                # Resolve price
+                p_current_price = (p_info.get("currentPrice") or
+                                    p_info.get("price") or
+                                    float(p_hist['Close'].iloc[-1]))
+
+                p_sector   = p_info.get("sector", "N/A")
                 p_industry = p_info.get("industry", "N/A")
-                p_is_fin = is_financial_sector(p_sector, p_industry)
-                
-                p_pe = p_info.get("trailingPE")
-                p_pb = p_info.get("priceToBook")
+                p_is_fin   = is_financial_sector(p_sector, p_industry)
+
+                # Ratios — FMP fields take priority (already merged into p_info)
+                p_pe  = p_info.get("pe_ratio") or p_info.get("trailingPE")
+                p_pb  = p_info.get("priceToBook")
                 p_roe = p_info.get("returnOnEquity")
                 p_dte = p_info.get("debtToEquity")
-                
-                pe_val = float(p_pe) if p_pe and p_pe > 0 else 999
-                roe_val = float(p_roe) * 100 if p_roe and pd.notna(p_roe) else 0
-                dte_val = float(p_dte) / 100 if p_dte and pd.notna(p_dte) else 999
-                
+
+                pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
+                # FMP returns ROE as a ratio (0.18) when from key-metrics-ttm
+                roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
+                roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw   # normalise fraction→%
+                dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
+                dte_val = dte_raw / 100 if dte_raw > 5 else dte_raw   # normalise 100-base→ratio
+
                 closes = p_hist['Close'].dropna()
-                is_uptrend = closes.iloc[-1] > closes.rolling(50).mean().iloc[-1] if len(closes) > 50 else True
-                
-                if 0 < pe_val < 30 and roe_val > 15 and dte_val < (2.0 if p_is_fin else 0.8) and is_uptrend:
+                is_uptrend = (closes.iloc[-1] > closes.rolling(50).mean().iloc[-1]
+                               if len(closes) > 50 else True)
+
+                qualifies = (0 < pe_val < 30 and
+                              roe_val > 15 and
+                              dte_val < (2.0 if p_is_fin else 0.8) and
+                              is_uptrend)
+
+                if qualifies:
+                    score = roe_val - pe_val
                     candidate = {
-                        "name": p_info.get("shortName", peer),
+                        "name": p_info.get("longName") or p_info.get("shortName") or peer,
                         "ticker": peer,
                         "price": p_current_price,
-                        "pe": round(pe_val, 1),
-                        "pb": round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A",
-                        "_score": roe_val - pe_val}
-                    if best_peer is None or (roe_val - pe_val) > best_peer.get("_score",-999):
-                        best_peer = candidate  # Fix 9: keep scanning for the absolute best
+                        "pe":    round(pe_val, 1),
+                        "pb":    round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A",
+                        "_score": score,
+                        "source": "FMP" if p_fmp.get("currentPrice") else "yfinance",
+                    }
+                    if best_peer is None or score > best_peer.get("_score", -999):
+                        best_peer = candidate   # evaluate ALL peers, keep absolute best
+
             except Exception:
-                pass
-                
+                continue
+
         metrics['best_alternative'] = best_peer
 
     return metrics
