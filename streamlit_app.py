@@ -1443,10 +1443,220 @@ NO BLIND AGREEMENT MANDATE:
     return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt,
                                           config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
 
+
+# ============================================================
+# IPO FEATURE — DATA ENGINE
+# ============================================================
+from datetime import datetime, timedelta
+
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_ipo_list() -> list:
+    """FMP PRIMARY → Google News RSS fallback. Returns list of current/upcoming IPOs."""
+    FMP_KEY = st.secrets.get("FMP_API_KEY", "")
+    ipos = []
+    today      = datetime.today().strftime("%Y-%m-%d")
+    three_back = (datetime.today() - timedelta(days=45)).strftime("%Y-%m-%d")
+    sixty_fwd  = (datetime.today() + timedelta(days=60)).strftime("%Y-%m-%d")
+
+    if FMP_KEY:
+        for endpoint, label in [
+            (f"ipo-calendar-confirmed?from={three_back}&to={sixty_fwd}", "confirmed"),
+            (f"ipo_calendar?from={today}&to={sixty_fwd}", "upcoming"),
+        ]:
+            try:
+                r = requests.get(
+                    f"https://financialmodelingprep.com/api/v3/{endpoint}&apikey={FMP_KEY}",
+                    headers={"Accept": "application/json"}, timeout=8)
+                if r.status_code == 200:
+                    data = r.json()
+                    if isinstance(data, list):
+                        for item in data:
+                            if not item.get("symbol"):
+                                continue
+                            pr = str(item.get("priceRange", ""))
+                            ipos.append({
+                                "symbol":    item.get("symbol", ""),
+                                "name":      item.get("company", item.get("name", "Unknown")),
+                                "date":      item.get("date", item.get("ipoDate", "TBA")),
+                                "price_low": pr.split("-")[0].strip() if "-" in pr else item.get("price",""),
+                                "price_high":pr.split("-")[-1].strip() if "-" in pr else item.get("price",""),
+                                "exchange":  item.get("exchange", "NSE/BSE"),
+                                "market_cap":item.get("marketCap",""),
+                                "status":    label,
+                            })
+            except Exception:
+                pass
+
+    seen, unique = set(), []
+    for ipo in ipos:
+        if ipo["symbol"] not in seen:
+            seen.add(ipo["symbol"]); unique.append(ipo)
+
+    if not unique:
+        for n in fetch_google_news("India IPO 2026 open subscription NSE BSE")[:8]:
+            unique.append({"symbol":"NEWS","name":n["title"],"date":"See news",
+                           "price_low":"","price_high":"","exchange":"—",
+                           "market_cap":"","status":"news","_link":n.get("link","")})
+    return unique
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def fetch_ipo_detail(symbol: str, company_name: str) -> dict:
+    """FMP PRIMARY → yfinance fallback for a single IPO."""
+    FMP_KEY = st.secrets.get("FMP_API_KEY", "")
+    detail = {"symbol": symbol, "name": company_name}
+
+    if FMP_KEY and symbol != "NEWS":
+        fmp_data = fetch_fmp_data(symbol)
+        detail.update({k: v for k, v in fmp_data.items() if v is not None and k != "fmp_history"})
+
+        try:
+            r = requests.get(
+                f"https://financialmodelingprep.com/api/v3/income-statement/{symbol}"
+                f"?limit=3&apikey={FMP_KEY}", timeout=6)
+            if r.status_code == 200:
+                stmts = r.json()
+                if stmts and isinstance(stmts, list):
+                    detail["income_statements"] = stmts
+                    revs = [s.get("revenue",0) for s in stmts if s.get("revenue")]
+                    nets = [s.get("netIncome",0) for s in stmts if s.get("netIncome")]
+                    if len(revs) >= 2 and revs[-1] > 0:
+                        detail["revenue_cagr"] = round(
+                            ((revs[0]/revs[-1])**(1/max(len(revs)-1,1))-1)*100, 2)
+                    detail["is_profitable_3yr"] = (all(n>0 for n in nets[:3])
+                                                    if len(nets)>=3 else (nets[0]>0 if nets else None))
+                    detail["latest_revenue"] = revs[0] if revs else None
+                    detail["latest_pat"]     = nets[0] if nets else None
+        except Exception:
+            pass
+
+        try:
+            r = requests.get(
+                f"https://financialmodelingprep.com/api/v3/balance-sheet-statement/{symbol}"
+                f"?limit=1&apikey={FMP_KEY}", timeout=6)
+            if r.status_code == 200:
+                bs = r.json()
+                if bs and isinstance(bs, list):
+                    b   = bs[0]
+                    eq  = b.get("totalStockholdersEquity") or 1
+                    dbt = b.get("totalDebt") or 0
+                    detail["de_ratio"] = round(dbt/eq, 2) if eq > 0 else None
+        except Exception:
+            pass
+
+    if not detail.get("sector") or not detail.get("longBusinessSummary"):
+        try:
+            yf_info = yf.Ticker(symbol).info
+            for k in ["sector","industry","longBusinessSummary","website","trailingPE","priceToBook","returnOnEquity"]:
+                if k not in detail or not detail[k]:
+                    detail[k] = yf_info.get(k)
+        except Exception:
+            pass
+
+    detail["ipo_news"] = fetch_google_news(f"{company_name} IPO GMP subscription anchor 2026")
+    return detail
+
+
+def score_ipo(detail: dict) -> tuple:
+    """Returns (score 0-100, verdict BUY/ABSTAIN, pros list, cons list)."""
+    pros, cons, score = [], [], 50
+
+    cagr = detail.get("revenue_cagr")
+    if cagr is not None:
+        if cagr > 20:   pros.append(f"Strong revenue CAGR of {cagr:.1f}%"); score += 10
+        elif cagr > 10: pros.append(f"Decent revenue CAGR of {cagr:.1f}%"); score += 5
+        else:           cons.append(f"Slow revenue growth ({cagr:.1f}% CAGR)"); score -= 8
+
+    profitable = detail.get("is_profitable_3yr")
+    if profitable is True:
+        pros.append("Profitable for 3 consecutive years"); score += 10
+    elif profitable is False:
+        cons.append("Not consistently profitable — elevated execution risk"); score -= 15
+
+    de = detail.get("de_ratio") or detail.get("debtToEquity")
+    if de is not None:
+        try:
+            de_f = float(de)
+            if de_f < 0.5:   pros.append(f"Low leverage (D/E={de_f:.2f}x)"); score += 8
+            elif de_f < 1.5: pros.append(f"Moderate leverage (D/E={de_f:.2f}x)"); score += 3
+            else:            cons.append(f"High leverage (D/E={de_f:.2f}x)"); score -= 10
+        except Exception:
+            pass
+
+    roe_raw = detail.get("returnOnEquity")
+    if roe_raw is not None:
+        try:
+            roe = float(roe_raw)*100 if float(roe_raw)<5 else float(roe_raw)
+            if roe > 20:   pros.append(f"High ROE of {roe:.1f}%"); score += 8
+            elif roe > 12: pros.append(f"Reasonable ROE of {roe:.1f}%"); score += 4
+            else:          cons.append(f"Low ROE of {roe:.1f}%"); score -= 6
+        except Exception:
+            pass
+
+    pe = detail.get("pe_ratio") or detail.get("trailingPE")
+    if pe is not None:
+        try:
+            pe_f = float(pe)
+            if pe_f <= 0:   cons.append("Negative P/E — currently loss-making"); score -= 12
+            elif pe_f < 25: pros.append(f"Attractive valuation at {pe_f:.1f}x P/E"); score += 8
+            elif pe_f < 40: cons.append(f"Richly valued at {pe_f:.1f}x P/E"); score -= 5
+            else:           cons.append(f"Expensive at {pe_f:.1f}x P/E"); score -= 12
+        except Exception:
+            pass
+
+    news_text = " ".join(n.get("title","") for n in (detail.get("ipo_news") or [])).lower()
+    if any(k in news_text for k in ["gmp","grey market premium"]):
+        pros.append("Positive Grey Market Premium signal detected"); score += 8
+    if "oversubscribed" in news_text:
+        pros.append("Strong subscription interest reported"); score += 6
+    if "undersubscribed" in news_text or "weak response" in news_text:
+        cons.append("Weak subscription signal in recent news"); score -= 10
+
+    sector = (detail.get("sector") or "").lower()
+    TAILWINDS = ["technology","renewable","defence","defense","pharmaceutical",
+                  "healthcare","infrastructure","electric","data center"]
+    HEADWINDS = ["real estate","tobacco","sugar","gaming","print media"]
+    if any(s in sector for s in TAILWINDS):
+        pros.append(f"Operating in a high-growth sector ({detail.get('sector','')})"); score += 6
+    elif any(s in sector for s in HEADWINDS):
+        cons.append(f"Sector faces structural headwinds ({detail.get('sector','')})"); score -= 5
+
+    score   = min(max(score, 0), 100)
+    verdict = "BUY" if score >= 60 else "ABSTAIN"
+    return score, verdict, pros, cons
+
+
+def ipo_ai_narrative(detail: dict, score: int, verdict: str, pros: list, cons: list) -> str:
+    try:
+        client = genai.Client(api_key=GEMINI_KEY)
+        sys = ("You are a senior IPO analyst. Write a concise 4-6 paragraph research note "
+               "covering: business overview, financial health, valuation vs peers, key risks, "
+               "and a final BUY or ABSTAIN recommendation. Plain prose, institutional tone.")
+        news_txt = "; ".join(n.get("title","") for n in (detail.get("ipo_news") or [])[:4])
+        prompt   = (f"IPO: {detail.get('name')} ({detail.get('symbol')}). "
+                     f"Sector: {detail.get('sector','N/A')}. "
+                     f"Revenue CAGR: {detail.get('revenue_cagr','N/A')}%. "
+                     f"3yr profitable: {detail.get('is_profitable_3yr','N/A')}. "
+                     f"D/E: {detail.get('de_ratio','N/A')}. "
+                     f"P/E: {detail.get('pe_ratio','N/A')}. "
+                     f"Score: {score}/100. Verdict: {verdict}. "
+                     f"Pros: {'; '.join(pros[:4]) or 'None'}. "
+                     f"Cons: {'; '.join(cons[:4]) or 'None'}. "
+                     f"News: {news_txt or 'No headlines'}.")
+        resp = client.models.generate_content(
+            model="gemini-3.5-flash-lite", contents=prompt,
+            config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2))
+        return resp.text
+    except Exception as e:
+        return f"AI narrative unavailable: {e}"
+
 # ============================================================
 # 10. APP STATE & HEADER
 # ============================================================
-if 'report_data' not in st.session_state: st.session_state.report_data = None
+if 'report_data'  not in st.session_state: st.session_state.report_data  = None
+if 'app_mode'     not in st.session_state: st.session_state.app_mode     = 'equity'
+if 'selected_ipo' not in st.session_state: st.session_state.selected_ipo = None
+if 'ipo_detail'   not in st.session_state: st.session_state.ipo_detail   = None
 
 def get_base64_image(image_path):
     try:
@@ -1467,11 +1677,32 @@ if logo_b64:
 else:
     st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
 
-col_input, col_btn = st.columns([4, 1])
-with col_input: stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed", placeholder="Search a company or ticker...")
-with col_btn: generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
+# ── Mode selector ───────────────────────────────────────────────────
+m1, m2, m3 = st.columns([1, 1, 3])
+with m1:
+    if st.button("📈  Equity Analysis", use_container_width=True,
+                  type="primary" if st.session_state.app_mode == "equity" else "secondary"):
+        st.session_state.app_mode    = "equity"
+        st.session_state.report_data = None
+with m2:
+    if st.button("🚀  IPO Analysis", use_container_width=True,
+                  type="primary" if st.session_state.app_mode == "ipo" else "secondary"):
+        st.session_state.app_mode   = "ipo"
+        st.session_state.selected_ipo = None
+        st.session_state.ipo_detail   = None
+st.markdown("---")
 
-if generate_clicked and stock_input.strip():
+# ── Equity search bar (only in equity mode) ──────────────────────────
+stock_input, generate_clicked = "", False
+if st.session_state.app_mode == "equity":
+    col_input, col_btn = st.columns([4, 1])
+    with col_input:
+        stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed",
+                                     placeholder="Search a company or ticker (e.g. RELIANCE, Tata Motors)...")
+    with col_btn:
+        generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
+
+if generate_clicked and stock_input.strip() and st.session_state.app_mode == 'equity':
     with st.spinner('Compiling metrics, applying sector normalization, and running the composite models...'):
         try:
             rt = resolve_name_to_ticker(stock_input)
@@ -1495,7 +1726,7 @@ if generate_clicked and stock_input.strip():
 # ============================================================
 # 11. SINGLE-PAGE REPORT
 # ============================================================
-if st.session_state.report_data:
+if st.session_state.report_data and st.session_state.app_mode == 'equity':
     data = st.session_state.report_data
     m = data['metrics']
     ticker = data['ticker']
@@ -1692,3 +1923,174 @@ if st.session_state.report_data:
 
     st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an "
                "ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan ")
+
+
+# ============================================================
+# IPO MODE — FULL UI
+# ============================================================
+if st.session_state.app_mode == "ipo":
+
+    st.info("🚀 **IPO Analysis Mode** — Fetching current & upcoming IPOs. "
+            "Click any IPO to get a full research report ending with BUY or ABSTAIN. "
+            "Not financial advice.")
+
+    if st.session_state.selected_ipo and st.session_state.ipo_detail:
+        # ── IPO DETAIL VIEW ──────────────────────────────────────────────────
+        detail  = st.session_state.ipo_detail
+        sym     = detail.get("symbol", "")
+        name    = detail.get("name", sym)
+        score, verdict, pros, cons = score_ipo(detail)
+        vc = rating_color(verdict)
+
+        if st.button("← Back to IPO List"):
+            st.session_state.selected_ipo = None
+            st.session_state.ipo_detail   = None
+            st.rerun()
+
+        # Header card
+        st.markdown(f"""
+        <div class="swf-card" style="margin-bottom:18px;">
+            <div style="display:flex;justify-content:space-between;align-items:flex-start;">
+                <div>
+                    <div style="color:{MUTED};font-size:0.85em;">IPO Research Report</div>
+                    <div style="font-size:1.5em;font-weight:800;">{name}</div>
+                    <div style="color:{MUTED};font-size:0.9em;">
+                        {sym} &nbsp;|&nbsp; {detail.get("exchange","NSE/BSE")}
+                        &nbsp;|&nbsp; {detail.get("sector","N/A")}
+                    </div>
+                </div>
+                <div style="text-align:right;">
+                    <div style="font-size:2em;font-weight:900;color:{vc};">{verdict}</div>
+                    <div style="color:{MUTED};font-size:0.85em;">Score: {score}/100</div>
+                </div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Key metrics
+        mc1, mc2, mc3, mc4 = st.columns(4)
+        with mc1: custom_metric("Revenue CAGR",
+            f"{detail.get('revenue_cagr','N/A')}%" if detail.get('revenue_cagr') else "N/A")
+        with mc2: custom_metric("Trailing P/E",
+            f"{detail.get('pe_ratio') or detail.get('trailingPE','N/A')}x")
+        with mc3: custom_metric("D/E Ratio",
+            f"{detail.get('de_ratio','N/A')}x" if detail.get('de_ratio') else "N/A")
+        with mc4:
+            profitable = detail.get("is_profitable_3yr")
+            custom_metric("3-Year Profitability",
+                "✅ Profitable" if profitable is True else
+                ("❌ Loss-Making" if profitable is False else "N/A"))
+
+        # Business overview
+        biz = detail.get("longBusinessSummary","Business description not available.")
+        card("Business Overview",
+             f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;'>{biz}</p>")
+
+        # Financials table
+        stmts = detail.get("income_statements", [])
+        if stmts:
+            rows = []
+            for s in stmts[:3]:
+                rows.append({
+                    "Year":           s.get("calendarYear") or str(s.get("date",""))[:4],
+                    "Revenue (₹ Cr)": round(s["revenue"]/10000000,2) if s.get("revenue") else "—",
+                    "EBITDA (₹ Cr)":  round(s["ebitda"]/10000000,2)  if s.get("ebitda")  else "—",
+                    "PAT (₹ Cr)":     round(s["netIncome"]/10000000,2) if s.get("netIncome") else "—",
+                    "EPS":            round(s["eps"],2) if s.get("eps") else "—",
+                })
+            st.markdown("##### Financial Highlights (Last 3 Years)")
+            st.dataframe(rows, use_container_width=True, hide_index=True)
+
+        # Pros & Cons
+        pc1, pc2 = st.columns(2)
+        with pc1:
+            p_html = "".join(f"<div style='padding:4px 0'><span style='color:{GREEN}'>&#9989; {p}</span></div>"
+                              for p in pros) or f"<div style='color:{MUTED}'>No strong positives identified.</div>"
+            card("✅ Strengths (Pros)", p_html)
+        with pc2:
+            c_html = "".join(f"<div style='padding:4px 0'><span style='color:{RED}'>&#10060; {c}</span></div>"
+                              for c in cons) or f"<div style='color:{MUTED}'>No major concerns identified.</div>"
+            card("❌ Risks & Concerns", c_html)
+
+        # IPO-specific news
+        ipo_news = detail.get("ipo_news", [])
+        if ipo_news:
+            n_html = "".join(
+                f"<div style='padding:5px 0;border-bottom:1px solid {BORDER};'>"
+                f"<a href='{n.get("link","#")}' target='_blank' style='color:{BLUE};'>"
+                f"🔗 {n.get("title","")}</a></div>"
+                for n in ipo_news[:5])
+            card("📰 Latest IPO News (GMP / Subscription / Allotment)", n_html)
+
+        # AI narrative
+        with st.spinner("Generating AI analyst note..."):
+            narr = ipo_ai_narrative(detail, score, verdict, pros, cons)
+        card("🤖 AI Analyst Note", f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>"
+                                    f"{style_verdict_text(narr)}</p>")
+
+        # Final verdict banner
+        st.markdown(f"""
+        <div class="swf-card" style="border:2px solid {vc};text-align:center;padding:24px;margin-top:16px;">
+            <div style="font-size:0.9em;color:{MUTED};margin-bottom:6px;">ALGORITHM VERDICT</div>
+            <div style="font-size:2.8em;font-weight:900;color:{vc};">{verdict}</div>
+            <div style="color:{MUTED};font-size:0.85em;margin-top:6px;">
+                Score {score}/100 &nbsp;|&nbsp;
+                {"Positive risk-reward — suitable for IPO allocation."
+                  if verdict=="BUY" else
+                  "Risk-reward does not justify IPO allocation at current valuation."}
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+        st.caption("This analysis uses pre-listing data from FMP and public news. "
+                   "Always read the Red Herring Prospectus before investing. Not financial advice.")
+
+    else:
+        # ── IPO LIST VIEW ────────────────────────────────────────────────────
+        st.markdown("### Current & Upcoming IPOs")
+        st.markdown(f"<div style='color:{MUTED};font-size:0.85em;margin-bottom:16px;'>"
+                    "Click any IPO to get the full research report with a BUY or ABSTAIN verdict."
+                    "</div>", unsafe_allow_html=True)
+
+        with st.spinner("Fetching live IPO data from FMP..."):
+            ipo_list = fetch_ipo_list()
+
+        if not ipo_list:
+            st.warning("No current IPO data available. FMP may have no active listings in this "
+                       "window or the API limit may be reached. Try again shortly.")
+        else:
+            for ipo in ipo_list:
+                sym  = ipo.get("symbol","")
+                name = ipo.get("name","Unknown")
+                date = ipo.get("date","TBA")
+                exch = ipo.get("exchange","")
+                plo  = ipo.get("price_low","")
+                phi  = ipo.get("price_high","")
+                price_band = (f"₹{plo} – ₹{phi}" if plo and phi and plo!=phi
+                               else (f"₹{plo or phi}" if (plo or phi) else "Price TBA"))
+                status_color = GREEN if ipo.get("status")=="confirmed" else ORANGE
+
+                ca, cb, cc, cd, ce = st.columns([3,1.5,1.5,1.2,1.2])
+                with ca:
+                    st.markdown(f"<b style='font-size:1em;'>{name}</b><br>"
+                                f"<span style='color:{MUTED};font-size:0.8em;'>{sym} &nbsp;|&nbsp; {exch}</span>",
+                                unsafe_allow_html=True)
+                with cb:
+                    st.markdown(f"<span style='font-size:0.8em;color:{MUTED};'>Open Date</span><br>"
+                                f"<b>{date}</b>", unsafe_allow_html=True)
+                with cc:
+                    st.markdown(f"<span style='font-size:0.8em;color:{MUTED};'>Price Band</span><br>"
+                                f"<b>{price_band}</b>", unsafe_allow_html=True)
+                with cd:
+                    st.markdown(f"<span style='color:{status_color};font-size:0.85em;'>"
+                                f"● {ipo.get('status','').capitalize()}</span>", unsafe_allow_html=True)
+                with ce:
+                    if ipo.get("status") == "news" and ipo.get("_link"):
+                        st.markdown(f"[Read →]({ipo['_link']})")
+                    elif sym and sym != "NEWS":
+                        if st.button("Analyse →", key=f"ipo_{sym}_{date}", use_container_width=True):
+                            with st.spinner(f"Loading {name}..."):
+                                st.session_state.selected_ipo = sym
+                                st.session_state.ipo_detail   = fetch_ipo_detail(sym, name)
+                            st.rerun()
+                st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>",
+                             unsafe_allow_html=True)
