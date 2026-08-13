@@ -498,15 +498,15 @@ def fetch_ipo_list_categorized() -> dict:
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
     current = _merge_ipo_records(scr.get("current") or [], im_current)
-    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket"] == "current"])
+    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
-    upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket"] == "upcoming"])
+    upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
 
     # --- STRICT DATE-BASED PURGE & SORTING ---
-    today = datetime.today().date() # August 13, 2026
+    today = datetime.today().date()  # August 13, 2026
     filtered_current, filtered_upcoming, filtered_closed = [], [], []
 
     # 1. Process Current: Must have a valid open/close window that includes today
@@ -514,7 +514,6 @@ def fetch_ipo_list_categorized() -> dict:
         op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
         cl_d = _parse_date_flex(ipo.get("close_date"))
         
-        # If it has explicit dates and today is within the range, keep it current
         if op_d and cl_d and op_d <= today <= cl_d:
             ipo["bucket"] = "current"
             filtered_current.append(ipo)
@@ -525,16 +524,14 @@ def fetch_ipo_list_categorized() -> dict:
             ipo["bucket"] = "closed"
             filtered_closed.append(ipo)
         else:
-            # If dates are missing or "TBA", drop it from current so it doesn't clutter
             if op_d and op_d > today:
                 filtered_upcoming.append(ipo)
-            # Otherwise, discard unverified items with no open window
 
     # 2. Process Upcoming: Must have an open date strictly in the future
     for ipo in upcoming:
         op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
         if op_d and op_d < today:
-            continue # Skip past upcoming items that forgot to move to closed
+            continue
         ipo["bucket"] = "upcoming"
         filtered_upcoming.append(ipo)
 
@@ -550,7 +547,6 @@ def fetch_ipo_list_categorized() -> dict:
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "sources_note": "Hybrid IPO sources with strict calendar date filtering.",
     }
-
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
