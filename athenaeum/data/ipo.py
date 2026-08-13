@@ -408,8 +408,16 @@ def fetch_ipo_list_categorized() -> dict:
     final_current, final_upcoming, final_closed = [], [], []
 
     for ipo in master_pool:
-        # MARKET-DATA GUARD: If it has recorded listing gains or listing price, it is verified closed/listed!
-        if ipo.get("listing_gain_pct") is not None or ipo.get("listing_price") is not None or ipo.get("source") == "screener_recent":
+        status_lower = str(ipo.get("status", "")).lower()
+        source_lower = str(ipo.get("source", "")).lower()
+        date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
+
+        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
+        future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming", "jul"]
+        is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
+
+        # 1. CLOSED GUARD: Verified past listings or explicit closed status with past dates
+        if (ipo.get("listing_gain_pct") is not None or ipo.get("listing_price") is not None or "screener_recent" in source_lower):
             ipo["bucket"] = "closed"
             ipo["listing_status_override"] = None
             final_closed.append(ipo)
@@ -419,18 +427,13 @@ def fetch_ipo_list_categorized() -> dict:
         cl_d = _parse_date_flex(ipo.get("close_date"))
         lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
-        date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
-        
-        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
-        future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming", "jul"]
-        is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
-
+        # 2. UPCOMING GUARD: Explicitly future dates or future text estimates
         if is_future_text or (op_d and today < op_d):
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
             continue
 
-        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
+        # 3. CURRENT GUARD: Active today between open and close
         if op_d and cl_d and op_d <= today <= cl_d:
             ipo["bucket"] = "current"
             final_current.append(ipo)
@@ -440,20 +443,16 @@ def fetch_ipo_list_categorized() -> dict:
             final_current.append(ipo)
             continue
 
-        # STAGE 3 & 4: Closed -> Must have verified past closing/listing
+        # 4. VERIFIED CLOSED: Closing or listing date has strictly passed
         if (cl_d and cl_d < today) or (lst_d and lst_d < today):
-            if is_future_text:
-                ipo["bucket"] = "upcoming"
-                final_upcoming.append(ipo)
+            ipo["bucket"] = "closed"
+            if lst_d and today < lst_d:
+                ipo["listing_status_override"] = "NOT YET LISTED"
             else:
-                ipo["bucket"] = "closed"
-                if lst_d and today < lst_d:
-                    ipo["listing_status_override"] = "NOT YET LISTED"
-                else:
-                    ipo["listing_status_override"] = None
-                final_closed.append(ipo)
+                ipo["listing_status_override"] = None
+            final_closed.append(ipo)
         else:
-            # Default unverified future estimates to upcoming, NOT closed!
+            # Absolute fallback for anything unverified/unlaunched -> Upcoming
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
 
@@ -462,7 +461,7 @@ def fetch_ipo_list_categorized() -> dict:
         "closed": _deduplicate_list(final_closed)[:40],
         "upcoming": _deduplicate_list(final_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strict lifecycle sorted IPO pools with market-data guard.",
+        "sources_note": "Strict lifecycle sorted IPO pools with robust guards.",
     }
 
 
