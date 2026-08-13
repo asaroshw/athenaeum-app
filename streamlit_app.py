@@ -1,12 +1,15 @@
 """Athenaeum Financial Intelligence — Streamlit entrypoint."""
 from __future__ import annotations
 import logging
+import re
+import base64
+import pandas as pd
 import streamlit as st
 
 from athenaeum.config import (
     GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE,
 )
-from athenaeum.utils.helpers import html_escape_fn as html_escape, rating_color, style_verdict_text
+from athenaeum.utils.helpers import html_escape_fn as html_escape, rating_color, style_verdict_text, to_float
 from athenaeum.data.equity import resolve_name_to_ticker, fetch_stock_data
 from athenaeum.data.ipo import (
     fetch_ipo_list_categorized, fetch_ipo_detail, score_ipo,
@@ -14,12 +17,13 @@ from athenaeum.data.ipo import (
 )
 from athenaeum.ui.components import (
     custom_metric, card, render_checks, render_scorecard_badges,
-    price_history_chart, fair_value_bar, analysis_radar_chart, 
+    price_history_chart, fair_value_bar, analysis_radar_chart, projection_path_chart,
     render_52week_range, render_price_summary_cards, render_valuation_spectrum, 
     render_analyst_consensus, extract_highlights, render_highlights_card, 
     render_corporate_events_and_mfs, ownership_donut
 )
 from athenaeum.ai.reports import generate_comprehensive_report
+from athenaeum.models.fundamentals import valuation_checks, past_performance_checks, financial_health_checks, dividend_checks
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("athenaeum")
@@ -29,16 +33,6 @@ st.set_page_config(
     page_icon="📊",
     layout="wide",
 )
-
-# Session defaults
-if "app_mode" not in st.session_state:
-    st.session_state.app_mode = "equity"
-if "selected_ipo" not in st.session_state:
-    st.session_state.selected_ipo = None
-if "ipo_detail" not in st.session_state:
-    st.session_state.ipo_detail = None
-if "ipo_bucket" not in st.session_state:
-    st.session_state.ipo_bucket = None
 
 st.markdown(f"""
 <style>
@@ -54,229 +48,311 @@ st.markdown(f"""
     .swf-check-fail {{ color: {RED}; }}
     .swf-check-na {{ color: {MUTED}; }}
     .swf-badge {{ background:{CARD_BG}; border:1px solid {BORDER}; padding:5px 12px; border-radius:6px; font-weight:700; font-size:0.85em; }}
-    .swf-tag {{ background:#1c2333; border:1px solid {BORDER}; color:{MUTED}; padding:3px 9px; border-radius:5px; font-size:0.78em; margin-right:6px; display:inline-block; }}
     .swf-section-title {{ font-size: 1.6em; font-weight: 800; color: #FFFFFF; margin-top: 10px; padding-top: 14px; border-top: 2px solid {BORDER}; }}
-
-    @media print {{
-        section[data-testid="stSidebar"], header[data-testid="stHeader"], #MainMenu, footer,
-        div[data-testid="stTextInput"], div[data-testid="stButton"], .stSpinner {{ display: none !important; }}
-        .stApp {{ background-color: #ffffff !important; }}
-        body, .stApp, p, div, span, td, th, li {{ color: #111111 !important; }}
-        .swf-card {{ background-color: #ffffff !important; border: 1px solid #ccc !important; break-inside: avoid; }}
-        .swf-check-pass {{ color: #15803d !important; }}
-        .swf-check-fail {{ color: #b91c1c !important; }}
-        .swf-h, .swf-section-title {{ color: #1e40af !important; }}
-        .swf-title {{ color: #111111 !important; }}
-    }}
 </style>
 """, unsafe_allow_html=True)
 
-# MODE SELECTOR + EQUITY UI
 # ============================================================
-st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
+# APP STATE & HEADER
+# ============================================================
+if 'report_data'  not in st.session_state: st.session_state.report_data  = None
+if 'app_mode'     not in st.session_state: st.session_state.app_mode     = 'equity'
+if 'selected_ipo' not in st.session_state: st.session_state.selected_ipo = None
+if 'ipo_detail'   not in st.session_state: st.session_state.ipo_detail   = None
 
-c_eq, c_ipo = st.columns(2)
-with c_eq:
-    if st.button("📈 Equity Research", use_container_width=True,
-                 type="primary" if st.session_state.app_mode == "equity" else "secondary"):
-        st.session_state.app_mode = "equity"
-        st.rerun()
-with c_ipo:
-    if st.button("🚀 IPO Analysis", use_container_width=True,
-                 type="primary" if st.session_state.app_mode == "ipo" else "secondary"):
-        st.session_state.app_mode = "ipo"
-        st.rerun()
+def get_base64_image(image_path):
+    try:
+        with open(image_path, "rb") as img_file:
+            return base64.b64encode(img_file.read()).decode('utf-8')
+    except Exception:
+        return None
 
+logo_b64 = get_base64_image("Logo.png")
+
+if logo_b64:
+    st.markdown(f'''
+    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 20px 0;">
+        <img src="data:image/png;base64,{logo_b64}" style="height: 48px; filter: invert(1); vertical-align: middle;">
+        <div class="swf-title" style="letter-spacing: 1.5px;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
+    </div>
+    ''', unsafe_allow_html=True)
+else:
+    st.markdown('<div class="swf-title-container"><div class="swf-title">ATHENAEUM FINANCIAL INTELLIGENCE</div></div>', unsafe_allow_html=True)
+
+m1, m2, m3 = st.columns([1, 1, 3])
+with m1:
+    if st.button("📈  Equity Analysis", use_container_width=True,
+                  type="primary" if st.session_state.app_mode == "equity" else "secondary"):
+        st.session_state.app_mode    = "equity"
+        st.session_state.report_data = None
+        st.rerun()
+with m2:
+    if st.button("🚀  IPO Analysis", use_container_width=True,
+                  type="primary" if st.session_state.app_mode == "ipo" else "secondary"):
+        st.session_state.app_mode   = "ipo"
+        st.session_state.selected_ipo = None
+        st.session_state.ipo_detail   = None
+        st.rerun()
+st.markdown("---")
+
+# ============================================================
+# EQUITY MODE
+# ============================================================
+stock_input, generate_clicked = "", False
 if st.session_state.app_mode == "equity":
-    st.info("Equity mode — listed stocks via FMP/yfinance. Verdicts are research screens, not advice.")
-    stock_input = st.text_input("Stock name or ticker (e.g. RELIANCE, TCS.NS)", "")
-    run = st.button("Analyse Equity", type="primary")
-    if run and stock_input.strip():
-        with st.spinner("Fetching & modelling..."):
-            resolved = resolve_name_to_ticker(stock_input.strip())
-            if not resolved:
-                st.error("Could not resolve ticker.")
-            else:
-                try:
-                    metrics = fetch_stock_data(resolved, stock_input.strip())
-                except Exception as e:
-                    st.error(f"Data fetch failed: {e}")
-                    metrics = None
-                if metrics:
-                    st.session_state["last_equity_metrics"] = metrics
-    metrics = st.session_state.get("last_equity_metrics")
-    if metrics:
-        pred = metrics.get("predictive") or {}
-        currency = metrics.get("currency") or "₹"
-        name = metrics.get("name") or "—"
-        price = metrics.get("price")
-        vc = rating_color(pred.get("verdict", "OBSERVE"))
-        st.markdown(f"""
-        <div class="swf-card">
-          <div style="display:flex;justify-content:space-between;align-items:flex-start;">
-            <div>
-              <div style="color:{MUTED};font-size:0.85em;">Equity Research</div>
-              <div style="font-size:1.5em;font-weight:800;">{html_escape(str(name))}</div>
-              <div style="color:{MUTED};">{html_escape(str(metrics.get('sector','')))} · {html_escape(str(metrics.get('industry','')))}</div>
-            </div>
-            <div style="text-align:right;">
-              <div style="font-size:2em;font-weight:900;color:{vc};">{html_escape(str(pred.get('verdict','—')))}</div>
-              <div style="color:{MUTED};">Composite {pred.get('composite_score','—')}/100</div>
-            </div>
-          </div>
-        </div>
-        """, unsafe_allow_html=True)
+    col_input, col_btn = st.columns([4, 1])
+    with col_input:
+        stock_input = st.text_input("Enter Stock Name or Ticker:", label_visibility="collapsed",
+                                     placeholder="Search a company or ticker (e.g. RELIANCE, Tata Motors)...")
+    with col_btn:
+        generate_clicked = st.button("Analyse", type="primary", use_container_width=True)
 
-        m1, m2, m3, m4 = st.columns(4)
-        with m1:
-            custom_metric("Price", f"{currency}{price:,.2f}" if price else "N/A")
-        with m2:
-            custom_metric("Base Fair Value", f"{currency}{pred.get('base_value'):,.2f}" if pred.get("base_value") else "N/A")
-        with m3:
-            custom_metric("Bear / Bull",
-                (f"{currency}{pred.get('bear_value'):,.0f} / {currency}{pred.get('bull_value'):,.0f}"
-                 if pred.get("bear_value") and pred.get("bull_value") else "N/A"))
-        with m4:
-            custom_metric("Valuation Confidence", pred.get("confidence") or "N/A")
-
-        # Range and Summary Cards
-        render_52week_range(price, metrics.get("fifty_two_low"), metrics.get("fifty_two_high"), currency)
-        if metrics.get("history") is not None:
-            render_price_summary_cards(metrics["history"], price, metrics.get("fifty_two_low"), metrics.get("fifty_two_high"))
-
-        # Valuation Spectrum & Analyst Consensus
-        c_spec, c_analyst = st.columns([2, 1])
-        with c_spec:
-            render_valuation_spectrum(price, pred.get("base_value"), currency)
-        with c_analyst:
-            render_analyst_consensus(metrics.get("target_mean_price"), price, metrics.get("recommendation_mean"), currency)
-
-        if pred.get("valuation_models"):
-            st.markdown("##### Valuation models")
-            st.dataframe(
-                [{"Model": k, "Value": v} for k, v in pred["valuation_models"].items()],
-                use_container_width=True, hide_index=True,
-            )
-
-        audit = pred.get("audit") or metrics.get("audit") or {}
-        with st.expander("Why this verdict? (audit trail)", expanded=False):
-            st.markdown(
-                f"- **Growth used:** {audit.get('growth_used', pred.get('growth_used'))}% "
-                f"({audit.get('growth_source', pred.get('growth_source'))})\n"
-                f"- **Ke / RFR:** {audit.get('ke', pred.get('discount_rate'))}% / source `{audit.get('rfr_source', metrics.get('rfr_source'))}`\n"
-                f"- **Near-term / terminal g:** {audit.get('near_term_growth')}% / {audit.get('terminal_growth')}%\n"
-                f"- **Model:** {audit.get('model_used', pred.get('model_used'))}\n"
-                f"- **Scores:** fundamental={audit.get('fundamental_score', pred.get('fundamental_score'))}, "
-                f"intrinsic={audit.get('intrinsic_score', pred.get('intrinsic_score'))}, "
-                f"technical={audit.get('technical_score', pred.get('technical_score'))}\n"
-                f"- **Valuation CV / confidence:** {audit.get('valuation_cv')} / {audit.get('valuation_confidence', pred.get('confidence'))}\n"
-                f"- **Data completeness:** {metrics.get('data_completeness')}%\n"
-            )
-            # Fix: Single execution loop for audit notes
-            notes_list = audit.get("notes") or pred.get("note") or []
-            if isinstance(notes_list, str):
-                notes_list = [n.strip() for n in notes_list.split(". ") if n.strip()]
-            for note in notes_list:
-                st.caption(f"• {html_escape(str(note))}")
-
-        warns = metrics.get("warnings") or []
-        if warns:
-            with st.expander(f"Data-quality warnings ({len(warns)})"):
-                for w in warns:
-                    st.warning(str(w))
-
-        # Scorecards, Checks, and Radar Chart
-        st.markdown("---")
-        col_sc, col_radar = st.columns([2, 1])
-        with col_sc:
-            try:
-                render_scorecard_badges(metrics.get("q_score"), metrics.get("v_score"), metrics.get("f_score"))
-            except Exception:
-                pass
-            if metrics.get("valuation_checks"):
-                card("Valuation checklist", render_checks(metrics["valuation_checks"]) if callable(render_checks) else "")
-        with col_radar:
-            try:
-                st.plotly_chart(analysis_radar_chart(metrics, pred), use_container_width=True)
-            except Exception:
-                pass
-
-        # Highlights & Drivers
-        working, not_working = extract_highlights(metrics, metrics.get("cf_df"))
-        render_highlights_card(working, not_working)
-
-        # Ownership, Events, MFs
-        st.markdown("---")
-        c_own, c_ev = st.columns([1, 2])
-        with c_own:
-            st.markdown("##### 🥧 Shareholding Pattern")
-            if metrics.get("shareholding"):
-                st.plotly_chart(ownership_donut(metrics["shareholding"]), use_container_width=True)
-        with c_ev:
-            render_corporate_events_and_mfs(metrics.get("calendar"), metrics.get("mutual_funds"))
-
-        # Charts
-        st.markdown("---")
+if generate_clicked and stock_input.strip() and st.session_state.app_mode == 'equity':
+    with st.spinner('Compiling metrics, applying sector normalization, and running the composite models...'):
         try:
-            if metrics.get("history") is not None:
-                st.plotly_chart(price_history_chart(metrics["history"], currency), use_container_width=True)
+            rt = resolve_name_to_ticker(stock_input)
+            metrics = fetch_stock_data(rt, stock_input)
+            
+            if metrics is not None and isinstance(metrics, dict):
+                final_ticker = metrics.pop('working_ticker', rt)
+            else:
+                st.error("Error: Could not retrieve valid data for this stock ticker.")
+                st.stop()
+
+            ai_text = generate_comprehensive_report(metrics, final_ticker)
+            raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
+            sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
+            if len(sections_list) > 8: sections_list = sections_list[-8:]
+
+            st.session_state.report_data = {"metrics": metrics, "ai_text": ai_text, "narrative_sections": sections_list, "ticker": final_ticker}
         except Exception as e:
-            st.caption(f"Chart unavailable: {e}")
-        if pred.get("base_value") and price:
-            try:
-                st.plotly_chart(fair_value_bar(price, pred["base_value"], currency), use_container_width=True)
-            except Exception:
-                pass
+            st.error(f"Error: {e}")
 
-        with st.spinner("AI synthesis..."):
-            try:
-                report = generate_comprehensive_report(metrics, metrics.get("working_ticker") or "")
-                card("AI Research Synthesis", f"<p style='color:#c9d1d9;line-height:1.6;white-space:pre-wrap;'>{style_verdict_text(report)}</p>")
-            except Exception as e:
-                st.caption(f"AI report unavailable: {e}")
+if st.session_state.report_data and st.session_state.app_mode == 'equity':
+    data = st.session_state.report_data
+    m = data['metrics']
+    ticker = data['ticker']
+    narrative = data['narrative_sections']
+    def narrative_for(idx): return re.sub(r'^(?:\*\*|__)?\d+\.\s+[A-Z&\s]+(?:\*\*|__)?\n+', '', narrative[idx], flags=re.IGNORECASE).strip() if idx < len(narrative) else "Detailed qualitative breakdown unavailable."
 
-        st.caption(
-            "Not financial advice. Simplified FCF DCF / residual income are cross-checks. "
-            "Scores are uncalibrated heuristics. Always read primary filings."
+    pred = m.get('predictive', {})
+    current_rating = pred.get('verdict', 'OBSERVE')
+    rc = rating_color(current_rating)
+    currency = m.get('currency', '₹')
+
+    val_checks = m.get('valuation_checks') or valuation_checks(m)
+    past_checks = m.get('past_checks') or past_performance_checks(m)
+    health_checks = m.get('health_checks') or financial_health_checks(m)
+    div_checks = dividend_checks(m)
+
+    # ---------------- Header ----------------
+    hcol1, hcol2 = st.columns([2.2, 1])
+    with hcol1:
+        turnaround_badge = ' <span class="swf-badge" style="margin-left:6px; color:#F97316;">TURNAROUND</span>' if m.get('is_turnaround') else ''
+        price_str = f"{currency}{m['price']}" if m.get('price') is not None else "N/A"
+        st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{html_escape(m.get("name", "N/A"))}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span>{turnaround_badge}</div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{price_str}</div></div></div></div>', unsafe_allow_html=True)
+        
+        try:
+            render_scorecard_badges(m.get('q_score'), m.get('v_score'), m.get('f_score'))
+        except Exception: pass
+        
+        render_price_summary_cards(m.get('history'), m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')))
+        
+        hist_df = m.get('history')
+        if hist_df is not None and not hist_df.empty: st.plotly_chart(price_history_chart(hist_df, currency), use_container_width=True, config={'displayModeBar': False})
+    with hcol2:
+        st.markdown('<div class="swf-card"><div class="swf-h">Composite Score Radar</div>', unsafe_allow_html=True)
+        try:
+            st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
+        except Exception: pass
+        st.markdown('</div>', unsafe_allow_html=True)
+
+    # ---------------- Recent News & Catalysts ----------------
+    news_items = m.get('recent_news', [])
+    if news_items:
+        news_html = "<ul style='padding-left: 20px; margin-bottom: 0;'>"
+        for item in news_items[:5]:
+            news_html += f"<li style='margin-bottom: 8px;'><a href='{html_escape(item['link'], quote=True)}' target='_blank' style='color:{BLUE}; text-decoration:none;'>{html_escape(item['title'])}</a></li>"
+        news_html += "</ul>"
+    else:
+        news_html = "<div class='swf-sub'>No recent news found for this stock.</div>"
+        
+    card("Recent News & Market Catalysts", news_html)
+    st.markdown("---")
+
+    # ---------------- Company Overview ----------------
+    st.markdown('<div class="swf-section-title">Company Overview</div>', unsafe_allow_html=True)
+    c1, c2, c3, c4 = st.columns(4)
+    with c1: 
+        custom_metric("Current Price", f"{currency}{m['price']}" if m.get('price') is not None else "N/A")
+        custom_metric("P/E Ratio", f"{m['pe_ratio']}x" if m.get('pe_ratio') not in ["N/A", None] else "N/A")
+    with c2: 
+        custom_metric("P/BV Ratio", f"{m['pb_ratio']}x" if m.get('pb_ratio') not in ["N/A", None] else "N/A")
+        custom_metric("ROE", f"{m['roe']}")
+    with c3: 
+        custom_metric("EV/EBITDA", f"{m['ev_ebitda']}x" if "N/A" not in str(m.get('ev_ebitda', 'N/A')) else str(m.get('ev_ebitda', 'N/A')))
+        custom_metric("PAT Growth (YoY)", f"{m['pat_yoy']}")
+    with c4: 
+        custom_metric("Debt-to-Equity", f"{m['debt_to_equity']}")
+        custom_metric("EBITDA Margin", f"{m.get('ebitda_margin', 'N/A')}")
+    
+    render_52week_range(m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')), currency)
+    
+    card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{html_escape(str(m.get('business_summary', 'Business summary not available.')))}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
+    st.markdown("---")
+
+    # ---------------- 1. Valuation ----------------
+    st.markdown('<div class="swf-section-title">1. Valuation</div>', unsafe_allow_html=True)
+    card("Valuation Checklist", render_checks(val_checks))
+    st.markdown("##### Fair Value Estimate")
+    if pred.get('base_value') and m.get('price'):
+        try:
+            fig, diff_pct = fair_value_bar(m['price'], pred['base_value'], currency)
+            st.plotly_chart(fig, use_container_width=True, config={'displayModeBar': False})
+            render_valuation_spectrum(m['price'], pred['base_value'], currency)
+            st.caption(f"Price is approx {abs(diff_pct)}% {'overvalued' if diff_pct > 0 else 'undervalued'} vs the modeled {pred.get('model_used','valuation')} fair value (growth assumption used: {pred.get('growth_used','N/A')}%).")
+        except Exception: pass
+    
+    render_analyst_consensus(m.get('target_mean_price'), m.get('price'), m.get('recommendation_mean'), currency)
+    card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(0))}</p>")
+    st.markdown("---")
+
+    # ---------------- 2. Future Growth ----------------
+    st.markdown('<div class="swf-section-title">2. Future Growth &amp; Outlook</div>', unsafe_allow_html=True)
+    fg1, fg2, fg3 = st.columns(3)
+    
+    target_display = f"{currency}{pred.get('target_price')}" if current_rating != "DON'T BUY" else "N/A (Rejected Model)"
+    with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", target_display)
+    with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
+    with fg3: custom_metric("Growth Assumption Used", f"{pred.get('growth_used','N/A')}%")
+    
+    if pred.get('base_value') and m.get('history') is not None:
+        try:
+            st.plotly_chart(projection_path_chart(m['history'], pred['base_value']), use_container_width=True, config={'displayModeBar': False})
+        except Exception: pass
+        
+    card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(1))}</p>")
+    st.markdown("---")
+
+    # ---------------- 3. Past Performance ----------------
+    st.markdown('<div class="swf-section-title">3. Past Performance</div>', unsafe_allow_html=True)
+    card("Past Performance Checklist", render_checks(past_checks))
+    pp1, pp2 = st.columns(2)
+    with pp1: custom_metric("Operating Margin (OPM)", f"{m.get('operating_margin')}%" if m.get('operating_margin') is not None else "N/A")
+    with pp2: custom_metric("Multi-Year Revenue CAGR", f"{m.get('revenue_cagr')}%" if m.get('revenue_cagr') is not None else "N/A")
+    
+    if m.get('pnl_df') is not None and not m['pnl_df'].empty: 
+        st.markdown("##### Profit & Loss (Cr)")
+        st.dataframe(m['pnl_df'], use_container_width=True, hide_index=True)
+    
+    working, not_working = extract_highlights(m, m.get('cf_df'))
+    render_highlights_card(working, not_working)
+    card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(2))}</p>")
+    st.markdown("---")
+
+    # ---------------- 4. Financial Health ----------------
+    st.markdown('<div class="swf-section-title">4. Financial Health</div>', unsafe_allow_html=True)
+    card("Financial Health Checklist", render_checks(health_checks))
+    if m.get('is_financial_sector'):
+        st.caption("Note: Capital Adequacy Ratio and NPA (asset quality) figures are not available from this data source and are not shown or estimated. The Net Interest Margin above is an approximation.")
+    tab_bs, tab_cf = st.tabs(["Balance Sheet", "Cash Flows"])
+    with tab_bs:
+        if m.get('bs_df') is not None and not m['bs_df'].empty: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
+    with tab_cf:
+        if m.get('cf_df') is not None and not m['cf_df'].empty: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
+    card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(3))}</p>")
+    st.markdown("---")
+
+    # ---------------- 5. Dividend ----------------
+    st.markdown('<div class="swf-section-title">5. Dividend</div>', unsafe_allow_html=True)
+    card("Dividend Checklist", render_checks(div_checks))
+    card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(4))}</p>")
+    st.markdown("---")
+
+    # ---------------- 6. Management ----------------
+    st.markdown('<div class="swf-section-title">6. Management &amp; Leadership</div>', unsafe_allow_html=True)
+    if m.get('company_officers'): 
+        st.dataframe(pd.DataFrame([{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]), use_container_width=True, hide_index=True)
+    card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(5))}</p>")
+    st.markdown("---")
+
+    # ---------------- 7. Ownership ----------------
+    st.markdown('<div class="swf-section-title">7. Ownership Structure</div>', unsafe_allow_html=True)
+    if m.get('shareholding'):
+        st.plotly_chart(ownership_donut(m['shareholding']), use_container_width=True, config={'displayModeBar': False})
+    render_corporate_events_and_mfs(m.get('calendar'), m.get('mutual_funds'))
+    card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(6))}</p>")
+    st.markdown("---")
+
+    # ---------------- 8. Verdict ----------------
+    st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:1.15em; margin-bottom:14px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
+
+    if current_rating in ["BUY", "STRONG BUY"]:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Recommended Entry:</b> {pred.get('entry_range')}<br><b>Horizon:</b> {pred.get('time_horizon')}<br><b>Target:</b> {currency}{pred.get('target_price')}<br><b>Stop Loss:</b> {currency}{pred.get('stop_loss')}</div>", unsafe_allow_html=True)
+    elif current_rating == "OBSERVE":
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px;'><b>Target ({pred.get('model_used','DCF')}):</b> {currency}{pred.get('target_price')}</div>", unsafe_allow_html=True)
+    else:
+        st.markdown(f"<div style='font-size:0.95em; line-height:1.8em; margin-bottom:15px; color:{RED};'><b>Rejected Valuation Baseline:</b> {currency}{pred.get('target_price')} (Do Not Trade)</div>", unsafe_allow_html=True)
+
+    # --- RECOMMENDED SECTOR ALTERNATIVE ---
+    if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
+        alt = m['best_alternative']
+        st.markdown(
+            f"""
+            <div style="background-color: rgba(56, 189, 248, 0.1); border: 1px solid {BLUE}; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
+                <div style="color: {BLUE}; font-weight: 700; font-size: 1.1em; margin-bottom: 5px;">💡 Recommended Sector Alternative</div>
+                <div style="font-size: 0.9em; color: #E6E6E6; margin-bottom: 8px;">
+                    This stock scored poorly. Based on its sector profile, you might want to look at a fundamental leader in this space:
+                </div>
+                <div style="display: flex; gap: 20px; font-weight: 600;">
+                    <div>Stock: <span style="color: {GOLD};">{alt['name']} ({alt['ticker']})</span></div>
+                    <div>Price: {currency}{alt['price']}</div>
+                    <div>P/E: {alt['pe']}x</div>
+                    <div>P/B: {alt['pb']}x</div>
+                </div>
+            </div>
+            """, unsafe_allow_html=True
         )
 
+    # --- PROS AND CONS CARDS ---
+    all_checks = val_checks + past_checks + health_checks + div_checks
+    pros = [c for c in all_checks if c[1] is True]
+    cons = [c for c in all_checks if c[1] is False]
+
+    def render_pro_con_list(items, is_pro=True):
+        if not items: return "<div class='swf-sub'>None identified based on current data.</div>"
+        html = "<ul style='padding-left: 20px; margin-bottom: 0; font-size: 0.9em;'>"
+        for label, _, desc in items:
+            if is_pro:
+                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b>{html_escape(str(label))}</b><br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
+            else:
+                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b style='color: {RED};'>Failed:</b> {html_escape(str(label))}<br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
+        html += "</ul>"
+        return html
+
+    pc1, pc2 = st.columns(2)
+    with pc1: card("✅ Quantitative Strengths", render_pro_con_list(pros, is_pro=True))
+    with pc2: card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons, is_pro=False))
+
+    card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(7))}</p>")
+    st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan.")
 
 # ============================================================
-# IPO MODE — FULL UI (3-tab: Current / Closed / Upcoming)
+# IPO MODE (Unchanged)
 # ============================================================
 if st.session_state.app_mode == "ipo":
-    if "ipo_bucket" not in st.session_state:
-        st.session_state.ipo_bucket = None
-
-    st.info(
-        "🚀 **IPO Analysis Mode** — Live Indian IPOs from public aggregators. "
-        "Current issues can receive a BUY/ABSTAIN screen. Closed & Upcoming show facts only. "
-        "Not financial advice."
-    )
-
+    st.info("🚀 **IPO Analysis Mode** — Live Indian IPOs from public aggregators. Current issues can receive a BUY/ABSTAIN screen.")
     if st.session_state.selected_ipo and st.session_state.ipo_detail:
         _render_ipo_detail_view()
     else:
         with st.spinner("Fetching live IPO lists..."):
             cats = fetch_ipo_list_categorized()
-
         tab_cur, tab_closed, tab_up = st.tabs([
             f"Current ({len(cats.get('current') or [])})",
             f"Closed ({len(cats.get('closed') or [])})",
             f"Upcoming ({len(cats.get('upcoming') or [])})",
         ])
-        with tab_cur:
-            st.caption("Open for subscription — full screen with GMP, subscription, score & BUY/ABSTAIN.")
-            _render_ipo_list_rows(cats.get("current") or [], "current")
-        with tab_closed:
-            st.caption("Closed / listed — shows listing gains or listing date. No algorithmic verdict.")
-            _render_ipo_list_rows(cats.get("closed") or [], "closed")
-        with tab_up:
-            st.caption("Upcoming — price band & issue facts only. No GMP / subscription / verdict.")
-            _render_ipo_list_rows(cats.get("upcoming") or [], "upcoming")
-
-        st.caption(
-            f"Source refresh: {cats.get('fetched_at', 'n/a')} · "
-            f"{cats.get('sources_note', 'Hybrid IPO sources')}. "
-            "GMP is unofficial (aggregator / news / AI extraction)."
-        )
+        with tab_cur: _render_ipo_list_rows(cats.get("current") or [], "current")
+        with tab_closed: _render_ipo_list_rows(cats.get("closed") or [], "closed")
+        with tab_up: _render_ipo_list_rows(cats.get("upcoming") or [], "upcoming")
