@@ -342,7 +342,7 @@ def _normalize_company_name(name):
         "group", "holdings", "labs", "pharmaceuticals", "pharma", "dairy"
     ]:
         n = re.sub(rf"\b{term}\b", "", n)
-    return re.sub(r"[^a-z0-9]", "", n)[:10]
+    return re.sub(r"[^a-z0-9]", "", n)[:12]
 
 
 def _merge_ipo_records(primary: list, secondary: list) -> list:
@@ -372,6 +372,26 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
     return list(by.values())
 
 
+def _deduplicate_list(items: list) -> list:
+    """Strict global deduplication pass for a single category list."""
+    unique = {}
+    for item in items:
+        name = item.get("name") or item.get("slug") or ""
+        k = _normalize_company_name(name)
+        if not k:
+            k = re.sub(r"[^a-z0-9]", "", name.lower())[:12]
+        if not k:
+            continue
+        if k not in unique:
+            unique[k] = dict(item)
+        else:
+            base = unique[k]
+            for field, val in item.items():
+                if base.get(field) in (None, "", []) and val not in (None, "", []):
+                    base[field] = val
+    return list(unique.values())
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_list_categorized() -> dict:
     scr = _scrape_screener_ipo_list()
@@ -380,7 +400,6 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
-    # Deduplicated pools for Current and Closed to prevent duplicate entries
     raw_current = []
     for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket") == "current"]]:
         if lst:
@@ -397,11 +416,11 @@ def fetch_ipo_list_categorized() -> dict:
             raw_closed = _merge_ipo_records(raw_closed, lst)
 
     return {
-        "current": raw_current,
-        "closed": raw_closed[:40],
-        "upcoming": raw_upcoming,
+        "current": _deduplicate_list(raw_current),
+        "closed": _deduplicate_list(raw_closed)[:40],
+        "upcoming": _deduplicate_list(raw_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Deduplicated hybrid IPO sources.",
+        "sources_note": "Globally deduplicated hybrid IPO sources.",
     }
 
 
