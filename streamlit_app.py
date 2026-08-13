@@ -14,7 +14,10 @@ from athenaeum.data.ipo import (
 )
 from athenaeum.ui.components import (
     custom_metric, card, render_checks, render_scorecard_badges,
-    price_history_chart, fair_value_bar,
+    price_history_chart, fair_value_bar, analysis_radar_chart, 
+    render_52week_range, render_price_summary_cards, render_valuation_spectrum, 
+    render_analyst_consensus, extract_highlights, render_highlights_card, 
+    render_corporate_events_and_mfs, ownership_donut
 )
 from athenaeum.ai.reports import generate_comprehensive_report
 
@@ -136,6 +139,18 @@ if st.session_state.app_mode == "equity":
         with m4:
             custom_metric("Valuation Confidence", pred.get("confidence") or "N/A")
 
+        # Range and Summary Cards
+        render_52week_range(price, metrics.get("fifty_two_low"), metrics.get("fifty_two_high"), currency)
+        if metrics.get("history") is not None:
+            render_price_summary_cards(metrics["history"], price, metrics.get("fifty_two_low"), metrics.get("fifty_two_high"))
+
+        # Valuation Spectrum & Analyst Consensus
+        c_spec, c_analyst = st.columns([2, 1])
+        with c_spec:
+            render_valuation_spectrum(price, pred.get("base_value"), currency)
+        with c_analyst:
+            render_analyst_consensus(metrics.get("target_mean_price"), price, metrics.get("recommendation_mean"), currency)
+
         if pred.get("valuation_models"):
             st.markdown("##### Valuation models")
             st.dataframe(
@@ -144,7 +159,7 @@ if st.session_state.app_mode == "equity":
             )
 
         audit = pred.get("audit") or metrics.get("audit") or {}
-        with st.expander("Why this verdict? (audit trail)", expanded=True):
+        with st.expander("Why this verdict? (audit trail)", expanded=False):
             st.markdown(
                 f"- **Growth used:** {audit.get('growth_used', pred.get('growth_used'))}% "
                 f"({audit.get('growth_source', pred.get('growth_source'))})\n"
@@ -157,12 +172,12 @@ if st.session_state.app_mode == "equity":
                 f"- **Valuation CV / confidence:** {audit.get('valuation_cv')} / {audit.get('valuation_confidence', pred.get('confidence'))}\n"
                 f"- **Data completeness:** {metrics.get('data_completeness')}%\n"
             )
-            for n in (audit.get("notes") or pred.get("note") or "").split(". ") if isinstance(audit.get("notes"), list) is False else (audit.get("notes") or []):
-                if n:
-                    st.caption(f"• {n if isinstance(n, str) else str(n)}")
-            if isinstance(audit.get("notes"), list):
-                for n in audit["notes"]:
-                    st.caption(f"• {html_escape(str(n))}")
+            # Fix: Single execution loop for audit notes
+            notes_list = audit.get("notes") or pred.get("note") or []
+            if isinstance(notes_list, str):
+                notes_list = [n.strip() for n in notes_list.split(". ") if n.strip()]
+            for note in notes_list:
+                st.caption(f"• {html_escape(str(note))}")
 
         warns = metrics.get("warnings") or []
         if warns:
@@ -170,15 +185,38 @@ if st.session_state.app_mode == "equity":
                 for w in warns:
                     st.warning(str(w))
 
-        # Scorecards & checks
-        try:
-            render_scorecard_badges(
-                metrics.get("q_score"), metrics.get("v_score"), metrics.get("f_score"))
-        except Exception:
-            pass
-        if metrics.get("valuation_checks"):
-            card("Valuation checklist", render_checks(metrics["valuation_checks"]) if callable(render_checks) else "")
+        # Scorecards, Checks, and Radar Chart
+        st.markdown("---")
+        col_sc, col_radar = st.columns([2, 1])
+        with col_sc:
+            try:
+                render_scorecard_badges(metrics.get("q_score"), metrics.get("v_score"), metrics.get("f_score"))
+            except Exception:
+                pass
+            if metrics.get("valuation_checks"):
+                card("Valuation checklist", render_checks(metrics["valuation_checks"]) if callable(render_checks) else "")
+        with col_radar:
+            try:
+                st.plotly_chart(analysis_radar_chart(metrics, pred), use_container_width=True)
+            except Exception:
+                pass
+
+        # Highlights & Drivers
+        working, not_working = extract_highlights(metrics, metrics.get("cf_df"))
+        render_highlights_card(working, not_working)
+
+        # Ownership, Events, MFs
+        st.markdown("---")
+        c_own, c_ev = st.columns([1, 2])
+        with c_own:
+            st.markdown("##### 🥧 Shareholding Pattern")
+            if metrics.get("shareholding"):
+                st.plotly_chart(ownership_donut(metrics["shareholding"]), use_container_width=True)
+        with c_ev:
+            render_corporate_events_and_mfs(metrics.get("calendar"), metrics.get("mutual_funds"))
+
         # Charts
+        st.markdown("---")
         try:
             if metrics.get("history") is not None:
                 st.plotly_chart(price_history_chart(metrics["history"], currency), use_container_width=True)
@@ -242,4 +280,3 @@ if st.session_state.app_mode == "ipo":
             f"{cats.get('sources_note', 'Hybrid IPO sources')}. "
             "GMP is unofficial (aggregator / news / AI extraction)."
         )
-
