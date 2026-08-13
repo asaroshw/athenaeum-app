@@ -10,14 +10,14 @@ from athenaeum.utils.helpers import (
     html_escape_fn, _parse_date_flex, _parse_money_inr, _parse_gmp, _parse_price_band,
     _slug_from_href, _classify_bucket, to_float,
 )
-html_escape = html_escape_fn  # <--- Add this alias here
+html_escape = html_escape_fn  # Fix NameError
 
 from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG
 from athenaeum.data.equity import fetch_google_news
 from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
 from athenaeum.utils.helpers import style_verdict_text, rating_color
-html_escape = html_escape_fn
+
 logger = logging.getLogger("athenaeum")
 _IPO_HEADERS = {
     "User-Agent": (
@@ -29,7 +29,6 @@ _IPO_HEADERS = {
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def _scrape_ipomarket_list(path: str) -> list:
-    """Scrape a list page from ipomarket.in (/ipo/open, /ipo/upcoming, /ipo/listed)."""
     url = f"https://www.ipomarket.in{path}"
     try:
         r = requests.get(url, headers=_IPO_HEADERS, timeout=20)
@@ -452,7 +451,6 @@ def _ai_google_gmp(company_name: str) -> dict:
 
 
 def _normalize_company_name(name):
-    """Strip common corporate suffixes and noise words for smart deduplication."""
     if not name:
         return ""
     n = name.lower()
@@ -462,7 +460,6 @@ def _normalize_company_name(name):
 
 
 def _merge_ipo_records(primary: list, secondary: list) -> list:
-    """Merge using smart token-based normalization so variations combine cleanly."""
     by = {}
     for rec in primary:
         k = _normalize_company_name(rec.get("name") or rec.get("slug"))
@@ -500,52 +497,24 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
+    # Keep categories strictly isolated from their original scrapers
     current = _merge_ipo_records(scr.get("current") or [], im_current)
     current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
+    for x in current: x["bucket"] = "current"
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
     upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
+    for x in upcoming: x["bucket"] = "upcoming"
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
-
-    # Re-classify buckets strictly based on today's actual date (August 13, 2026)
-    today = datetime.today().date()
-    final_current, final_upcoming, final_closed = [], [], []
-
-    all_ipos = _merge_ipo_records(current, upcoming)
-    all_ipos = _merge_ipo_records(all_ipos, closed)
-
-    for ipo in all_ipos:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        cl_d = _parse_date_flex(ipo.get("close_date"))
-        
-        if cl_d and cl_d < today:
-            ipo["bucket"] = "closed"
-            final_closed.append(ipo)
-        elif op_d and op_d > today:
-            ipo["bucket"] = "upcoming"
-            final_upcoming.append(ipo)
-        elif op_d and cl_d and op_d <= today <= cl_d:
-            ipo["bucket"] = "current"
-            final_current.append(ipo)
-        else:
-            st_hint = str(ipo.get("status", "")).upper()
-            if "UPCOMING" in st_hint:
-                ipo["bucket"] = "upcoming"
-                final_upcoming.append(ipo)
-            elif "CLOSED" in st_hint or "LISTED" in st_hint:
-                ipo["bucket"] = "closed"
-                final_closed.append(ipo)
-            else:
-                ipo["bucket"] = "current"
-                final_current.append(ipo)
+    for x in closed: x["bucket"] = "closed"
 
     return {
-        "current": final_current,
-        "closed": final_closed[:40],
-        "upcoming": final_upcoming,
+        "current": current,
+        "closed": closed[:40],
+        "upcoming": upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Hybrid IPO sources with smart token deduplication.",
+        "sources_note": "Hybrid IPO sources with strict category isolation.",
     }
 
 
@@ -800,8 +769,8 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
     if not ipos:
         st.info(f"No {bucket} IPOs found from live sources right now.")
         return
-    for ipo in ipos:
-        sym = ipo.get("slug") or ipo.get("symbol") or ""
+    for idx, ipo in enumerate(ipos):
+        sym = ipo.get("slug") or ipo.get("symbol") or f"ipo_{idx}"
         name = ipo.get("name", "Unknown")
         band = ipo.get("price_band_str") or (
             f"{currency}{ipo['price_low']} – {currency}{ipo['price_high']}"
@@ -841,7 +810,7 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     f"<b>Upcoming</b>",
                     unsafe_allow_html=True)
         with cols[4]:
-            if st.button("Analyse →", key=f"ipo_{bucket}_{sym}", use_container_width=True):
+            if st.button("Analyse →", key=f"ipo_{bucket}_{sym}_{idx}", use_container_width=True):
                 with st.spinner(f"Loading {name}..."):
                     st.session_state.selected_ipo = sym
                     st.session_state.ipo_bucket = bucket
