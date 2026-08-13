@@ -12,7 +12,7 @@ from athenaeum.utils.helpers import (
     html_escape_fn, _parse_date_flex, _parse_money_inr, _parse_gmp, _parse_price_band,
     _slug_from_href, _classify_bucket, to_float,
 )
-html_escape = html_escape_fn  # Local alias for HTML safety
+html_escape = html_escape_fn
 
 from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG, BG
 from athenaeum.data.equity import fetch_google_news
@@ -456,9 +456,14 @@ def _normalize_company_name(name):
     if not name:
         return ""
     n = name.lower()
-    for term in ["ltd", "limited", "food", "foods", "engg", "engineering", "private", "pvt", "co", "company", "corporation", "corp", "medicare", "enterprises"]:
+    for term in [
+        "ltd", "limited", "food", "foods", "engg", "engineering", "private", "pvt", 
+        "co", "company", "corporation", "corp", "medicare", "enterprises", 
+        "industries", "technologies", "tech", "solutions", "infra", "infrastructure",
+        "group", "holdings", "labs", "pharmaceuticals", "pharma"
+    ]:
         n = re.sub(rf"\b{term}\b", "", n)
-    return re.sub(r"[^a-z0-9]", "", n)[:15]
+    return re.sub(r"[^a-z0-9]", "", n)[:12]
 
 
 def _merge_ipo_records(primary: list, secondary: list) -> list:
@@ -479,7 +484,7 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
         base = by[k]
         for field in ("price_low", "price_high", "price_band_str", "lot_size", "min_investment",
                       "gmp", "gmp_pct", "gmp_str", "subscription_str", "issue_size_cr",
-                      "issue_size_str", "detail_url", "open_date", "close_date", "date"):
+                      "issue_size_str", "detail_url", "open_date", "close_date", "date", "listing_gain_pct", "listing_price"):
             if base.get(field) in (None, "", []) and rec.get(field) not in (None, "", []):
                 base[field] = rec[field]
                 
@@ -501,54 +506,23 @@ def fetch_ipo_list_categorized() -> dict:
 
     current = _merge_ipo_records(scr.get("current") or [], im_current)
     current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
+    for x in current: x["bucket"] = "current"
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
     upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
+    for x in upcoming: x["bucket"] = "upcoming"
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
-
-    # --- STRICT DATE-BASED PURGE & SORTING ---
-    today = datetime.today().date()  # August 13, 2026
-    filtered_current, filtered_upcoming, filtered_closed = [], [], []
-
-    # 1. Process Current: Must have a valid open/close window that includes today
-    for ipo in current:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        cl_d = _parse_date_flex(ipo.get("close_date"))
-        
-        if op_d and cl_d and op_d <= today <= cl_d:
-            ipo["bucket"] = "current"
-            filtered_current.append(ipo)
-        elif op_d and op_d > today:
-            ipo["bucket"] = "upcoming"
-            filtered_upcoming.append(ipo)
-        elif cl_d and cl_d < today:
-            ipo["bucket"] = "closed"
-            filtered_closed.append(ipo)
-        else:
-            if op_d and op_d > today:
-                filtered_upcoming.append(ipo)
-
-    # 2. Process Upcoming: Must have an open date strictly in the future
-    for ipo in upcoming:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        if op_d and op_d < today:
-            continue
-        ipo["bucket"] = "upcoming"
-        filtered_upcoming.append(ipo)
-
-    # 3. Process Closed
-    for ipo in closed:
-        ipo["bucket"] = "closed"
-        filtered_closed.append(ipo)
+    for x in closed: x["bucket"] = "closed"
 
     return {
-        "current": _merge_ipo_records(filtered_current, []),
-        "closed": filtered_closed[:40],
-        "upcoming": _merge_ipo_records(filtered_upcoming, []),
+        "current": current,
+        "closed": closed[:40],
+        "upcoming": upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Hybrid IPO sources with strict calendar date filtering.",
+        "sources_note": "Hybrid IPO sources with strict category isolation.",
     }
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
@@ -844,9 +818,12 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     f"<b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>",
                     unsafe_allow_html=True)
             elif bucket == "closed":
+                gain = ipo.get("listing_gain_pct")
+                gain_str = f"{gain:+.1f}%" if gain is not None else "Listed"
+                gain_color = GREEN if (gain or 0) >= 0 else RED
                 st.markdown(
-                    f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br>"
-                    f"<b>Closed/Listed</b>",
+                    f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br>"
+                    f"<b style='color:{gain_color};'>{html_escape(gain_str)}</b>",
                     unsafe_allow_html=True)
             else:
                 st.markdown(
