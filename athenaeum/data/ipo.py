@@ -268,18 +268,15 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
         if r2.status_code != 200:
             return result
         soup2 = BeautifulSoup(r2.text, "html.parser")
-        
-        # Robust Business Overview Extraction
-        about_el = soup2.select_one(".company-info, #top .about, .about, div.sub")
+        about_el = soup2.select_one(".company-info, #top .about, .about")
         if about_el:
             result["about_screener"] = about_el.get_text(" ", strip=True)[:1200]
         else:
             for p in soup2.find_all("p"):
                 t = p.get_text(" ", strip=True)
-                if len(t) > 60 and ("incorporated" in t.lower() or "business" in t.lower() or "engaged" in t.lower() or "company" in t.lower()):
+                if len(t) > 80 and ("incorporated" in t.lower() or "business" in t.lower() or "Ltd" in t):
                     result["about_screener"] = t[:1200]
                     break
-
         financials = []
         for t in soup2.find_all("table"):
             rows = t.find_all("tr")
@@ -289,7 +286,7 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
             if not any(re.search(r"Mar|Jan|Dec|202[0-9]", h) for h in hdrs):
                 continue
             years = hdrs[1:]
-            sales_row = pat_row = assets_row = None
+            sales_row = pat_row = None
             for row in rows[1:]:
                 cells = [c.get_text(" ", strip=True) for c in row.find_all(["td", "th"])]
                 if not cells:
@@ -299,16 +296,13 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
                     sales_row = cells[1:]
                 if pat_row is None and (label.startswith("net profit") or label == "pat" or "net profit" in label):
                     pat_row = cells[1:]
-                if assets_row is None and ("total assets" in label or label == "assets"):
-                    assets_row = cells[1:]
             if sales_row:
                 for i, y in enumerate(years):
                     if i >= len(sales_row):
                         break
                     rev = _parse_money_inr(sales_row[i])
                     pat = _parse_money_inr(pat_row[i]) if pat_row and i < len(pat_row) else None
-                    assets = _parse_money_inr(assets_row[i]) if assets_row and i < len(assets_row) else None
-                    financials.append({"year": y, "revenue_cr": rev, "pat_cr": pat, "assets_cr": assets, "eps": None})
+                    financials.append({"year": y, "revenue_cr": rev, "pat_cr": pat, "eps": None})
                 if financials:
                     break
         if financials:
@@ -513,7 +507,7 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
                 if len(cells) == 2:
                     kv[cells[0].strip().lower()] = cells[1].strip()
         headers = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["td", "th"])]
-        if any("revenue" in h for h in headers) or any("fiscal" in h or "year" in h for h in headers):
+        if any("revenue" in h for h in headers) and any("fiscal" in h or "year" in h for h in headers):
             fin_rows = []
             for tr in rows[1:]:
                 cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
@@ -522,8 +516,7 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
                         "year": cells[0],
                         "revenue_cr": _parse_money_inr(cells[1]),
                         "pat_cr": _parse_money_inr(cells[2]) if len(cells) > 2 else None,
-                        "assets_cr": _parse_money_inr(cells[3]) if len(cells) > 3 else None,
-                        "eps": cells[4] if len(cells) > 4 else None,
+                        "eps": cells[3] if len(cells) > 3 else None,
                         "raw": cells,
                     })
             if fin_rows:
@@ -550,31 +543,27 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     detail["open_date_str"] = g("ipo open", "open")
     detail["close_date_str"] = g("ipo close", "close")
 
-    # Shareholding extraction for Pre/Post ownership graph
-    full_text = soup.get_text("\n", strip=True)
-    pre_holding, post_holding = None, None
-    m_pre = re.search(r"pre[- ]issue.*?([\d.]+)%?", full_text, re.I)
-    m_post = re.search(r"post[- ]issue.*?([\d.]+)%?", full_text, re.I)
-    if m_pre:
-        try: pre_holding = float(m_pre.group(1))
-        except: pass
-    if m_post:
-        try: post_holding = float(m_post.group(1))
-        except: pass
-    if pre_holding or post_holding:
-        detail["shareholding"] = {"pre": pre_holding or 100.0, "post": post_holding or 75.0}
+    fresh = detail.get("fresh_issue_str") or ""
+    ofs = detail.get("ofs_str") or ""
+    if fresh and ofs and "—" not in fresh and "—" not in ofs:
+        detail["offer_type"] = f"Fresh Issue ({fresh}) + OFS ({ofs})"
+    elif fresh and "—" not in fresh and fresh not in ("", "0"):
+        detail["offer_type"] = f"Fresh Issue ({fresh})"
+    elif ofs and "—" not in ofs:
+        detail["offer_type"] = f"Offer for Sale ({ofs})"
+    else:
+        detail["offer_type"] = "See RHP / issue documents"
 
+    full_text = soup.get_text("\n", strip=True)
     about = ""
-    for marker in ("About\n", "About the Company", "About ", "Company Background", "Overview"):
+    for marker in ("About\n", "About the Company", "About "):
         idx = full_text.find(marker)
         if idx >= 0:
-            chunk = full_text[idx: idx + 1000]
-            about = re.sub(r"^(About|Company Background|Overview)[^\n]*\n?", "", chunk).strip()
-            about = about.split("Strengths")[0].split("Risk")[0].split("Financials")[0].strip()
-            if len(about) > 50:
-                break
-    
-    detail["about"] = about or detail.get("longBusinessSummary") or ""
+            chunk = full_text[idx: idx + 800]
+            about = re.sub(r"^About[^\n]*\n?", "", chunk).strip()
+            about = about.split("Strengths")[0].split("Risk")[0].strip()
+            break
+    detail["about"] = about or detail.get("longBusinessSummary") or "Business description not available from aggregator."
 
     strengths, risks = [], []
     for line in full_text.split("\n"):
@@ -611,23 +600,48 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     if m:
         detail["listing_price"] = float(m.group(1))
 
-    scr = _screener_company_lookup(detail.get("name") or "")
+    fins = detail.get("financials") or []
+    revs = [f["revenue_cr"] for f in fins if f.get("revenue_cr")]
+    pats = [f["pat_cr"] for f in fins if f.get("pat_cr") is not None]
+    if len(revs) >= 2 and revs[-1] and revs[-1] > 0:
+        years = len(revs) - 1
+        try:
+            detail["revenue_cagr"] = round(((revs[0] / revs[-1]) ** (1 / years) - 1) * 100, 2)
+        except Exception:
+            detail["revenue_cagr"] = None
+    else:
+        detail["revenue_cagr"] = None
+    if pats:
+        detail["is_profitable_latest"] = pats[0] is not None and pats[0] > 0
+        detail["is_profitable_all"] = all(p is not None and p > 0 for p in pats[:3])
+    else:
+        detail["is_profitable_latest"] = None
+        detail["is_profitable_all"] = None
+
+    detail["ipo_news"] = fetch_google_news(f"{detail['name']} IPO GMP subscription 2026")
+
+    if detail.get("gmp") is None and detail.get("gmp_pct") is None:
+        gmp_info = _ai_google_gmp(detail.get("name") or "")
+        for k, v in gmp_info.items():
+            if v is not None and detail.get(k) is None:
+                detail[k] = v
+
+    scr_url = detail.get("screener_url")
+    scr = _screener_company_lookup(detail.get("name") or "", screener_url=scr_url)
     if scr.get("screener_url"):
         detail["screener_url"] = scr["screener_url"]
     if scr.get("about_screener"):
-        if not detail.get("about") or len(detail.get("about", "")) < 60:
+        if (not detail.get("about") or detail.get("about", "").startswith("Business description")
+                or len(detail.get("about", "")) < 60):
             detail["about"] = scr["about_screener"]
     if scr.get("financials") and (not detail.get("financials") or len(detail.get("financials") or []) < 2):
         detail["financials"] = scr["financials"]
-    if scr.get("revenue_cagr") is not None:
+    if scr.get("revenue_cagr") is not None and detail.get("revenue_cagr") is None:
         detail["revenue_cagr"] = scr["revenue_cagr"]
-    if scr.get("is_profitable_latest") is not None:
+    if scr.get("is_profitable_latest") is not None and detail.get("is_profitable_latest") is None:
         detail["is_profitable_latest"] = scr["is_profitable_latest"]
-    if scr.get("is_profitable_all") is not None:
+    if scr.get("is_profitable_all") is not None and detail.get("is_profitable_all") is None:
         detail["is_profitable_all"] = scr["is_profitable_all"]
-
-    if not detail.get("about") or len(detail.get("about", "")) < 60:
-        detail["about"] = f"{detail['name']} is a prominent enterprise issuing an IPO on Indian stock exchanges (NSE/BSE), seeking to raise capital through fresh issuance and/or offer for sale (OFS) as detailed in its Red Herring Prospectus (RHP)."
 
     return detail
 
@@ -685,45 +699,19 @@ def render_ipo_financials_chart(fin_rows):
     years = [f.get("year", "") for f in fin_rows]
     revs = [f.get("revenue_cr") or 0 for f in fin_rows]
     pats = [f.get("pat_cr") or 0 for f in fin_rows]
-    assets = [f.get("assets_cr") or 0 for f in fin_rows]
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=years, y=revs, name="Total Revenue (₹ Cr)", marker_color=BLUE))
     fig.add_trace(go.Bar(x=years, y=pats, name="Net Profit / PAT (₹ Cr)", marker_color=GREEN))
-    if any(assets):
-        fig.add_trace(go.Bar(x=years, y=assets, name="Total Assets (₹ Cr)", marker_color=ORANGE))
     
     fig.update_layout(
         template="plotly_dark",
         paper_bgcolor=BG,
         plot_bgcolor=BG,
-        height=300,
+        height=280,
         margin=dict(t=20, b=20, l=10, r=10),
         barmode="group",
-        legend=dict(orientation="h", y=-0.25)
-    )
-    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
-
-
-def render_ipo_shareholding_chart(shareholding):
-    if not shareholding:
-        return
-    labels = ["Pre-IPO Promoter Holding", "Post-IPO Promoter Holding"]
-    values = [shareholding.get("pre", 100.0), shareholding.get("post", 75.0)]
-
-    fig = go.Figure(data=[go.Bar(
-        x=labels, y=values,
-        marker_color=[BLUE, GREEN],
-        text=[f"{v:.1f}%" for v in values],
-        textposition="auto"
-    )])
-    fig.update_layout(
-        template="plotly_dark",
-        paper_bgcolor=BG,
-        plot_bgcolor=BG,
-        height=250,
-        margin=dict(t=20, b=20, l=10, r=10),
-        yaxis=dict(range=[0, 100], title="Holding (%)")
+        legend=dict(orientation="h", y=-0.2)
     )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
@@ -905,11 +893,11 @@ def _render_ipo_detail_view():
 
     card("Business Overview",
          f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;'>"
-         f"{html_escape(str(detail.get('about') or 'Business overview not available.'))}</p>")
+         f"{html_escape(str(detail.get('about') or 'Not available.'))}</p>")
 
     fins = detail.get("financials") or []
     if fins:
-        st.markdown("##### 📊 Financial Trajectory (Revenue, PAT & Assets)")
+        st.markdown("##### 📊 Financial Trajectory (Revenue vs. PAT)")
         render_ipo_financials_chart(fins)
         
         st.markdown("##### RHP Financial Highlights Table")
@@ -919,16 +907,9 @@ def _render_ipo_detail_view():
                 "Year": f.get("year"),
                 "Revenue (₹ Cr)": f.get("revenue_cr") if f.get("revenue_cr") is not None else "—",
                 "PAT (₹ Cr)": f.get("pat_cr") if f.get("pat_cr") is not None else "—",
-                "Total Assets (₹ Cr)": f.get("assets_cr") if f.get("assets_cr") is not None else "—",
                 "Historical EPS": f.get("eps") or "—",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
-        if detail.get("revenue_cagr") is not None:
-            st.caption(f"Revenue CAGR: {detail['revenue_cagr']}%")
-
-    if detail.get("shareholding"):
-        st.markdown("##### 👥 Pre- vs. Post-IPO Ownership (Promoter Holding)")
-        render_ipo_shareholding_chart(detail["shareholding"])
 
     pc1, pc2 = st.columns(2)
     with pc1:
