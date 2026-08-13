@@ -382,7 +382,7 @@ def fetch_ipo_list_categorized() -> dict:
 
     # Deduplicated pools for Current and Closed to prevent duplicate entries
     raw_current = []
-    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket"] == "current"]]:
+    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket") == "current"]]:
         if lst:
             raw_current = _merge_ipo_records(raw_current, lst)
 
