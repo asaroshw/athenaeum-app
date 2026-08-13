@@ -7,7 +7,36 @@ import yfinance as yf
 
 logger = logging.getLogger("athenaeum")
 
+import time as _time
+_nifty_cache = {"ts": 0.0, "r3": None, "r6": None}
+_NIFTY_TTL = 3600  # 1 hour
+
+def _get_nifty_momentum():
+    """Return (r3, r6) for Nifty 50 — cached for 1 hour to avoid repeated network calls."""
+    global _nifty_cache
+    now = _time.monotonic()
+    if now - _nifty_cache["ts"] < _NIFTY_TTL:
+        return _nifty_cache["r3"], _nifty_cache["r6"]
+    try:
+        n_hist = yf.Ticker("^NSEI").history(period="1y")
+        if n_hist is not None and not n_hist.empty and "Close" in n_hist.columns:
+            nc = n_hist["Close"].dropna()
+            def _r(series, n):
+                if len(series) > n and float(series.iloc[-n]) > 0:
+                    return (float(series.iloc[-1]) / float(series.iloc[-n]) - 1.0) * 100
+                return None
+            _nifty_cache = {"ts": now, "r3": _r(nc, 63), "r6": _r(nc, 126)}
+        else:
+            _nifty_cache["ts"] = now  # avoid hammering on empty response
+    except Exception as e:
+        logger.debug("Nifty fetch failed: %s", e)
+        _nifty_cache["ts"] = now  # avoid hammering on errors
+    return _nifty_cache["r3"], _nifty_cache["r6"]
+
+
 def calculate_vwap_support(df):
+    if df is None or df.empty or 'Close' not in df.columns or 'Volume' not in df.columns:
+        return None
     d = df.dropna(subset=['Close', 'Volume'])
     if d.empty: return None
     d = d.copy()
@@ -18,7 +47,7 @@ def calculate_vwap_support(df):
 
 
 def calculate_atr(df, period=14):
-    if df is None or len(df) <= period: return None
+    if df is None or len(df) < period + 1: return None
     high_low = df['High'] - df['Low']
     high_close = (df['High'] - df['Close'].shift()).abs()
     low_close = (df['Low'] - df['Close'].shift()).abs()
@@ -68,14 +97,10 @@ def compute_technical_score(hist, current_price=None):
         return None
     r3 = _ret(closes, 63)
     r6 = _ret(closes, 126)
-    # Relative to Nifty 50
+    # Relative to Nifty 50 — cached at module level (TTL ~1h) to avoid repeated network calls
     nifty_r3 = nifty_r6 = None
     try:
-        n_hist = yf.Ticker("^NSEI").history(period="1y")
-        if n_hist is not None and not n_hist.empty and "Close" in n_hist.columns:
-            nc = n_hist["Close"].dropna()
-            nifty_r3 = _ret(nc, 63)
-            nifty_r6 = _ret(nc, 126)
+        nifty_r3, nifty_r6 = _get_nifty_momentum()
     except Exception as e:
         logger.debug("Nifty relative momentum unavailable: %s", e)
     mom_parts = []
