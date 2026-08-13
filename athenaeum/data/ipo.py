@@ -400,7 +400,7 @@ def fetch_ipo_list_categorized() -> dict:
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
     raw_current = []
-    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket"] == "current"]]:
+    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket") == "current"]]:
         if lst:
             raw_current = _merge_ipo_records(raw_current, lst)
 
@@ -415,8 +415,6 @@ def fetch_ipo_list_categorized() -> dict:
             raw_closed = _merge_ipo_records(raw_closed, lst)
 
     # --- STRICT GATEKEEPER FILTER FOR CURRENT TAB ---
-    # Current tab must NOT contain TBA, unannounced, or future dates. 
-    # It must only contain items actively open or valid for today (August 13, 2026).
     today = datetime.today().date()
     filtered_current = []
     for ipo in raw_current:
