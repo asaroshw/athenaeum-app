@@ -412,28 +412,37 @@ def fetch_ipo_list_categorized() -> dict:
         source_lower = str(ipo.get("source", "")).lower()
         date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
 
-        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
-        future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming", "jul"]
-        is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
-
-        # 1. CLOSED GUARD: Verified past listings or explicit closed status with past dates
-        if (ipo.get("listing_gain_pct") is not None or ipo.get("listing_price") is not None or "screener_recent" in source_lower):
-            ipo["bucket"] = "closed"
-            ipo["listing_status_override"] = None
-            final_closed.append(ipo)
-            continue
+        # ACTIVE MARKET PRICE GUARD: If it has active market price / listing gain / listing price / screener recent, it is CLOSED!
+        has_active_market_price = (
+            ipo.get("listing_gain_pct") is not None or 
+            ipo.get("listing_price") is not None or 
+            ipo.get("current_price") is not None or
+            "screener_recent" in source_lower or
+            "listed" in status_lower
+        )
 
         op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
         cl_d = _parse_date_flex(ipo.get("close_date"))
         lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
-        # 2. UPCOMING GUARD: Explicitly future dates or future text estimates
+        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
+        future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming"]
+        is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
+
+        # If it has an active market price and is NOT an explicit future text estimate, route to Closed
+        if has_active_market_price and not is_future_text:
+            ipo["bucket"] = "closed"
+            ipo["listing_status_override"] = None
+            final_closed.append(ipo)
+            continue
+
+        # STAGE 1: Upcoming -> Explicitly future dates or future text estimates
         if is_future_text or (op_d and today < op_d):
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
             continue
 
-        # 3. CURRENT GUARD: Active today between open and close
+        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
         if op_d and cl_d and op_d <= today <= cl_d:
             ipo["bucket"] = "current"
             final_current.append(ipo)
@@ -443,7 +452,7 @@ def fetch_ipo_list_categorized() -> dict:
             final_current.append(ipo)
             continue
 
-        # 4. VERIFIED CLOSED: Closing or listing date has strictly passed
+        # STAGE 3 & 4: Closed -> Must have verified past closing/listing dates
         if (cl_d and cl_d < today) or (lst_d and lst_d < today):
             ipo["bucket"] = "closed"
             if lst_d and today < lst_d:
@@ -452,7 +461,6 @@ def fetch_ipo_list_categorized() -> dict:
                 ipo["listing_status_override"] = None
             final_closed.append(ipo)
         else:
-            # Absolute fallback for anything unverified/unlaunched -> Upcoming
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
 
@@ -461,7 +469,7 @@ def fetch_ipo_list_categorized() -> dict:
         "closed": _deduplicate_list(final_closed)[:40],
         "upcoming": _deduplicate_list(final_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strict lifecycle sorted IPO pools with robust guards.",
+        "sources_note": "Strict lifecycle sorted IPO pools with active market price guard.",
     }
 
 
