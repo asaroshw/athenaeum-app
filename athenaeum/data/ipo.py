@@ -10,12 +10,14 @@ from athenaeum.utils.helpers import (
     html_escape_fn, _parse_date_flex, _parse_money_inr, _parse_gmp, _parse_price_band,
     _slug_from_href, _classify_bucket, to_float,
 )
+html_escape = html_escape_fn  # <--- Add this alias here
+
 from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG
 from athenaeum.data.equity import fetch_google_news
 from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
 from athenaeum.utils.helpers import style_verdict_text, rating_color
-
+html_escape = html_escape_fn
 logger = logging.getLogger("athenaeum")
 _IPO_HEADERS = {
     "User-Agent": (
