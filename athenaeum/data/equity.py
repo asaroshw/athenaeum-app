@@ -211,6 +211,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
     else:
         current_price = round(float(raw_price), 2)
         
+    # --- ADD THIS LINE TO FORCE THE PIPELINE TO USE THE CLEAN PRICE ---
+    info['currentPrice'] = current_price
+    
     currency_symbol = "₹"
     
     # --- KEY UNIFICATION FOR PIPELINE ---
