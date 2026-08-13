@@ -6,13 +6,15 @@ from datetime import datetime, timedelta
 import requests
 import streamlit as st
 from bs4 import BeautifulSoup
+import plotly.graph_objects as go
+
 from athenaeum.utils.helpers import (
     html_escape_fn, _parse_date_flex, _parse_money_inr, _parse_gmp, _parse_price_band,
     _slug_from_href, _classify_bucket, to_float,
 )
-html_escape = html_escape_fn  # Fix NameError
+html_escape = html_escape_fn  # Local alias for HTML safety
 
-from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG
+from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG, BG
 from athenaeum.data.equity import fetch_google_news
 from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
@@ -328,7 +330,7 @@ def _scrape_screener_ipo_list() -> dict:
     return out
 
 
-@st.cache_data(ttl=3600, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
     result = {}
     H = _IPO_HEADERS
@@ -499,54 +501,23 @@ def fetch_ipo_list_categorized() -> dict:
 
     current = _merge_ipo_records(scr.get("current") or [], im_current)
     current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
+    for x in current: x["bucket"] = "current"
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
     upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
+    for x in upcoming: x["bucket"] = "upcoming"
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
-
-    # --- STRICT DATE-BASED PURGE & SORTING ---
-    today = datetime.today().date()  # August 13, 2026
-    filtered_current, filtered_upcoming, filtered_closed = [], [], []
-
-    # 1. Process Current: Must have a valid open/close window that includes today
-    for ipo in current:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        cl_d = _parse_date_flex(ipo.get("close_date"))
-        
-        if op_d and cl_d and op_d <= today <= cl_d:
-            ipo["bucket"] = "current"
-            filtered_current.append(ipo)
-        elif op_d and op_d > today:
-            ipo["bucket"] = "upcoming"
-            filtered_upcoming.append(ipo)
-        elif cl_d and cl_d < today:
-            ipo["bucket"] = "closed"
-            filtered_closed.append(ipo)
-        else:
-            if op_d and op_d > today:
-                filtered_upcoming.append(ipo)
-
-    # 2. Process Upcoming: Must have an open date strictly in the future
-    for ipo in upcoming:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        if op_d and op_d < today:
-            continue
-        ipo["bucket"] = "upcoming"
-        filtered_upcoming.append(ipo)
-
-    # 3. Process Closed
-    for ipo in closed:
-        ipo["bucket"] = "closed"
-        filtered_closed.append(ipo)
+    for x in closed: x["bucket"] = "closed"
 
     return {
-        "current": _merge_ipo_records(filtered_current, []),
-        "closed": filtered_closed[:40],
-        "upcoming": _merge_ipo_records(filtered_upcoming, []),
+        "current": current,
+        "closed": closed[:40],
+        "upcoming": upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Hybrid IPO sources with strict calendar date filtering.",
+        "sources_note": "Hybrid IPO sources with strict category isolation.",
     }
+
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
@@ -640,26 +611,15 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     strengths, risks = [], []
     for line in full_text.split("\n"):
         line = line.strip()
-        if line.startswith("•") or line.startswith("-"):
-            item = line.lstrip("•- ").strip()
-            if len(item) < 20:
-                continue
-            low = item.lower()
-            boilerplate = any(x in low for x in [
-                "general economic", "economic downturn", "theft", "natural disaster",
-                "force majeure", "pandemic", "covid", "currency fluctuation",
-                "interest rate risk", "political instability", "act of god",
-            ])
-            if any(x in low for x in ["risk", "litigation", "dependent", "concentration",
-                                       "competition", "regulatory", "customer", "working capital",
-                                       "promoter", "related party", "debt", "loss"]):
-                if not boilerplate and len(risks) < 8:
-                    risks.append(item)
-            elif any(x in low for x in ["strong", "leading", "profitable", "scalable",
-                                         "growth", "brand", "network", "platform",
-                                         "diversified", "experienced", "market share"]):
-                if len(strengths) < 8:
-                    strengths.append(item)
+        if not line:
+            continue
+        low = line.lower()
+        if any(x in low for x in ["risk", "threat", "litigation", "contingent", "adversely", "dependent", "concentration", "competition", "regulatory", "cyclical", "debt", "loss"]):
+            if len(item := line.lstrip("•- *").strip()) > 15 and len(risks) < 8:
+                if item not in risks: risks.append(item)
+        elif any(x in low for x in ["strong", "leading", "leader", "profitable", "scalable", "growth", "brand", "network", "advantage"]):
+            if len(item := line.lstrip("•- *").strip()) > 15 and len(strengths) < 8:
+                if item not in strengths: strengths.append(item)
     detail["strengths"] = strengths
     detail["risks"] = risks
 
@@ -793,6 +753,29 @@ def score_ipo(detail: dict, bucket: str = "current") -> tuple:
     score = int(min(max(score, 0), 100))
     verdict = "BUY" if score >= 60 else "ABSTAIN"
     return score, verdict, pros, cons
+
+
+def render_ipo_financials_chart(fin_rows):
+    if not fin_rows:
+        return
+    years = [f.get("year", "") for f in fin_rows]
+    revs = [f.get("revenue_cr") or 0 for f in fin_rows]
+    pats = [f.get("pat_cr") or 0 for f in fin_rows]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(x=years, y=revs, name="Total Revenue (₹ Cr)", marker_color=BLUE))
+    fig.add_trace(go.Bar(x=years, y=pats, name="Net Profit / PAT (₹ Cr)", marker_color=GREEN))
+    
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        height=280,
+        margin=dict(t=20, b=20, l=10, r=10),
+        barmode="group",
+        legend=dict(orientation="h", y=-0.2)
+    )
+    st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
 def _render_ipo_list_rows(ipos, bucket, currency="₹"):
@@ -953,14 +936,17 @@ def _render_ipo_detail_view():
 
     fins = detail.get("financials") or []
     if fins:
-        st.markdown("##### RHP Financial Highlights")
+        st.markdown("##### 📊 Financial Trajectory (Revenue vs. PAT)")
+        render_ipo_financials_chart(fins)
+        
+        st.markdown("##### RHP Financial Highlights Table")
         rows = []
         for f in fins[:4]:
             rows.append({
                 "Year": f.get("year"),
                 "Revenue (₹ Cr)": f.get("revenue_cr") if f.get("revenue_cr") is not None else "—",
                 "PAT (₹ Cr)": f.get("pat_cr") if f.get("pat_cr") is not None else "—",
-                "EPS": f.get("eps") or "—",
+                "Historical EPS": f.get("eps") or "—",
             })
         st.dataframe(rows, use_container_width=True, hide_index=True)
         if detail.get("revenue_cagr") is not None:
