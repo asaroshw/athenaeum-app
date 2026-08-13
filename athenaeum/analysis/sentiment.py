@@ -136,7 +136,3 @@ def extract_order_book_signal(recent_news, business_summary, trailing_revenue_cr
                 logger.debug("Order size parse failed: %s", e)
     return order_hits, growth_pct_found
 
-# ============================================================
-# 5. CHECKLISTS
-# ============================================================
-
