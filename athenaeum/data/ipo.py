@@ -408,13 +408,20 @@ def fetch_ipo_list_categorized() -> dict:
     final_current, final_upcoming, final_closed = [], [], []
 
     for ipo in master_pool:
+        # MARKET-DATA GUARD: If it has recorded listing gains or listing price, it is verified closed/listed!
+        if ipo.get("listing_gain_pct") is not None or ipo.get("listing_price") is not None or ipo.get("source") == "screener_recent":
+            ipo["bucket"] = "closed"
+            ipo["listing_status_override"] = None
+            final_closed.append(ipo)
+            continue
+
         op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
         cl_d = _parse_date_flex(ipo.get("close_date"))
         lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
         date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
         
-        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", "targeted", "est", etc.
+        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
         future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming", "jul"]
         is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
 
@@ -433,8 +440,8 @@ def fetch_ipo_list_categorized() -> dict:
             final_current.append(ipo)
             continue
 
-        # STAGE 3 & 4: Closed -> Must have verified past closing/listing or come from screener recent
-        if (cl_d and cl_d < today) or (lst_d and lst_d < today) or ipo.get("source") == "screener_recent":
+        # STAGE 3 & 4: Closed -> Must have verified past closing/listing
+        if (cl_d and cl_d < today) or (lst_d and lst_d < today):
             if is_future_text:
                 ipo["bucket"] = "upcoming"
                 final_upcoming.append(ipo)
@@ -455,7 +462,7 @@ def fetch_ipo_list_categorized() -> dict:
         "closed": _deduplicate_list(final_closed)[:40],
         "upcoming": _deduplicate_list(final_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strict lifecycle sorted IPO pools with future-text guard.",
+        "sources_note": "Strict lifecycle sorted IPO pools with market-data guard.",
     }
 
 
