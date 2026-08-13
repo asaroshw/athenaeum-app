@@ -339,10 +339,10 @@ def _normalize_company_name(name):
         "ltd", "limited", "food", "foods", "engg", "engineering", "private", "pvt", 
         "co", "company", "corporation", "corp", "medicare", "enterprises", 
         "industries", "technologies", "tech", "solutions", "infra", "infrastructure",
-        "group", "holdings", "labs", "pharmaceuticals", "pharma"
+        "group", "holdings", "labs", "pharmaceuticals", "pharma", "dairy"
     ]:
         n = re.sub(rf"\b{term}\b", "", n)
-    return re.sub(r"[^a-z0-9]", "", n)[:12]
+    return re.sub(r"[^a-z0-9]", "", n)[:10]
 
 
 def _merge_ipo_records(primary: list, secondary: list) -> list:
@@ -363,7 +363,8 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
         base = by[k]
         for field in ("price_low", "price_high", "price_band_str", "lot_size", "min_investment",
                       "gmp", "gmp_pct", "gmp_str", "subscription_str", "issue_size_cr",
-                      "issue_size_str", "detail_url", "open_date", "close_date", "date", "listing_gain_pct", "listing_price", "listing_date_str"):
+                      "issue_size_str", "detail_url", "open_date", "close_date", "date", 
+                      "listing_gain_pct", "listing_price", "listing_date_str"):
             if base.get(field) in (None, "", []) and rec.get(field) not in (None, "", []):
                 base[field] = rec[field]
         by[k] = base
@@ -379,21 +380,28 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
-    # Strictly separate sources to prevent cross-tab bleeding
-    current = _merge_ipo_records(scr.get("current") or [], im_current)
-    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
+    # Deduplicated pools for Current and Closed to prevent duplicate entries
+    raw_current = []
+    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket"] == "current"]]:
+        if lst:
+            raw_current = _merge_ipo_records(raw_current, lst)
 
-    upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
-    
-    # Explicitly source closed items from screener recent + ipomarket listed
-    closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
+    raw_upcoming = []
+    for lst in [scr.get("upcoming"), im_upcoming]:
+        if lst:
+            raw_upcoming = _merge_ipo_records(raw_upcoming, lst)
+
+    raw_closed = []
+    for lst in [scr.get("closed"), im_closed]:
+        if lst:
+            raw_closed = _merge_ipo_records(raw_closed, lst)
 
     return {
-        "current": current,
-        "closed": closed[:40],
-        "upcoming": upcoming,
+        "current": raw_current,
+        "closed": raw_closed[:40],
+        "upcoming": raw_upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Clean isolated source buckets.",
+        "sources_note": "Deduplicated hybrid IPO sources.",
     }
 
 
@@ -497,7 +505,7 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
         name = ipo.get("name", "Unknown")
         band = ipo.get("price_band_str") or (f"{currency}{ipo['price_low']} – {currency}{ipo['price_high']}" if ipo.get("price_low") is not None else "Price TBA")
         
-        # Rule 3: Upcoming tab gets a streamlined view with NO "Analyse" button
+        # Rule 3: Upcoming tab remains streamlined with NO Analyse button
         if bucket == "upcoming":
             cols = st.columns([4, 2])
             with cols[0]:
@@ -508,7 +516,7 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
             st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>", unsafe_allow_html=True)
             continue
 
-        # Current and Closed views with Analyse buttons
+        # Current and Closed views
         cols = st.columns([3.2, 1.4, 1.6, 1.2, 1.2])
         with cols[0]:
             st.markdown(f"<b>{html_escape(name)}</b><br><span style='color:{MUTED};font-size:0.8em;'>{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','')))}</span>", unsafe_allow_html=True)
