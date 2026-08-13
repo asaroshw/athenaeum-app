@@ -497,24 +497,58 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
-    # Keep categories strictly isolated from their original scrapers
     current = _merge_ipo_records(scr.get("current") or [], im_current)
-    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
-    for x in current: x["bucket"] = "current"
+    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket"] == "current"])
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
-    upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
-    for x in upcoming: x["bucket"] = "upcoming"
+    upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket"] == "upcoming"])
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
-    for x in closed: x["bucket"] = "closed"
+
+    # --- STRICT DATE-BASED PURGE & SORTING ---
+    today = datetime.today().date() # August 13, 2026
+    filtered_current, filtered_upcoming, filtered_closed = [], [], []
+
+    # 1. Process Current: Must have a valid open/close window that includes today
+    for ipo in current:
+        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
+        cl_d = _parse_date_flex(ipo.get("close_date"))
+        
+        # If it has explicit dates and today is within the range, keep it current
+        if op_d and cl_d and op_d <= today <= cl_d:
+            ipo["bucket"] = "current"
+            filtered_current.append(ipo)
+        elif op_d and op_d > today:
+            ipo["bucket"] = "upcoming"
+            filtered_upcoming.append(ipo)
+        elif cl_d and cl_d < today:
+            ipo["bucket"] = "closed"
+            filtered_closed.append(ipo)
+        else:
+            # If dates are missing or "TBA", drop it from current so it doesn't clutter
+            if op_d and op_d > today:
+                filtered_upcoming.append(ipo)
+            # Otherwise, discard unverified items with no open window
+
+    # 2. Process Upcoming: Must have an open date strictly in the future
+    for ipo in upcoming:
+        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
+        if op_d and op_d < today:
+            continue # Skip past upcoming items that forgot to move to closed
+        ipo["bucket"] = "upcoming"
+        filtered_upcoming.append(ipo)
+
+    # 3. Process Closed
+    for ipo in closed:
+        ipo["bucket"] = "closed"
+        filtered_closed.append(ipo)
 
     return {
-        "current": current,
-        "closed": closed[:40],
-        "upcoming": upcoming,
+        "current": _merge_ipo_records(filtered_current, []),
+        "closed": filtered_closed[:40],
+        "upcoming": _merge_ipo_records(filtered_upcoming, []),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Hybrid IPO sources with strict category isolation.",
+        "sources_note": "Hybrid IPO sources with strict calendar date filtering.",
     }
 
 
