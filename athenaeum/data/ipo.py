@@ -373,7 +373,6 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
 
 
 def _deduplicate_list(items: list) -> list:
-    """Strict global deduplication pass for a single category list."""
     unique = {}
     for item in items:
         name = item.get("name") or item.get("slug") or ""
@@ -401,12 +400,12 @@ def fetch_ipo_list_categorized() -> dict:
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
     raw_current = []
-    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket") == "current"]]:
+    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket"] == "current"]]:
         if lst:
             raw_current = _merge_ipo_records(raw_current, lst)
 
     raw_upcoming = []
-    for lst in [scr.get("upcoming"), im_upcoming]:
+    for lst in [scr.get("upcoming"), im_upcoming, chitt]:
         if lst:
             raw_upcoming = _merge_ipo_records(raw_upcoming, lst)
 
@@ -415,12 +414,39 @@ def fetch_ipo_list_categorized() -> dict:
         if lst:
             raw_closed = _merge_ipo_records(raw_closed, lst)
 
+    # --- STRICT GATEKEEPER FILTER FOR CURRENT TAB ---
+    # Current tab must NOT contain TBA, unannounced, or future dates. 
+    # It must only contain items actively open or valid for today (August 13, 2026).
+    today = datetime.today().date()
+    filtered_current = []
+    for ipo in raw_current:
+        date_str = str(ipo.get("date") or ipo.get("open_date") or "").lower()
+        if "tba" in date_str or not date_str:
+            raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
+            continue
+        
+        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
+        cl_d = _parse_date_flex(ipo.get("close_date"))
+        
+        if op_d and cl_d:
+            if op_d <= today <= cl_d:
+                filtered_current.append(ipo)
+            elif op_d > today:
+                raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
+        elif op_d:
+            if op_d == today or abs((op_d - today).days) <= 2:
+                filtered_current.append(ipo)
+            elif op_d > today:
+                raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
+        else:
+            raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
+
     return {
-        "current": _deduplicate_list(raw_current),
+        "current": _deduplicate_list(filtered_current),
         "closed": _deduplicate_list(raw_closed)[:40],
         "upcoming": _deduplicate_list(raw_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Globally deduplicated hybrid IPO sources.",
+        "sources_note": "Strictly filtered hybrid IPO sources.",
     }
 
 
