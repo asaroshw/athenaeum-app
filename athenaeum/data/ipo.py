@@ -268,6 +268,15 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
         if r2.status_code != 200:
             return result
         soup2 = BeautifulSoup(r2.text, "html.parser")
+        about_el = soup2.select_one(".company-info, #top .about, .about")
+        if about_el:
+            result["about_screener"] = about_el.get_text(" ", strip=True)[:1200]
+        else:
+            for p in soup2.find_all("p"):
+                t = p.get_text(" ", strip=True)
+                if len(t) > 80 and ("incorporated" in t.lower() or "business" in t.lower() or "Ltd" in t):
+                    result["about_screener"] = t[:1200]
+                    break
         financials = []
         for t in soup2.find_all("table"):
             rows = t.find_all("tr")
@@ -412,7 +421,6 @@ def fetch_ipo_list_categorized() -> dict:
         source_lower = str(ipo.get("source", "")).lower()
         date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
 
-        # ACTIVE MARKET PRICE GUARD: If it has active market price / listing gain / listing price / screener recent, it is CLOSED!
         has_active_market_price = (
             ipo.get("listing_gain_pct") is not None or 
             ipo.get("listing_price") is not None or 
@@ -425,24 +433,20 @@ def fetch_ipo_list_categorized() -> dict:
         cl_d = _parse_date_flex(ipo.get("close_date"))
         lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
-        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", etc.
         future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming"]
         is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
 
-        # If it has an active market price and is NOT an explicit future text estimate, route to Closed
         if has_active_market_price and not is_future_text:
             ipo["bucket"] = "closed"
             ipo["listing_status_override"] = None
             final_closed.append(ipo)
             continue
 
-        # STAGE 1: Upcoming -> Explicitly future dates or future text estimates
         if is_future_text or (op_d and today < op_d):
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
             continue
 
-        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
         if op_d and cl_d and op_d <= today <= cl_d:
             ipo["bucket"] = "current"
             final_current.append(ipo)
@@ -452,7 +456,6 @@ def fetch_ipo_list_categorized() -> dict:
             final_current.append(ipo)
             continue
 
-        # STAGE 3 & 4: Closed -> Must have verified past closing/listing dates
         if (cl_d and cl_d < today) or (lst_d and lst_d < today):
             ipo["bucket"] = "closed"
             if lst_d and today < lst_d:
@@ -486,12 +489,82 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     try:
         r = requests.get(url, headers=_IPO_HEADERS, timeout=20)
         if r.status_code != 200:
+            detail["error"] = f"Detail page status {r.status_code}"
             return detail
         soup = BeautifulSoup(r.text, "html.parser")
-    except Exception:
+    except Exception as e:
+        detail["error"] = str(e)
         return detail
 
+    kv = {}
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        if all(len(tr.find_all(["td", "th"])) == 2 for tr in rows[: min(5, len(rows))]):
+            for tr in rows:
+                cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+                if len(cells) == 2:
+                    kv[cells[0].strip().lower()] = cells[1].strip()
+        headers = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["td", "th"])]
+        if any("revenue" in h for h in headers) and any("fiscal" in h or "year" in h for h in headers):
+            fin_rows = []
+            for tr in rows[1:]:
+                cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
+                if len(cells) >= 3:
+                    fin_rows.append({
+                        "year": cells[0],
+                        "revenue_cr": _parse_money_inr(cells[1]),
+                        "pat_cr": _parse_money_inr(cells[2]) if len(cells) > 2 else None,
+                        "eps": cells[3] if len(cells) > 3 else None,
+                        "raw": cells,
+                    })
+            if fin_rows:
+                detail["financials"] = fin_rows
+
+    def g(*keys):
+        for k in keys:
+            for hk, hv in kv.items():
+                if k in hk:
+                    return hv
+        return None
+
+    detail["issue_size_str"] = g("issue size")
+    detail["fresh_issue_str"] = g("fresh issue", "fresh capital")
+    detail["ofs_str"] = g("ofs", "offer for sale")
+    detail["face_value"] = g("face value")
+    detail["exchange"] = g("exchange") or "NSE/BSE"
+    detail["registrar"] = g("registrar")
+    detail["isin"] = g("isin")
+    detail["lot_size"] = g("lot size")
+    detail["issue_price"] = g("issue price", "final price")
+    detail["price_band_str"] = g("price band")
+    detail["listing_date_str"] = g("listing", "listed on")
+    detail["open_date_str"] = g("ipo open", "open")
+    detail["close_date_str"] = g("ipo close", "close")
+
+    fresh = detail.get("fresh_issue_str") or ""
+    ofs = detail.get("ofs_str") or ""
+    if fresh and ofs and "—" not in fresh and "—" not in ofs:
+        detail["offer_type"] = f"Fresh Issue ({fresh}) + OFS ({ofs})"
+    elif fresh and "—" not in fresh and fresh not in ("", "0"):
+        detail["offer_type"] = f"Fresh Issue ({fresh})"
+    elif ofs and "—" not in ofs:
+        detail["offer_type"] = f"Offer for Sale ({ofs})"
+    else:
+        detail["offer_type"] = "See RHP / issue documents"
+
     full_text = soup.get_text("\n", strip=True)
+    about = ""
+    for marker in ("About\n", "About the Company", "About "):
+        idx = full_text.find(marker)
+        if idx >= 0:
+            chunk = full_text[idx: idx + 800]
+            about = re.sub(r"^About[^\n]*\n?", "", chunk).strip()
+            about = about.split("Strengths")[0].split("Risk")[0].strip()
+            break
+    detail["about"] = about or detail.get("longBusinessSummary") or "Business description not available from aggregator."
+
     strengths, risks = [], []
     for line in full_text.split("\n"):
         line = line.strip()
@@ -511,24 +584,63 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     if m:
         detail["gmp"] = float(m.group(1))
         detail["gmp_pct"] = float(m.group(2))
-        
+    m = re.search(r"(?:Total|Overall).*?([\d.]+)\s*x", full_text, re.I)
+    if m:
+        detail["subscription_total"] = float(m.group(1))
+    for cat, key in [("QIB", "subscription_qib"), ("NII", "subscription_nii"),
+                     ("Retail", "subscription_retail"), ("RII", "subscription_retail")]:
+        m = re.search(rf"{cat}[^\d]{{0,20}}([\d.]+)\s*x", full_text, re.I)
+        if m:
+            detail[key] = float(m.group(1))
+
     m = re.search(r"listing\s*(?:gain|return|pop)?[^\d%]*([+-]?[\d.]+)\s*%", full_text, re.I)
     if m:
         detail["listing_gain_pct"] = float(m.group(1))
+    m = re.search(r"Close Price on Listing[^\d]*([\d.]+)", full_text, re.I)
+    if m:
+        detail["listing_price"] = float(m.group(1))
 
-    gmp_info = _ai_google_gmp(detail.get("name") or "")
-    for k, v in gmp_info.items():
-        if v is not None and detail.get(k) is None:
-            detail[k] = v
+    fins = detail.get("financials") or []
+    revs = [f["revenue_cr"] for f in fins if f.get("revenue_cr")]
+    pats = [f["pat_cr"] for f in fins if f.get("pat_cr") is not None]
+    if len(revs) >= 2 and revs[-1] and revs[-1] > 0:
+        years = len(revs) - 1
+        try:
+            detail["revenue_cagr"] = round(((revs[0] / revs[-1]) ** (1 / years) - 1) * 100, 2)
+        except Exception:
+            detail["revenue_cagr"] = None
+    else:
+        detail["revenue_cagr"] = None
+    if pats:
+        detail["is_profitable_latest"] = pats[0] is not None and pats[0] > 0
+        detail["is_profitable_all"] = all(p is not None and p > 0 for p in pats[:3])
+    else:
+        detail["is_profitable_latest"] = None
+        detail["is_profitable_all"] = None
 
-    scr = _screener_company_lookup(detail.get("name") or "")
-    if scr.get("financials"):
+    detail["ipo_news"] = fetch_google_news(f"{detail['name']} IPO GMP subscription 2026")
+
+    if detail.get("gmp") is None and detail.get("gmp_pct") is None:
+        gmp_info = _ai_google_gmp(detail.get("name") or "")
+        for k, v in gmp_info.items():
+            if v is not None and detail.get(k) is None:
+                detail[k] = v
+
+    scr_url = detail.get("screener_url")
+    scr = _screener_company_lookup(detail.get("name") or "", screener_url=scr_url)
+    if scr.get("screener_url"):
+        detail["screener_url"] = scr["screener_url"]
+    if scr.get("about_screener"):
+        if (not detail.get("about") or detail.get("about", "").startswith("Business description")
+                or len(detail.get("about", "")) < 60):
+            detail["about"] = scr["about_screener"]
+    if scr.get("financials") and (not detail.get("financials") or len(detail.get("financials") or []) < 2):
         detail["financials"] = scr["financials"]
-    if scr.get("revenue_cagr") is not None:
+    if scr.get("revenue_cagr") is not None and detail.get("revenue_cagr") is None:
         detail["revenue_cagr"] = scr["revenue_cagr"]
-    if scr.get("is_profitable_latest") is not None:
+    if scr.get("is_profitable_latest") is not None and detail.get("is_profitable_latest") is None:
         detail["is_profitable_latest"] = scr["is_profitable_latest"]
-    if scr.get("is_profitable_all") is not None:
+    if scr.get("is_profitable_all") is not None and detail.get("is_profitable_all") is None:
         detail["is_profitable_all"] = scr["is_profitable_all"]
 
     return detail
@@ -537,17 +649,48 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
 def score_ipo(detail: dict, bucket: str = "current") -> tuple:
     if bucket != "current":
         return None, None, [], []
+
     pros, cons, score = [], [], 50
+
     cagr = detail.get("revenue_cagr")
     if cagr is not None:
-        if cagr > 20: pros.append(f"Strong revenue CAGR of {cagr:.1f}%"); score += 10
-        elif cagr > 10: pros.append(f"Decent revenue CAGR of {cagr:.1f}%"); score += 5
-        else: cons.append(f"Slow revenue growth ({cagr:.1f}% CAGR)"); score -= 5
-    if detail.get("is_profitable_all") is True: pros.append("Profitable across reported years"); score += 10
-    elif detail.get("is_profitable_latest") is True: pros.append("Profitable in latest reported year"); score += 4
-    elif detail.get("is_profitable_latest") is False: cons.append("Latest reported year was loss-making"); score -= 12
+        if cagr > 20:
+            pros.append(f"Strong revenue CAGR of {cagr:.1f}%"); score += 10
+        elif cagr > 10:
+            pros.append(f"Decent revenue CAGR of {cagr:.1f}%"); score += 5
+        elif cagr < 0:
+            cons.append(f"Revenue contraction ({cagr:.1f}% CAGR)"); score -= 10
+        else:
+            cons.append(f"Slow revenue growth ({cagr:.1f}% CAGR)"); score -= 5
+
+    if detail.get("is_profitable_all") is True:
+        pros.append("Profitable across reported years"); score += 10
+    elif detail.get("is_profitable_latest") is True:
+        pros.append("Profitable in latest reported year"); score += 4
+    elif detail.get("is_profitable_latest") is False:
+        cons.append("Latest reported year was loss-making"); score -= 12
+
+    gmp_pct = detail.get("gmp_pct")
+    if gmp_pct is not None:
+        if gmp_pct >= 20:
+            pros.append(f"Market sentiment: elevated unofficial GMP ({gmp_pct:.1f}%)"); score += 4
+        elif gmp_pct >= 5:
+            pros.append(f"Market sentiment: positive unofficial GMP ({gmp_pct:.1f}%)"); score += 2
+        elif gmp_pct < 0:
+            cons.append(f"Market sentiment: negative unofficial GMP ({gmp_pct:.1f}%)"); score -= 5
+
+    sub = detail.get("subscription_total")
+    if sub is not None:
+        if sub >= 10:
+            pros.append(f"Strong subscription ({sub:.1f}x)"); score += 8
+        elif sub >= 1:
+            pros.append(f"Subscribed ({sub:.1f}x)"); score += 3
+        else:
+            cons.append(f"Weak subscription ({sub:.1f}x)"); score -= 12
+
     score = int(min(max(score, 0), 100))
-    return score, ("BUY" if score >= 60 else "ABSTAIN"), pros, cons
+    verdict = "BUY" if score >= 60 else "ABSTAIN"
+    return score, verdict, pros, cons
 
 
 def render_ipo_financials_chart(fin_rows):
@@ -560,7 +703,16 @@ def render_ipo_financials_chart(fin_rows):
     fig = go.Figure()
     fig.add_trace(go.Bar(x=years, y=revs, name="Total Revenue (₹ Cr)", marker_color=BLUE))
     fig.add_trace(go.Bar(x=years, y=pats, name="Net Profit / PAT (₹ Cr)", marker_color=GREEN))
-    fig.update_layout(template="plotly_dark", paper_bgcolor=BG, plot_bgcolor=BG, height=280, margin=dict(t=20, b=20, l=10, r=10), barmode="group", legend=dict(orientation="h", y=-0.2))
+    
+    fig.update_layout(
+        template="plotly_dark",
+        paper_bgcolor=BG,
+        plot_bgcolor=BG,
+        height=280,
+        margin=dict(t=20, b=20, l=10, r=10),
+        barmode="group",
+        legend=dict(orientation="h", y=-0.2)
+    )
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 
@@ -571,23 +723,35 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
     for idx, ipo in enumerate(ipos):
         sym = ipo.get("slug") or ipo.get("symbol") or f"ipo_{idx}"
         name = ipo.get("name", "Unknown")
-        band = ipo.get("price_band_str") or (f"{currency}{ipo['price_low']} – {currency}{ipo['price_high']}" if ipo.get("price_low") is not None else "Price TBA")
+        band = ipo.get("price_band_str") or (
+            f"{currency}{ipo['price_low']} – {currency}{ipo['price_high']}"
+            if ipo.get("price_low") is not None else "Price TBA"
+        )
         
-        # Rule 3: Upcoming tab remains streamlined with NO Analyse button
         if bucket == "upcoming":
             cols = st.columns([4, 2])
             with cols[0]:
-                st.markdown(f"<b>{html_escape(name)}</b><br><span style='color:{MUTED};font-size:0.8em;'>{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','NSE/BSE')))}</span>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<b>{html_escape(name)}</b><br>"
+                    f"<span style='color:{MUTED};font-size:0.8em;'>"
+                    f"{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','NSE/BSE')))}</span>",
+                    unsafe_allow_html=True)
             with cols[1]:
                 date_val = ipo.get('date') or ipo.get('open_date') or 'TBA'
-                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Opening Date</span><br><b>{html_escape(str(date_val))}</b>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='font-size:0.75em;color:{MUTED};'>Opening Date</span><br>"
+                    f"<b>{html_escape(str(date_val))}</b>",
+                    unsafe_allow_html=True)
             st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>", unsafe_allow_html=True)
             continue
 
-        # Current and Closed views
         cols = st.columns([3.2, 1.4, 1.6, 1.2, 1.2])
         with cols[0]:
-            st.markdown(f"<b>{html_escape(name)}</b><br><span style='color:{MUTED};font-size:0.8em;'>{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','')))}</span>", unsafe_allow_html=True)
+            st.markdown(
+                f"<b>{html_escape(name)}</b><br>"
+                f"<span style='color:{MUTED};font-size:0.8em;'>"
+                f"{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','')))}</span>",
+                unsafe_allow_html=True)
         with cols[1]:
             if bucket == "closed":
                 date_label = "Listing Date"
@@ -595,12 +759,21 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
             else:
                 date_label = "Open"
                 date_val = ipo.get('date') or ipo.get('open_date') or 'TBA'
-            st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>{date_label}</span><br><b>{html_escape(str(date_val))}</b>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='font-size:0.75em;color:{MUTED};'>{date_label}</span><br>"
+                f"<b>{html_escape(str(date_val))}</b>",
+                unsafe_allow_html=True)
         with cols[2]:
-            st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Price Band</span><br><b>{html_escape(str(band))}</b>", unsafe_allow_html=True)
+            st.markdown(
+                f"<span style='font-size:0.75em;color:{MUTED};'>Price Band</span><br>"
+                f"<b>{html_escape(str(band))}</b>",
+                unsafe_allow_html=True)
         with cols[3]:
             if bucket == "current" and ipo.get("gmp_str"):
-                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>GMP</span><br><b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='font-size:0.75em;color:{MUTED};'>GMP</span><br>"
+                    f"<b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>",
+                    unsafe_allow_html=True)
             elif bucket == "closed":
                 override = ipo.get("listing_status_override")
                 gain = ipo.get("listing_gain_pct")
@@ -615,9 +788,15 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     gain_str = "Listed (Gain N/A)"
                     gain_color = MUTED
                     
-                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br><b style='color:{gain_color};'>{html_escape(gain_str)}</b>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br>"
+                    f"<b style='color:{gain_color};'>{html_escape(gain_str)}</b>",
+                    unsafe_allow_html=True)
             else:
-                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br><b>Active</b>", unsafe_allow_html=True)
+                st.markdown(
+                    f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br>"
+                    f"<b>Active</b>",
+                    unsafe_allow_html=True)
         with cols[4]:
             if st.button("Analyse →", key=f"ipo_{bucket}_{sym}_{idx}", use_container_width=True):
                 with st.spinner(f"Loading {name}..."):
@@ -625,12 +804,16 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     st.session_state.ipo_bucket = bucket
                     st.session_state.ipo_detail = fetch_ipo_detail(sym, name)
                     d = st.session_state.ipo_detail
-                    for k in ("gmp", "gmp_pct", "gmp_str", "price_low", "price_high", "lot_size", "min_investment", "subscription_str", "subscription_total", "issue_size_cr", "issue_size_str", "screener_url", "listing_date_str", "listing_gain_pct", "listing_price"):
+                    for k in ("gmp", "gmp_pct", "gmp_str", "price_low", "price_high", "lot_size",
+                              "min_investment", "subscription_str", "subscription_total",
+                              "issue_size_cr", "issue_size_str", "screener_url", "listing_date_str",
+                              "listing_gain_pct", "listing_price"):
                         if d.get(k) is None and ipo.get(k) is not None:
                             d[k] = ipo[k]
                     st.session_state.ipo_detail = d
                 st.rerun()
-        st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>", unsafe_allow_html=True)
+        st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>",
+                    unsafe_allow_html=True)
 
 
 def _render_ipo_detail_view():
@@ -649,14 +832,17 @@ def _render_ipo_detail_view():
 
     right = ""
     if bucket == "current" and verdict:
-        right = f"<div style='font-size:2em;font-weight:900;color:{vc};'>{verdict}</div><div style='color:{MUTED};font-size:0.85em;'>Score: {score}/100</div>"
+        right = f"<div style='font-size:2em;font-weight:900;color:{vc};'>{verdict}</div>" \
+                f"<div style='color:{MUTED};font-size:0.85em;'>Score: {score}/100</div>"
     elif bucket == "closed":
         gain = detail.get("listing_gain_pct")
         if gain is not None:
             gain_color = GREEN if gain >= 0 else RED
-            right = f"<div style='font-size:1.4em;font-weight:800;color:{gain_color};'>Listing {gain:+.1f}%</div>"
+            right = f"<div style='font-size:1.4em;font-weight:800;color:{gain_color};'>" \
+                    f"Listing {gain:+.1f}%</div>"
         else:
-            right = f"<div style='color:{MUTED};'>Listing: {html_escape(str(detail.get('listing_date_str') or 'Pending'))}</div>"
+            right = f"<div style='color:{MUTED};'>Listing: " \
+                    f"{html_escape(str(detail.get('listing_date_str') or 'Pending'))}</div>"
     else:
         right = f"<div style='color:{ORANGE};font-weight:700;'>UPCOMING</div>"
 
@@ -666,7 +852,9 @@ def _render_ipo_detail_view():
         <div>
           <div style="color:{MUTED};font-size:0.85em;">IPO Research · {bucket.upper()}</div>
           <div style="font-size:1.5em;font-weight:800;">{html_escape(name)}</div>
-          <div style="color:{MUTED};font-size:0.9em;">{html_escape(str(sym))} · {html_escape(str(detail.get('exchange','NSE/BSE')))}</div>
+          <div style="color:{MUTED};font-size:0.9em;">
+            {html_escape(str(sym))} · {html_escape(str(detail.get('exchange','NSE/BSE')))}
+          </div>
         </div>
         <div style="text-align:right;">{right}</div>
       </div>
@@ -674,25 +862,71 @@ def _render_ipo_detail_view():
     """, unsafe_allow_html=True)
 
     m1, m2, m3, m4 = st.columns(4)
-    with m1: custom_metric("Issue Size", detail.get("issue_size_str") or "N/A")
-    with m2: custom_metric("Price Band", detail.get("price_band_str") or "N/A")
-    with m3: custom_metric("GMP", f"₹{detail['gmp']} ({detail.get('gmp_pct'):+.1f}%)" if detail.get("gmp") is not None and detail.get("gmp_pct") is not None else (detail.get("gmp_str") or "N/A"))
-    with m4: custom_metric("Subscription", f"{detail['subscription_total']:.2f}x" if detail.get("subscription_total") is not None else (detail.get("subscription_str") or "N/A"))
+    with m1:
+        custom_metric("Issue Size", detail.get("issue_size_str") or "N/A")
+    with m2:
+        custom_metric("Price Band", detail.get("price_band_str") or "N/A")
+    with m3:
+        if bucket == "upcoming":
+            custom_metric("Lot Size", detail.get("lot_size") or "TBA")
+        else:
+            custom_metric("GMP",
+                f"₹{detail['gmp']} ({detail.get('gmp_pct'):+.1f}%)"
+                if detail.get("gmp") is not None and detail.get("gmp_pct") is not None
+                else (detail.get("gmp_str") or "N/A"))
+    with m4:
+        if bucket == "upcoming":
+            custom_metric("Revenue CAGR",
+                f"{detail['revenue_cagr']}%" if detail.get("revenue_cagr") is not None else "N/A")
+        else:
+            sub = detail.get("subscription_total")
+            custom_metric("Subscription", f"{sub:.2f}x" if sub is not None else (detail.get("subscription_str") or "N/A"))
 
-    card("Business Overview", f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;'>{html_escape(str(detail.get('about') or 'Not available.'))}</p>")
+    if bucket != "upcoming" and (detail.get("subscription_qib") is not None or detail.get("subscription_nii") is not None or detail.get("subscription_retail") is not None):
+        s1, s2, s3 = st.columns(3)
+        with s1:
+            custom_metric("QIB", f"{detail['subscription_qib']:.2f}x" if detail.get("subscription_qib") is not None else "N/A")
+        with s2:
+            custom_metric("NII", f"{detail['subscription_nii']:.2f}x" if detail.get("subscription_nii") is not None else "N/A")
+        with s3:
+            custom_metric("Retail", f"{detail['subscription_retail']:.2f}x" if detail.get("subscription_retail") is not None else "N/A")
+
+    card("Business Overview",
+         f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;'>"
+         f"{html_escape(str(detail.get('about') or 'Not available.'))}</p>")
 
     fins = detail.get("financials") or []
     if fins:
         st.markdown("##### 📊 Financial Trajectory (Revenue vs. PAT)")
         render_ipo_financials_chart(fins)
+        
         st.markdown("##### RHP Financial Highlights Table")
-        rows = [{"Year": f.get("year"), "Revenue (₹ Cr)": f.get("revenue_cr", "—"), "PAT (₹ Cr)": f.get("pat_cr", "—"), "Historical EPS": f.get("eps", "—")} for f in fins[:4]]
+        rows = []
+        for f in fins[:4]:
+            rows.append({
+                "Year": f.get("year"),
+                "Revenue (₹ Cr)": f.get("revenue_cr") if f.get("revenue_cr") is not None else "—",
+                "PAT (₹ Cr)": f.get("pat_cr") if f.get("pat_cr") is not None else "—",
+                "Historical EPS": f.get("eps") or "—",
+            })
         st.dataframe(rows, use_container_width=True, hide_index=True)
 
     pc1, pc2 = st.columns(2)
-    with pc1: card("Strengths", "".join(f"<div style='padding:4px 0'><span style='color:{GREEN}'>✅ {html_escape(p)}</span></div>" for p in (pros or detail.get("strengths") or [])[:8]) or f"<div style='color:{MUTED}'>No strengths extracted.</div>")
-    with pc2: card("Risks & Concerns", "".join(f"<div style='padding:4px 0'><span style='color:{RED}'>⚠️ {html_escape(c)}</span></div>" for c in (cons or detail.get("risks") or [])[:8]) or f"<div style='color:{MUTED}'>No material risks extracted.</div>")
+    with pc1:
+        p_html = "".join(
+            f"<div style='padding:4px 0'><span style='color:{GREEN}'>✅ {html_escape(p)}</span></div>"
+            for p in (pros or detail.get("strengths") or [])[:8]
+        ) or f"<div style='color:{MUTED}'>No strengths extracted.</div>"
+        card("Strengths", p_html)
+    with pc2:
+        c_html = "".join(
+            f"<div style='padding:4px 0'><span style='color:{RED}'>⚠️ {html_escape(c)}</span></div>"
+            for c in (cons or detail.get("risks") or [])[:8]
+        ) or f"<div style='color:{MUTED}'>No material risks extracted.</div>"
+        card("Risks & Concerns", c_html)
 
     with st.spinner("Generating AI note..."):
         narr = ipo_ai_narrative(detail, score, verdict, pros, cons, bucket=bucket)
-    card("AI Research Note", f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>{style_verdict_text(narr)}</p>")
+    card("AI Research Note",
+         f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>"
+         f"{style_verdict_text(narr)}</p>")
