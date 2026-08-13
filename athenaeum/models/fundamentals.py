@@ -209,8 +209,6 @@ def compute_fundamental_score(val_score, past_score, health_score, is_financial,
     return fund, completeness
 
 # ============================================================
-# 6. QUANTITATIVE COMPOSITE ENGINE
+# 6. QUANTITATIVE COMPOSITE ENGINE  (constants live in config.py)
 # ============================================================
-EQUITY_RISK_PREMIUM = 0.055
-TERMINAL_GROWTH_PCT = 5.0
 
