@@ -160,15 +160,30 @@ def _fmp_ticker(resolved_ticker: str) -> str:
 
 @st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
-    # FMP primary, yfinance fallback — collect data-quality warnings for the UI
     warnings = []
     fmp = fetch_fmp_data(_fmp_ticker(resolved_ticker))
-    if not fmp:
-        warnings.append("FMP returned no data — relying on yfinance fallback only.")
-    elif not fmp.get("currentPrice"):
-        warnings.append("FMP quote incomplete — price/ratios filled from yfinance where needed.")
-
     stock = yf.Ticker(resolved_ticker)
+    
+    # --- STRICT ISOLATION LOGIC (No Merging) ---
+    if fmp and fmp.get("currentPrice") is not None:
+        info = fmp.copy()
+        data_source = "FMP"
+    else:
+        warnings.append("FMP quote unavailable — falling back entirely to yfinance.")
+        try:
+            info = stock.info or {}
+        except Exception as e:
+            logger.warning("yfinance info failed for %s: %s", resolved_ticker, e)
+            info = {}
+            warnings.append("yfinance company info failed.")
+        data_source = "yfinance"
+
+    # Scrub NaN values from whichever source won so they don't infect the math
+    for k, v in list(info.items()):
+        if pd.isna(v) or str(v).lower() == "nan":
+            info[k] = None
+
+    # Price History (FMP preferred, yfinance fallback)
     if fmp.get("fmp_history") is not None and not fmp["fmp_history"].empty:
         hist_full = fmp["fmp_history"].copy().reset_index(drop=True)
     else:
@@ -179,29 +194,26 @@ def fetch_stock_data(resolved_ticker, raw_input):
             logger.warning("yfinance history failed for %s: %s", resolved_ticker, e)
             hist_full = pd.DataFrame()
             warnings.append(f"Price history unavailable: {e}")
+            
     if hist_full.empty:
         raise ValueError(f"Could not find '{raw_input}'.")
 
-    try:
-        yf_info = stock.info or {}
-    except Exception as e:
-        logger.warning("yfinance info failed for %s: %s", resolved_ticker, e)
-        yf_info = {}
-        warnings.append("yfinance company info failed — some fields may be missing.")
-
-    # Merge: FMP wins, yfinance fills gaps. Periods may mix TTM vs annual — flagged below.
-    info = {**yf_info, **{k: v for k, v in fmp.items() if v is not None and k != "fmp_history"}}
+    # --- BULLETPROOF PRICE EXTRACTION ---
+    fallback_price = None
+    if not hist_full.empty:
+        valid_closes = hist_full['Close'].dropna()
+        if not valid_closes.empty:
+            fallback_price = round(float(valid_closes.iloc[-1]), 2)
+            
+    # Safely get current price depending on source
+    raw_price = info.get("currentPrice") if data_source == "FMP" else info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
     
-    # Fix 1: Runtime Syntax Error Fix
-    fallback_price = round(float(hist_full['Close'].iloc[-1]), 2) if not hist_full.empty else None
-    current_price = info.get("currentPrice") or fallback_price
+    if raw_price is None or pd.isna(raw_price) or str(raw_price).lower() == "nan":
+        current_price = fallback_price
+    else:
+        current_price = round(float(raw_price), 2)
+        
     currency_symbol = "₹"
-    
-    if fmp and yf_info:
-        warnings.append(
-            "Metrics may mix FMP TTM fields with yfinance annual/quarterly statements — "
-            "treat cross-source ratios with care."
-        )
 
     sector = info.get("sector", "N/A")
     industry = info.get("industry", "N/A")
@@ -276,7 +288,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
         cf = stock.cashflow
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
-            # Dropna and reverse to ensure chronological or at least clean iteration
             fcf_history = cf.loc['Free Cash Flow'].dropna()
 
         if fin is not None and not fin.empty:
@@ -323,7 +334,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     trailing_earnings_negative = (net_inc is not None and net_inc < 0) or (info.get('trailingEps') and info.get('trailingEps') < 0)
     
-    # --- FIX: Turnaround strictly needs positive operating profit ---
     is_turnaround = bool(trailing_earnings_negative and (
         (pat_qoq is not None and pat_qoq > 50) or 
         (latest_quarter_net_income is not None and latest_quarter_net_income > 0 and ebit_latest is not None and ebit_latest > 0)
@@ -334,24 +344,24 @@ def fetch_stock_data(resolved_ticker, raw_input):
     qualitative_bonus, qualitative_notes = scan_news_sentiment(recent_news, business_summary)
     order_book_hits, growth_pct_from_news = extract_order_book_signal(recent_news, business_summary)
 
-    pe_raw = info.get("trailingPE")
+    pe_raw = info.get("trailingPE") if data_source == "yfinance" else info.get("pe_ratio")
     if not is_valid_metric(pe_raw) and net_inc and mcap:
         pe_raw = round(mcap / net_inc, 2)
     elif is_valid_metric(pe_raw):
         pe_raw = round(float(pe_raw), 2)
 
-    pb_raw = info.get("priceToBook")
+    pb_raw = info.get("priceToBook") if data_source == "yfinance" else info.get("pb_ratio")
     if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
         pb_raw = round(mcap / total_eq, 2)
     elif is_valid_metric(pb_raw):
         pb_raw = round(float(pb_raw), 2)
 
-    roe_raw = info.get("returnOnEquity")
+    roe_raw = info.get("returnOnEquity") if data_source == "yfinance" else info.get("roe")
     if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
         roe_raw = net_inc / total_eq
     roe_is_known = is_valid_metric(roe_raw)
 
-    peg_raw = info.get("pegRatio")
+    peg_raw = info.get("pegRatio") if data_source == "yfinance" else info.get("peg_ratio")
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and pat_yoy_pct and pat_yoy_pct > 0:
         peg_raw = round(to_float(pe_raw) / pat_yoy_pct, 2)
     elif is_valid_metric(peg_raw):
@@ -361,7 +371,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if is_fin:
         ev_ebitda = "N/A (Financial Sector)"
     else:
-        ev_val = info.get("enterpriseValue")
+        ev_val = info.get("enterpriseValue") if data_source == "yfinance" else info.get("ev_ebitda")
         if not is_valid_metric(ev_val) and mcap:
             ev_val = mcap + (info.get('totalDebt') or 0) - (info.get('totalCash') or 0)
         if is_valid_metric(ebitda_val) and is_valid_metric(ev_val) and ebitda_val != 0:
@@ -372,16 +382,16 @@ def fetch_stock_data(resolved_ticker, raw_input):
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (is_valid_metric(ebitda_val) and revenue_latest) else "N/A"
     interest_coverage = round(ebit_latest / interest_exp_latest, 2) if (ebit_latest is not None and interest_exp_latest) else "N/A"
     
-    # Fix 2: Source-Aware D/E Normalization
-    if fmp.get("debtToEquity") is not None:
-        debt_to_equity = round(float(fmp["debtToEquity"]), 2)
-    else:
-        dte_raw = info.get("debtToEquity")
-        if is_valid_metric(dte_raw):
-            dte_num = float(dte_raw)
-            debt_to_equity = round(dte_num / 100.0, 2) if dte_num > 5.0 else round(dte_num, 2)
+    # Source-Aware D/E Normalization
+    dte_raw = info.get("debtToEquity")
+    if is_valid_metric(dte_raw):
+        dte_num = float(dte_raw)
+        if data_source == "yfinance" and dte_num > 5.0:
+            debt_to_equity = round(dte_num / 100.0, 2)
         else:
-            debt_to_equity = "N/A"
+            debt_to_equity = round(dte_num, 2)
+    else:
+        debt_to_equity = "N/A"
 
     temp_metrics = {
         'pe_ratio': pe_raw, 'peg_ratio': peg_raw, 'pb_ratio': pb_raw,
@@ -391,27 +401,25 @@ def fetch_stock_data(resolved_ticker, raw_input):
         'operating_margin': operating_margin, 'revenue_cagr': revenue_cagr_pct,
         'sector_profile': sector_profile, 'nim_proxy': nim_proxy,
     }
-    # Binary checklists kept for transparent UI; continuous scores drive the model
+
     v_bin, v_avail, v_poss = score_from_checks(valuation_checks(temp_metrics))
     p_bin, p_avail, p_poss = score_from_checks(past_performance_checks(temp_metrics))
     h_bin, h_avail, h_poss = score_from_checks(financial_health_checks(temp_metrics))
     v_score = continuous_valuation_score(temp_metrics)
     p_score = continuous_past_score(temp_metrics)
     h_score = continuous_health_score(temp_metrics)
-    # Fall back to binary if continuous has nothing
-    if v_score is None:
-        v_score = v_bin
-    if p_score is None:
-        p_score = p_bin
-    if h_score is None:
-        h_score = h_bin
+    
+    if v_score is None: v_score = v_bin
+    if p_score is None: p_score = p_bin
+    if h_score is None: h_score = h_bin
+    
     fundamental_score, data_completeness = compute_fundamental_score(
         v_score, p_score, h_score, is_fin,
         v_avail, p_avail, h_avail, v_poss, p_poss, h_poss
     )
-    # Turnaround: single centralized note — growth nudge only inside pipeline (no double bonus)
+
     if is_turnaround and fundamental_score is not None:
-        pass  # do not add a second fundamental bonus
+        pass  # Nudge handled in pipeline
 
     bvps = info.get('bookValue')
     if not is_valid_metric(bvps) and total_eq and shares_out:
@@ -419,29 +427,28 @@ def fetch_stock_data(resolved_ticker, raw_input):
     bvps = bvps if is_valid_metric(bvps) else None
     div_per_share = info.get("dividendRate")
 
+    analyst_growth_pct = None
+    if isinstance(fmp, dict) and fmp.get("analyst_growth_pct") is not None:
+        analyst_growth_pct = fmp.get("analyst_growth_pct")
+    elif "analyst_growth_pct" in info:
+        analyst_growth_pct = info.get("analyst_growth_pct")
+
     jpb_ratio = jpb_value = ddm_val = None
     if is_fin:
         beta_preview = info.get('beta') if info.get('beta') and pd.notna(info.get('beta')) and info.get('beta') > 0 else 1.0
         current_rfr = _rfr_value(get_dynamic_risk_free_rate())
         ke_preview = min(max((current_rfr + beta_preview * EQUITY_RISK_PREMIUM) * 100, 9), 20)
-        analyst_growth_pct_pre = None
-        if isinstance(fmp, dict):
-            analyst_growth_pct_pre = fmp.get("analyst_growth_pct")
-        if analyst_growth_pct_pre is None:
-            analyst_growth_pct_pre = info.get("analyst_growth_pct")
-        if analyst_growth_pct_pre and float(analyst_growth_pct_pre) > 0:
-            growth_preview = min(max(float(analyst_growth_pct_pre), 5), 30)
+        
+        if analyst_growth_pct and float(analyst_growth_pct) > 0:
+            growth_preview = min(max(float(analyst_growth_pct), 5), 30)
         elif pat_yoy_pct and pat_yoy_pct > 0:
             growth_preview = pat_yoy_pct
         else:
             growth_preview = 8.0
+            
         jpb_ratio, jpb_value = justified_pb_fair_value(roe_raw * 100 if roe_is_known else None, ke_preview, growth_preview, bvps)
         ddm_val = ddm_fair_value(div_per_share, ke_preview, growth_preview)
     temp_metrics["justified_pb"] = jpb_ratio
-
-    analyst_growth_pct = fmp.get("analyst_growth_pct") if isinstance(fmp, dict) else None
-    if analyst_growth_pct is None:
-        analyst_growth_pct = info.get("analyst_growth_pct")
 
     predictive_data = run_predictive_pipeline(
         info, hist_full, fcf_history, sector, industry, fundamental_score,
@@ -531,16 +538,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "calendar": cal_df,
         "target_mean_price": info.get("targetMeanPrice"),
         "recommendation_mean": info.get("recommendationMean"),
-        "v_score": v_score,
-        "p_score": p_score,
-        "h_score": h_score,
         "working_ticker": resolved_ticker, "history": hist_full.reset_index(),
         "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- SECTOR ALTERNATIVE SCANNER — FMP PRIMARY, yfinance FALLBACK ---
+    # --- SECTOR ALTERNATIVE SCANNER — STRICT ISOLATION ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -550,61 +554,59 @@ def fetch_stock_data(resolved_ticker, raw_input):
             if peer == resolved_ticker:
                 continue
             try:
-                # PRIMARY: FMP data for the peer ticker
                 p_fmp = fetch_fmp_data(_fmp_ticker(peer))
-
-                # Merge FMP with yfinance fallback for any missing fields
                 p_yf_info = {}
                 p_hist = pd.DataFrame()
-                if not p_fmp or p_fmp.get("currentPrice") is None:
-                    try:
-                        p_stock = yf.Ticker(peer)
-                        p_yf_info = p_stock.info
-                        p_hist = p_stock.history(period="1y")
-                    except Exception:
-                        pass
-                else:
-                    # FMP has data — only fetch yfinance history if FMP history missing
+                
+                if p_fmp and p_fmp.get("currentPrice") is not None:
+                    p_info = p_fmp.copy()
+                    p_source = "FMP"
                     if p_fmp.get("fmp_history") is not None and not p_fmp["fmp_history"].empty:
                         p_hist = p_fmp["fmp_history"]
                     else:
-                        try:
-                            p_hist = yf.Ticker(peer).history(period="1y")
-                        except Exception:
-                            pass
+                        try: p_hist = yf.Ticker(peer).history(period="1y")
+                        except Exception: pass
+                else:
+                    try:
+                        p_stock = yf.Ticker(peer)
+                        p_info = p_stock.info or {}
+                        p_hist = p_stock.history(period="1y")
+                    except Exception:
+                        p_info = {}
+                    p_source = "yfinance"
 
                 if p_hist is None or (hasattr(p_hist, 'empty') and p_hist.empty):
                     continue
 
-                # Merge: FMP wins, yfinance fills gaps
-                p_info = {**p_yf_info, **{k: v for k, v in p_fmp.items()
-                                            if v is not None and k != "fmp_history"}}
+                for k, v in list(p_info.items()):
+                    if pd.isna(v): p_info[k] = None
 
-                # Resolve price
-                p_current_price = (p_info.get("currentPrice") or
-                                    p_info.get("price") or
-                                    float(p_hist['Close'].iloc[-1]))
-
+                p_current_price = p_info.get("currentPrice") if p_source == "FMP" else p_info.get("currentPrice") or p_info.get("regularMarketPrice") or p_info.get("previousClose")
+                if p_current_price is None or pd.isna(p_current_price):
+                    valid_closes = p_hist['Close'].dropna()
+                    if not valid_closes.empty:
+                        p_current_price = float(valid_closes.iloc[-1])
+                    else:
+                        continue
+                        
                 p_sector   = p_info.get("sector", "N/A")
                 p_industry = p_info.get("industry", "N/A")
                 p_is_fin   = is_financial_sector(p_sector, p_industry)
 
-                # Ratios — FMP fields take priority (already merged into p_info)
                 p_pe  = p_info.get("pe_ratio") or p_info.get("trailingPE")
                 p_pb  = p_info.get("priceToBook")
                 p_roe = p_info.get("returnOnEquity")
+                p_dte = p_info.get("debtToEquity")
 
                 pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
                 roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
-                roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw   # normalise fraction→%
+                roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw
 
-                # Fix 2: Source-Aware D/E Normalization (Peer Loop)
-                if p_fmp.get("debtToEquity") is not None:
-                    dte_val = float(p_fmp["debtToEquity"])
+                dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
+                if p_source == "yfinance" and dte_raw > 5.0 and dte_raw != 999:
+                    dte_val = dte_raw / 100.0
                 else:
-                    p_dte = p_info.get("debtToEquity")
-                    dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
-                    dte_val = (dte_raw / 100.0) if dte_raw > 5.0 else dte_raw
+                    dte_val = dte_raw
 
                 closes = p_hist['Close'].dropna()
                 is_uptrend = (closes.iloc[-1] > closes.rolling(50).mean().iloc[-1]
@@ -616,18 +618,16 @@ def fetch_stock_data(resolved_ticker, raw_input):
                               is_uptrend)
 
                 if qualifies:
-                    # Economically meaningful relative score: high ROE / reasonable PE
-                    # (avoid the nonsensical ROE - PE arithmetic)
                     earnings_yield = (100.0 / pe_val) if pe_val > 0 else 0
                     score = (0.55 * min(roe_val, 40) / 40.0 * 100) + (0.45 * min(earnings_yield, 12) / 12.0 * 100)
                     candidate = {
                         "name": p_info.get("longName") or p_info.get("shortName") or peer,
                         "ticker": peer,
-                        "price": p_current_price,
+                        "price": round(float(p_current_price), 2),
                         "pe":    round(pe_val, 1),
                         "pb":    round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A",
                         "_score": score,
-                        "source": "FMP" if p_fmp.get("currentPrice") else "yfinance",
+                        "source": p_source,
                     }
                     if best_peer is None or score > best_peer.get("_score", -999):
                         best_peer = candidate
