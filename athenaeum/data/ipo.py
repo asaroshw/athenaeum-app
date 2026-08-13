@@ -414,7 +414,7 @@ def fetch_ipo_list_categorized() -> dict:
         if lst:
             raw_closed = _merge_ipo_records(raw_closed, lst)
 
-    # --- STRICT GATEKEEPER FILTER FOR CURRENT TAB ---
+    # --- STRICT GATEKEEPER FILTER FOR CURRENT TAB (Untouched logic) ---
     today = datetime.today().date()
     filtered_current = []
     for ipo in raw_current:
@@ -439,9 +439,18 @@ def fetch_ipo_list_categorized() -> dict:
         else:
             raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
 
+    # --- STRICT CLOSED-TAB GUARD ---
+    # Reject any item from closed if its close date is today or in the future (>= August 13, 2026)
+    filtered_closed = []
+    for ipo in raw_closed:
+        cl_d = _parse_date_flex(ipo.get("close_date") or ipo.get("open_date"))
+        if cl_d and cl_d >= today:
+            continue  # Still open or upcoming, do not include in closed
+        filtered_closed.append(ipo)
+
     return {
         "current": _deduplicate_list(filtered_current),
-        "closed": _deduplicate_list(raw_closed)[:40],
+        "closed": _deduplicate_list(filtered_closed)[:40],
         "upcoming": _deduplicate_list(raw_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
         "sources_note": "Strictly filtered hybrid IPO sources.",
@@ -578,8 +587,8 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>GMP</span><br><b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>", unsafe_allow_html=True)
             elif bucket == "closed":
                 gain = ipo.get("listing_gain_pct")
-                gain_str = f"{gain:+.1f}%" if gain is not None else "N/A"
-                gain_color = GREEN if (gain or 0) >= 0 else RED
+                gain_str = f"{gain:+.1f}%" if gain is not None else "Listed (Gain N/A)"
+                gain_color = GREEN if (gain or 0) >= 0 else (RED if gain is not None else MUTED)
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br><b style='color:{gain_color};'>{html_escape(gain_str)}</b>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br><b>Active</b>", unsafe_allow_html=True)
