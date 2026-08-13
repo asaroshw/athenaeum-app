@@ -16,7 +16,7 @@ from athenaeum.utils.helpers import (
 from athenaeum.models.sector import is_financial_sector, classify_sector_profile
 from athenaeum.analysis.sentiment import scan_news_sentiment, extract_order_book_signal
 from athenaeum.models.fundamentals import (
-    valuation_checks, past_performance_checks, financial_health_checks,
+    valuation_checks, past_performance_checks, financial_health_checks, dividend_checks,
     continuous_valuation_score, continuous_past_score, continuous_health_score,
     score_from_checks, compute_fundamental_score,
 )
@@ -75,10 +75,8 @@ def fetch_google_news(query_term):
         logger.warning("Google News fetch failed for %s: %s", query_term, e)
     return []
 
-@st.cache_data(ttl=3600)
+@st.cache_data(ttl=3600, show_spinner=False)
 def fetch_fmp_data(ticker_clean: str) -> dict:
-    """Primary data fetch from Financial Modeling Prep. Returns a flat dict;
-    absent keys mean FMP did not have that field — yfinance fills the gap."""
     FMP_KEY = st.secrets.get("FMP_API_KEY", "")
     if not FMP_KEY:
         return {}
@@ -155,16 +153,16 @@ def fetch_fmp_data(ticker_clean: str) -> dict:
 
 
 def _fmp_ticker(resolved_ticker: str) -> str:
-    """Convert WELSPUNCORP.NS -> WELSPUNCORP for FMP."""
     return resolved_ticker.replace(".NS","").replace(".BO","").upper()
 
-@st.cache_data(ttl=1800)
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stock_data(resolved_ticker, raw_input):
     warnings = []
     fmp = fetch_fmp_data(_fmp_ticker(resolved_ticker))
     stock = yf.Ticker(resolved_ticker)
     
-    # --- STRICT ISOLATION LOGIC (No Merging) ---
+    # --- STRICT ISOLATION LOGIC ---
     if fmp and fmp.get("currentPrice") is not None:
         info = fmp.copy()
         data_source = "FMP"
@@ -178,18 +176,19 @@ def fetch_stock_data(resolved_ticker, raw_input):
             warnings.append("yfinance company info failed.")
         data_source = "yfinance"
 
-    # Scrub NaN values from whichever source won so they don't infect the math
+    # Scrub NaN values safely
     for k, v in list(info.items()):
-        if pd.isna(v) or str(v).lower() == "nan":
+        if isinstance(v, (int, float)) and pd.isna(v):
+            info[k] = None
+        elif isinstance(v, str) and v.lower() == "nan":
             info[k] = None
 
-    # Price History (FMP preferred, yfinance fallback)
+    # Price History
     if fmp.get("fmp_history") is not None and not fmp["fmp_history"].empty:
         hist_full = fmp["fmp_history"].copy().reset_index(drop=True)
     else:
         try:
             hist_full = stock.history(period="1y")
-            warnings.append("Price history from yfinance (FMP history unavailable).")
         except Exception as e:
             logger.warning("yfinance history failed for %s: %s", resolved_ticker, e)
             hist_full = pd.DataFrame()
@@ -205,8 +204,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         if not valid_closes.empty:
             fallback_price = round(float(valid_closes.iloc[-1]), 2)
             
-    # Safely get current price depending on source
-    raw_price = info.get("currentPrice") if data_source == "FMP" else info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose")
+    raw_price = info.get("currentPrice") if data_source == "FMP" else (info.get("currentPrice") or info.get("regularMarketPrice") or info.get("previousClose"))
     
     if raw_price is None or pd.isna(raw_price) or str(raw_price).lower() == "nan":
         current_price = fallback_price
@@ -214,18 +212,24 @@ def fetch_stock_data(resolved_ticker, raw_input):
         current_price = round(float(raw_price), 2)
         
     currency_symbol = "₹"
+    
+    # --- KEY UNIFICATION FOR PIPELINE ---
+    # Map differing keys so pipeline.py receives the exact standard variables it expects
+    if data_source == "FMP":
+        info["trailingEps"] = info.get("eps")
+        info["trailingPE"] = info.get("pe_ratio")
+        if info.get("dividendYieldTTM") and current_price:
+            info["dividendRate"] = float(info["dividendYieldTTM"]) * current_price
+    else:
+        info["eps"] = info.get("trailingEps")
+        info["pe_ratio"] = info.get("trailingPE")
+        info["ev_ebitda"] = info.get("enterpriseToEbitda")
 
     sector = info.get("sector", "N/A")
     industry = info.get("industry", "N/A")
     is_fin = is_financial_sector(sector, industry)
     sector_profile = classify_sector_profile(sector, industry)
     revenue_keys = BANK_REVENUE_KEYS if is_fin else STANDARD_REVENUE_KEYS
-    if is_fin:
-        warnings.append(
-            "Financial-sector coverage is incomplete: GNPA/NNPA, CRAR/CET1, PCR, CASA, "
-            "credit cost and slippage are not available from current free data sources. "
-            "Bank/NBFC scores should be treated as screening-only."
-        )
 
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
@@ -234,6 +238,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
     latest_quarter_net_income = None
     revenue_cagr_pct = None
+    total_debt_yf = None
 
     try:
         q_fin = stock.quarterly_financials
@@ -285,6 +290,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 ta_series = bs.loc['Total Assets'].dropna()
                 if len(ta_series) > 0:
                     total_assets_latest = float(ta_series.iloc[0])
+            for k in ['Total Debt', 'Long Term Debt']:
+                if k in bs.index:
+                    td_series = bs.loc[k].dropna()
+                    if len(td_series) > 0:
+                        total_debt_yf = float(td_series.iloc[0]); break
 
         cf = stock.cashflow
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
@@ -301,9 +311,9 @@ def fetch_stock_data(resolved_ticker, raw_input):
         if bs is not None and not bs.empty:
             col = bs.columns[0]
             bs_df = pd.DataFrame([
-                {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq else "—"},
-                {"Particulars": "Total Debt", "Amount (₹ Cr)": round(bs.loc['Total Debt', col] / 10000000, 2) if 'Total Debt' in bs.index else "—"},
-                {"Particulars": "Total Assets", "Amount (₹ Cr)": round(bs.loc['Total Assets', col] / 10000000, 2) if 'Total Assets' in bs.index else "—"}
+                {"Particulars": "Total Equity", "Amount (₹ Cr)": round(total_eq / 10000000, 2) if total_eq is not None else "—"},
+                {"Particulars": "Total Debt", "Amount (₹ Cr)": round(total_debt_yf / 10000000, 2) if total_debt_yf is not None else "—"},
+                {"Particulars": "Total Assets", "Amount (₹ Cr)": round(total_assets_latest / 10000000, 2) if total_assets_latest is not None else "—"}
             ])
         if cf is not None and not cf.empty:
             col = cf.columns[0]
@@ -318,7 +328,6 @@ def fetch_stock_data(resolved_ticker, raw_input):
     shares_out = info.get("sharesOutstanding")
     mcap = info.get("marketCap")
     
-    # --- FIX: Indian Market Cap / Shares Sanity Check ---
     if mcap and shares_out and current_price:
         calculated_mcap = shares_out * current_price
         if abs(calculated_mcap - mcap) / mcap > 0.15:
@@ -344,24 +353,24 @@ def fetch_stock_data(resolved_ticker, raw_input):
     qualitative_bonus, qualitative_notes = scan_news_sentiment(recent_news, business_summary)
     order_book_hits, growth_pct_from_news = extract_order_book_signal(recent_news, business_summary)
 
-    pe_raw = info.get("trailingPE") if data_source == "yfinance" else info.get("pe_ratio")
+    pe_raw = info.get("trailingPE")
     if not is_valid_metric(pe_raw) and net_inc and mcap:
         pe_raw = round(mcap / net_inc, 2)
     elif is_valid_metric(pe_raw):
         pe_raw = round(float(pe_raw), 2)
 
-    pb_raw = info.get("priceToBook") if data_source == "yfinance" else info.get("pb_ratio")
+    pb_raw = info.get("priceToBook")
     if not is_valid_metric(pb_raw) and total_eq and mcap and total_eq > 0:
         pb_raw = round(mcap / total_eq, 2)
     elif is_valid_metric(pb_raw):
         pb_raw = round(float(pb_raw), 2)
 
-    roe_raw = info.get("returnOnEquity") if data_source == "yfinance" else info.get("roe")
+    roe_raw = info.get("returnOnEquity")
     if not is_valid_metric(roe_raw) and net_inc and total_eq and total_eq > 0:
         roe_raw = net_inc / total_eq
     roe_is_known = is_valid_metric(roe_raw)
 
-    peg_raw = info.get("pegRatio") if data_source == "yfinance" else info.get("peg_ratio")
+    peg_raw = info.get("pegRatio") if data_source == "yfinance" else None
     if not is_valid_metric(peg_raw) and is_valid_metric(pe_raw) and pat_yoy_pct and pat_yoy_pct > 0:
         peg_raw = round(to_float(pe_raw) / pat_yoy_pct, 2)
     elif is_valid_metric(peg_raw):
@@ -371,18 +380,21 @@ def fetch_stock_data(resolved_ticker, raw_input):
     if is_fin:
         ev_ebitda = "N/A (Financial Sector)"
     else:
-        ev_val = info.get("enterpriseValue") if data_source == "yfinance" else info.get("ev_ebitda")
-        if not is_valid_metric(ev_val) and mcap:
-            ev_val = mcap + (info.get('totalDebt') or 0) - (info.get('totalCash') or 0)
-        if is_valid_metric(ebitda_val) and is_valid_metric(ev_val) and ebitda_val != 0:
-            ev_ebitda = round(ev_val / ebitda_val, 2)
-        elif is_valid_metric(ev_ebitda):
-            ev_ebitda = round(float(ev_ebitda), 2)
+        if data_source == "FMP" and is_valid_metric(info.get("ev_ebitda")):
+            ev_ebitda = round(float(info.get("ev_ebitda")), 2)
+        else:
+            ev_val = info.get("enterpriseValue")
+            if not is_valid_metric(ev_val) and mcap:
+                ev_val = mcap + (info.get('totalDebt') or total_debt_yf or 0) - (info.get('totalCash') or 0)
+            if is_valid_metric(ebitda_val) and is_valid_metric(ev_val) and float(ebitda_val) != 0:
+                ev_ebitda = round(float(ev_val) / float(ebitda_val), 2)
+            elif is_valid_metric(info.get("ev_ebitda")):
+                ev_ebitda = round(float(info.get("ev_ebitda")), 2)
 
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (is_valid_metric(ebitda_val) and revenue_latest) else "N/A"
     interest_coverage = round(ebit_latest / interest_exp_latest, 2) if (ebit_latest is not None and interest_exp_latest) else "N/A"
     
-    # Source-Aware D/E Normalization
+    # Bulletproof D/E Calculation
     dte_raw = info.get("debtToEquity")
     if is_valid_metric(dte_raw):
         dte_num = float(dte_raw)
@@ -391,7 +403,12 @@ def fetch_stock_data(resolved_ticker, raw_input):
         else:
             debt_to_equity = round(dte_num, 2)
     else:
-        debt_to_equity = "N/A"
+        t_debt = info.get("totalDebt") if info.get("totalDebt") is not None else total_debt_yf
+        t_eq = info.get("totalEquity") if info.get("totalEquity") is not None else total_eq
+        if is_valid_metric(t_debt) and is_valid_metric(t_eq) and float(t_eq) != 0:
+            debt_to_equity = round(float(t_debt) / float(t_eq), 2)
+        else:
+            debt_to_equity = "N/A"
 
     temp_metrics = {
         'pe_ratio': pe_raw, 'peg_ratio': peg_raw, 'pb_ratio': pb_raw,
@@ -427,11 +444,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
     bvps = bvps if is_valid_metric(bvps) else None
     div_per_share = info.get("dividendRate")
 
-    analyst_growth_pct = None
-    if isinstance(fmp, dict) and fmp.get("analyst_growth_pct") is not None:
-        analyst_growth_pct = fmp.get("analyst_growth_pct")
-    elif "analyst_growth_pct" in info:
-        analyst_growth_pct = info.get("analyst_growth_pct")
+    analyst_growth_pct = info.get("analyst_growth_pct")
 
     jpb_ratio = jpb_value = ddm_val = None
     if is_fin:
@@ -517,13 +530,13 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "health_checks": financial_health_checks(temp_metrics),
         "metric_provenance": {
             "pe_ratio": make_metric(pe_raw if is_valid_metric(pe_raw) else None,
-                                    source="FMP" if fmp.get("pe_ratio") else "yfinance/derived",
+                                    source=data_source,
                                     period="TTM", confidence=0.8 if is_valid_metric(pe_raw) else 0.3),
             "pb_ratio": make_metric(pb_raw if is_valid_metric(pb_raw) else None,
-                                    source="FMP" if fmp.get("priceToBook") else "yfinance/derived",
+                                    source=data_source,
                                     period="TTM", confidence=0.8 if is_valid_metric(pb_raw) else 0.3),
             "roe": make_metric((roe_raw * 100) if roe_is_known else None,
-                               source="FMP/yfinance", period="TTM", confidence=0.75 if roe_is_known else 0.2),
+                               source=data_source, period="TTM", confidence=0.75 if roe_is_known else 0.2),
             "pat_yoy": make_metric(pat_yoy_pct, source="quarterly_financials", period="YoY quarter",
                                    confidence=0.7 if pat_yoy_pct is not None else 0.2),
         },
@@ -544,7 +557,7 @@ def fetch_stock_data(resolved_ticker, raw_input):
         "currency": currency_symbol, "fundamental_score": fundamental_score,
     }
 
-    # --- SECTOR ALTERNATIVE SCANNER — STRICT ISOLATION ---
+    # --- SECTOR ALTERNATIVE SCANNER ---
     metrics['best_alternative'] = None
     if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
@@ -579,7 +592,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
                     continue
 
                 for k, v in list(p_info.items()):
-                    if pd.isna(v): p_info[k] = None
+                    if isinstance(v, (int, float)) and pd.isna(v): p_info[k] = None
+                    elif isinstance(v, str) and v.lower() == "nan": p_info[k] = None
 
                 p_current_price = p_info.get("currentPrice") if p_source == "FMP" else p_info.get("currentPrice") or p_info.get("regularMarketPrice") or p_info.get("previousClose")
                 if p_current_price is None or pd.isna(p_current_price):
@@ -589,24 +603,37 @@ def fetch_stock_data(resolved_ticker, raw_input):
                     else:
                         continue
                         
+                # Unify Peer Keys
+                if p_source == "FMP":
+                    p_info["trailingEps"] = p_info.get("eps")
+                    p_info["trailingPE"] = p_info.get("pe_ratio")
+
                 p_sector   = p_info.get("sector", "N/A")
                 p_industry = p_info.get("industry", "N/A")
                 p_is_fin   = is_financial_sector(p_sector, p_industry)
 
-                p_pe  = p_info.get("pe_ratio") or p_info.get("trailingPE")
+                p_pe  = p_info.get("trailingPE")
                 p_pb  = p_info.get("priceToBook")
                 p_roe = p_info.get("returnOnEquity")
-                p_dte = p_info.get("debtToEquity")
 
                 pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
                 roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
                 roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw
 
-                dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
-                if p_source == "yfinance" and dte_raw > 5.0 and dte_raw != 999:
-                    dte_val = dte_raw / 100.0
+                p_dte = p_info.get("debtToEquity")
+                if is_valid_metric(p_dte):
+                    dte_raw = float(p_dte)
+                    if p_source == "yfinance" and dte_raw > 5.0:
+                        dte_val = dte_raw / 100.0
+                    else:
+                        dte_val = dte_raw
                 else:
-                    dte_val = dte_raw
+                    p_t_debt = p_info.get("totalDebt")
+                    p_t_eq = p_info.get("totalEquity") or p_info.get("totalStockholderEquity")
+                    if is_valid_metric(p_t_debt) and is_valid_metric(p_t_eq) and float(p_t_eq) != 0:
+                        dte_val = float(p_t_debt) / float(p_t_eq)
+                    else:
+                        dte_val = 999
 
                 closes = p_hist['Close'].dropna()
                 is_uptrend = (closes.iloc[-1] > closes.rolling(50).mean().iloc[-1]
