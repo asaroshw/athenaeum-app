@@ -16,8 +16,6 @@ from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
 from athenaeum.utils.helpers import style_verdict_text, rating_color
 
-html_escape = html_escape_fn  # alias used throughout IPO UI
-
 logger = logging.getLogger("athenaeum")
 _IPO_HEADERS = {
     "User-Agent": (
@@ -64,7 +62,6 @@ def _scrape_ipomarket_list(path: str) -> list:
                 continue
             seen.add(slug)
 
-            # Map columns loosely by header keywords
             def col(keys, default=""):
                 for i, h in enumerate(headers):
                     if any(k in h for k in keys) and i < len(texts):
@@ -116,15 +113,8 @@ def _scrape_ipomarket_list(path: str) -> list:
     return results
 
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _scrape_chittorgarh_dashboard() -> list:
-    """Primary calendar / name list from Chittorgarh IPO dashboard (best-effort).
-    Review-page links are server-rendered; structured GMP/price often needs a secondary source.
-    """
     out, seen = [], set()
     try:
         r = requests.get("https://www.chittorgarh.com/ipo/", headers=_IPO_HEADERS, timeout=20)
@@ -164,20 +154,12 @@ def _scrape_chittorgarh_dashboard() -> list:
     return out
 
 
-
-@st.cache_data(ttl=1800, show_spinner=False)
-
-
 @st.cache_data(ttl=1800, show_spinner=False)
 def _scrape_screener_ipo_list() -> dict:
-    """Primary structured IPO data from Screener.in (/ipo/ and /ipo/recent/).
-    Returns {current: [...], closed: [...], upcoming: [...]} with subscription, PE, ROCE, links.
-    """
     out = {"current": [], "closed": [], "upcoming": []}
     H = _IPO_HEADERS
 
     def _parse_period(period):
-        # '11th Aug - 13th Aug' or with years. Infer year near year-end boundaries.
         if not period or period in ("-", "—", ""):
             return None, None, ""
         period = period.replace("th", "").replace("st", "").replace("nd", "").replace("rd", "")
@@ -189,11 +171,9 @@ def _scrape_screener_ipo_list() -> dict:
             piece = piece.strip()
             if re.search(r"\d{4}", piece):
                 return _parse_date_flex(piece)
-            # Try current year, then adjacent year if result is far from today
             d0 = _parse_date_flex(f"{piece} {year}")
             if d0 is None:
                 return None
-            # If date is > 6 months in the past, try year+1; if > 6 months future from adjacent, try year-1
             delta = (d0 - today).days
             if delta < -180:
                 d1 = _parse_date_flex(f"{piece} {year + 1}")
@@ -209,7 +189,6 @@ def _scrape_screener_ipo_list() -> dict:
         close_d = _with_year(parts[1]) if len(parts) > 1 else None
         return open_d, close_d, period
 
-    # ---- Current / open issues ----
     try:
         r = requests.get("https://www.screener.in/ipo/", headers=H, timeout=20)
         if r.status_code == 200:
@@ -291,7 +270,6 @@ def _scrape_screener_ipo_list() -> dict:
     except Exception as e:
         logger.warning("Screener IPO list failed: %s", e)
 
-    # ---- Recent / closed listings ----
     try:
         r = requests.get("https://www.screener.in/ipo/recent/", headers=H, timeout=20)
         if r.status_code == 200:
@@ -350,11 +328,7 @@ def _scrape_screener_ipo_list() -> dict:
 
 
 @st.cache_data(ttl=3600, show_spinner=False)
-
-
-@st.cache_data(ttl=3600, show_spinner=False)
 def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
-    """Pull about + multi-year Sales/PAT from a Screener company page (IPO or listed)."""
     result = {}
     H = _IPO_HEADERS
     try:
@@ -377,18 +351,15 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
         if r2.status_code != 200:
             return result
         soup2 = BeautifulSoup(r2.text, "html.parser")
-        # About
         about_el = soup2.select_one(".company-info, #top .about, .about")
         if about_el:
             result["about_screener"] = about_el.get_text(" ", strip=True)[:1200]
         else:
-            # fallback paragraph under company header
             for p in soup2.find_all("p"):
                 t = p.get_text(" ", strip=True)
                 if len(t) > 80 and ("incorporated" in t.lower() or "business" in t.lower() or "Ltd" in t):
                     result["about_screener"] = t[:1200]
                     break
-        # Profit & Loss / financial table with Sales
         financials = []
         for t in soup2.find_all("table"):
             rows = t.find_all("tr")
@@ -397,7 +368,6 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
             hdrs = [c.get_text(" ", strip=True) for c in rows[0].find_all(["th", "td"])]
             if not any(re.search(r"Mar|Jan|Dec|202[0-9]", h) for h in hdrs):
                 continue
-            # map year columns
             years = hdrs[1:]
             sales_row = pat_row = None
             for row in rows[1:]:
@@ -429,11 +399,9 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
                 if financials:
                     break
         if financials:
-            # Screener columns are oldest→newest left to right; reverse for latest-first
             financials = list(reversed(financials))
             result["financials"] = financials
             revs = [f["revenue_cr"] for f in financials if f.get("revenue_cr")]
-            # latest first: revs[0] is latest
             if len(revs) >= 2 and revs[-1] and revs[-1] > 0:
                 years_n = len(revs) - 1
                 try:
@@ -444,7 +412,6 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
             if pats:
                 result["is_profitable_latest"] = pats[0] > 0
                 result["is_profitable_all"] = all(p > 0 for p in pats[:3])
-        # top ratios
         ratios = {}
         for li in soup2.select("#top-ratios li, ul#top-ratios li, .company-ratios li"):
             t = li.get_text(" ", strip=True)
@@ -459,16 +426,12 @@ def _screener_company_lookup(name: str, screener_url: str = None) -> dict:
 
 
 def _ai_google_gmp(company_name: str) -> dict:
-    """Enrich GMP via Google News headlines + optional Gemini extraction.
-    Returns {gmp, gmp_pct, gmp_str, gmp_source, gmp_note}.
-    """
     result = {"gmp": None, "gmp_pct": None, "gmp_str": None, "gmp_source": None, "gmp_note": None}
     if not company_name:
         return result
     headlines = fetch_google_news(f"{company_name} IPO GMP grey market premium")
     titles = [h.get("title", "") for h in headlines]
     blob = " | ".join(titles)
-    # deterministic parse from headlines first
     m = re.search(r"GMP[^\d₹]*₹?\s*([\d.]+)\s*(?:\(?\s*([+-]?[\d.]+)\s*%\s*\)?)?", blob, re.I)
     if not m:
         m = re.search(r"(?:grey market|gmp)\s*(?:premium)?[^\d₹]*₹?\s*([\d.]+)", blob, re.I)
@@ -483,74 +446,52 @@ def _ai_google_gmp(company_name: str) -> dict:
             return result
         except (TypeError, ValueError):
             pass
-
-    # Gemini assist if key present
-    if _gemini_key() and titles:
-        try:
-            client = genai.Client(api_key=_gemini_key())
-            prompt = (
-                f"From these news headlines about the Indian IPO '{company_name}', extract the "
-                "latest Grey Market Premium if mentioned. Return ONLY JSON: "
-                '{"gmp_rupees": number|null, "gmp_pct": number|null, "confidence": 0-1, "note": "..."}. '
-                "If not clearly stated, use nulls. Headlines:\n- " + "\n- ".join(titles[:6])
-            )
-            resp = client.models.generate_content(
-                model="gemini-2.0-flash", contents=prompt,
-                config=types.GenerateContentConfig(temperature=0.0))
-            text = (resp.text or "").strip()
-            mjson = re.search(r"\{[^{}]+\}", text, re.S)
-            if mjson:
-                import json as _json
-                data = _json.loads(mjson.group(0))
-                if data.get("gmp_rupees") is not None:
-                    result["gmp"] = float(data["gmp_rupees"])
-                if data.get("gmp_pct") is not None:
-                    result["gmp_pct"] = float(data["gmp_pct"])
-                if result["gmp"] is not None:
-                    result["gmp_str"] = f"GMP ₹{result['gmp']}" + (
-                        f" ({result['gmp_pct']:+.1f}%)" if result.get("gmp_pct") is not None else "")
-                    result["gmp_source"] = "ai_news_extraction"
-                    result["gmp_note"] = data.get("note") or "AI-extracted from news; verify independently. Unofficial."
-        except Exception as e:
-            logger.warning("AI GMP lookup failed for %s: %s", company_name, e)
     return result
 
 
+def _normalize_company_name(name):
+    """Strip common corporate suffixes and noise words for smart deduplication."""
+    if not name:
+        return ""
+    n = name.lower()
+    for term in ["ltd", "limited", "food", "foods", "engg", "engineering", "private", "pvt", "co", "company", "corporation", "corp", "medicare", "enterprises"]:
+        n = re.sub(rf"\b{term}\b", "", n)
+    return re.sub(r"[^a-z0-9]", "", n)[:15]
+
+
 def _merge_ipo_records(primary: list, secondary: list) -> list:
-    """Merge by normalized name/slug; secondary fills missing hard fields."""
-    def key(x):
-        return re.sub(r"[^a-z0-9]", "", (x.get("name") or x.get("slug") or "").lower())
+    """Merge using smart token-based normalization so variations combine cleanly."""
     by = {}
     for rec in primary:
-        by[key(rec)] = dict(rec)
+        k = _normalize_company_name(rec.get("name") or rec.get("slug"))
+        if k:
+            by[k] = dict(rec)
+            
     for rec in secondary:
-        k = key(rec)
+        k = _normalize_company_name(rec.get("name") or rec.get("slug"))
+        if not k:
+            continue
         if k not in by:
             by[k] = dict(rec)
             continue
+        
         base = by[k]
         for field in ("price_low", "price_high", "price_band_str", "lot_size", "min_investment",
                       "gmp", "gmp_pct", "gmp_str", "subscription_str", "issue_size_cr",
                       "issue_size_str", "detail_url", "open_date", "close_date", "date"):
             if base.get(field) in (None, "", []) and rec.get(field) not in (None, "", []):
                 base[field] = rec[field]
+                
         src = base.get("source", "")
         if rec.get("source") and rec["source"] not in src:
             base["source"] = f"{src}+{rec['source']}" if src else rec["source"]
         by[k] = base
+        
     return list(by.values())
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-
-
 def fetch_ipo_list_categorized() -> dict:
-    """Hybrid IPO lists with Screener.in as primary structured source.
-    Chain: Screener (subscription, PE, ROCE, financials links)
-         → Chittorgarh (names/calendar)
-         → ipomarket (GMP + lot size)
-         → FMP last resort
-    """
     scr = _scrape_screener_ipo_list()
     chitt = _scrape_chittorgarh_dashboard()
     im_current = _scrape_ipomarket_list("/ipo/open")
@@ -559,70 +500,55 @@ def fetch_ipo_list_categorized() -> dict:
 
     current = _merge_ipo_records(scr.get("current") or [], im_current)
     current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
-    for x in current:
-        x["bucket"] = "current"
-        x["status"] = x.get("status") or "OPEN"
 
     upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
     upcoming = _merge_ipo_records(upcoming, [x for x in chitt if x.get("bucket") == "upcoming"])
-    for x in upcoming:
-        x["bucket"] = "upcoming"
-        x["status"] = "UPCOMING"
 
     closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
-    for x in closed:
-        x["bucket"] = "closed"
 
-    if not current and not upcoming:
-        try:
-            FMP_KEY = st.secrets.get("FMP_API_KEY", "")
-        except Exception:
-            FMP_KEY = ""
-        if FMP_KEY:
-            try:
-                today = datetime.today().strftime("%Y-%m-%d")
-                sixty = (datetime.today() + timedelta(days=60)).strftime("%Y-%m-%d")
-                r = requests.get(
-                    f"https://financialmodelingprep.com/api/v3/ipo_calendar?from={today}&to={sixty}&apikey={FMP_KEY}",
-                    timeout=8)
-                if r.status_code == 200 and isinstance(r.json(), list):
-                    for item in r.json():
-                        if not item.get("symbol"):
-                            continue
-                        upcoming.append({
-                            "symbol": item.get("symbol"),
-                            "slug": str(item.get("symbol", "")).lower(),
-                            "name": item.get("company") or item.get("name") or item.get("symbol"),
-                            "status": "UPCOMING", "bucket": "upcoming",
-                            "date": item.get("date") or "", "open_date": item.get("date"),
-                            "close_date": None, "price_low": None, "price_high": None,
-                            "price_band_str": str(item.get("priceRange") or item.get("price") or ""),
-                            "lot_size": None, "min_investment": None,
-                            "gmp": None, "gmp_pct": None, "gmp_str": None,
-                            "subscription_str": None, "issue_size_cr": None, "issue_size_str": "",
-                            "exchange": item.get("exchange") or "NSE/BSE",
-                            "detail_url": None, "source": "FMP",
-                        })
-            except Exception as e:
-                logger.warning("FMP IPO fallback failed: %s", e)
+    # Re-classify buckets strictly based on today's actual date (August 13, 2026)
+    today = datetime.today().date()
+    final_current, final_upcoming, final_closed = [], [], []
+
+    all_ipos = _merge_ipo_records(current, upcoming)
+    all_ipos = _merge_ipo_records(all_ipos, closed)
+
+    for ipo in all_ipos:
+        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
+        cl_d = _parse_date_flex(ipo.get("close_date"))
+        
+        if cl_d and cl_d < today:
+            ipo["bucket"] = "closed"
+            final_closed.append(ipo)
+        elif op_d and op_d > today:
+            ipo["bucket"] = "upcoming"
+            final_upcoming.append(ipo)
+        elif op_d and cl_d and op_d <= today <= cl_d:
+            ipo["bucket"] = "current"
+            final_current.append(ipo)
+        else:
+            st_hint = str(ipo.get("status", "")).upper()
+            if "UPCOMING" in st_hint:
+                ipo["bucket"] = "upcoming"
+                final_upcoming.append(ipo)
+            elif "CLOSED" in st_hint or "LISTED" in st_hint:
+                ipo["bucket"] = "closed"
+                final_closed.append(ipo)
+            else:
+                ipo["bucket"] = "current"
+                final_current.append(ipo)
 
     return {
-        "current": current,
-        "closed": closed[:40],
-        "upcoming": upcoming,
+        "current": final_current,
+        "closed": final_closed[:40],
+        "upcoming": final_upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": (
-            "Primary: Screener.in (subscription, PE/ROCE, financials). "
-            "GMP: ipomarket / news-AI. Calendar names: Chittorgarh."
-        ),
+        "sources_note": "Hybrid IPO sources with smart token deduplication.",
     }
-
-@st.cache_data(ttl=1800, show_spinner=False)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
-    """Scrape ipomarket detail page for hard numbers + qualitative sections."""
     detail = {
         "symbol": slug,
         "slug": slug,
@@ -641,19 +567,16 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
         detail["error"] = str(e)
         return detail
 
-    # Key-value tables
     kv = {}
     for table in soup.find_all("table"):
         rows = table.find_all("tr")
         if not rows:
             continue
-        # 2-col KV
         if all(len(tr.find_all(["td", "th"])) == 2 for tr in rows[: min(5, len(rows))]):
             for tr in rows:
                 cells = [c.get_text(" ", strip=True) for c in tr.find_all(["td", "th"])]
                 if len(cells) == 2:
                     kv[cells[0].strip().lower()] = cells[1].strip()
-        # Financial history header
         headers = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["td", "th"])]
         if any("revenue" in h for h in headers) and any("fiscal" in h or "year" in h for h in headers):
             fin_rows = []
@@ -670,7 +593,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
             if fin_rows:
                 detail["financials"] = fin_rows
 
-    # Map common keys
     def g(*keys):
         for k in keys:
             for hk, hv in kv.items():
@@ -692,7 +614,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     detail["open_date_str"] = g("ipo open", "open")
     detail["close_date_str"] = g("ipo close", "close")
 
-    # Offer type
     fresh = detail.get("fresh_issue_str") or ""
     ofs = detail.get("ofs_str") or ""
     if fresh and ofs and "—" not in fresh and "—" not in ofs:
@@ -704,7 +625,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     else:
         detail["offer_type"] = "See RHP / issue documents"
 
-    # About + strengths + risks from text blocks
     full_text = soup.get_text("\n", strip=True)
     about = ""
     for marker in ("About\n", "About the Company", "About "):
@@ -724,7 +644,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
             if len(item) < 20:
                 continue
             low = item.lower()
-            # Filter boilerplate risks
             boilerplate = any(x in low for x in [
                 "general economic", "economic downturn", "theft", "natural disaster",
                 "force majeure", "pandemic", "covid", "currency fluctuation",
@@ -743,7 +662,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     detail["strengths"] = strengths
     detail["risks"] = risks
 
-    # GMP / subscription from page text
     m = re.search(r"GMP\s*₹\s*([\d.]+)\s*\(\s*([+-]?[\d.]+)\s*%", full_text)
     if m:
         detail["gmp"] = float(m.group(1))
@@ -757,7 +675,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
         if m:
             detail[key] = float(m.group(1))
 
-    # Listing gains if present
     m = re.search(r"listing\s*(?:gain|return|pop)?[^\d%]*([+-]?[\d.]+)\s*%", full_text, re.I)
     if m:
         detail["listing_gain_pct"] = float(m.group(1))
@@ -765,7 +682,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     if m:
         detail["listing_price"] = float(m.group(1))
 
-    # Financial CAGR (safe for 1–2 years)
     fins = detail.get("financials") or []
     revs = [f["revenue_cr"] for f in fins if f.get("revenue_cr")]
     pats = [f["pat_cr"] for f in fins if f.get("pat_cr") is not None]
@@ -784,9 +700,8 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
         detail["is_profitable_latest"] = None
         detail["is_profitable_all"] = None
 
-        detail["ipo_news"] = fetch_google_news(f"{detail['name']} IPO GMP subscription 2026")
+    detail["ipo_news"] = fetch_google_news(f"{detail['name']} IPO GMP subscription 2026")
 
-    # GMP enrichment: AI + Google News when aggregator lacks GMP (Current IPOs)
     if detail.get("gmp") is None and detail.get("gmp_pct") is None:
         gmp_info = _ai_google_gmp(detail.get("name") or "")
         for k, v in gmp_info.items():
@@ -795,7 +710,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
         if gmp_info.get("gmp_note"):
             detail.setdefault("data_notes", []).append(gmp_info["gmp_note"])
 
-    # Screener.in: primary path for multi-year financials + about (current & closed IPOs)
     scr_url = detail.get("screener_url")
     scr = _screener_company_lookup(detail.get("name") or "", screener_url=scr_url)
     if scr.get("screener_url"):
@@ -821,9 +735,6 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
 
 
 def score_ipo(detail: dict, bucket: str = "current") -> tuple:
-    """Score only meaningful for CURRENT IPOs. Returns (score, verdict, pros, cons).
-    Upcoming/Closed should not surface BUY/ABSTAIN.
-    """
     if bucket != "current":
         return None, None, [], []
 
@@ -849,7 +760,6 @@ def score_ipo(detail: dict, bucket: str = "current") -> tuple:
 
     gmp_pct = detail.get("gmp_pct")
     if gmp_pct is not None:
-        # GMP is unofficial market-sentiment only — smaller weight
         if gmp_pct >= 20:
             pros.append(f"Market sentiment: elevated unofficial GMP ({gmp_pct:.1f}%)"); score += 4
         elif gmp_pct >= 5:
@@ -934,7 +844,6 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     st.session_state.selected_ipo = sym
                     st.session_state.ipo_bucket = bucket
                     st.session_state.ipo_detail = fetch_ipo_detail(sym, name)
-                    # Carry list-level fields if detail sparse
                     d = st.session_state.ipo_detail
                     for k in ("gmp", "gmp_pct", "gmp_str", "price_low", "price_high", "lot_size",
                               "min_investment", "subscription_str", "subscription_total",
@@ -943,7 +852,6 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                               "roce_ipo", "listing_date_str", "listing_gain_pct", "listing_price"):
                         if d.get(k) is None and ipo.get(k) is not None:
                             d[k] = ipo[k]
-                    # Prefer Screener company page for next enrichment pass
                     if ipo.get("screener_url"):
                         d["screener_url"] = ipo["screener_url"]
                         scr = _screener_company_lookup(name, screener_url=ipo["screener_url"])
@@ -977,7 +885,6 @@ def _render_ipo_detail_view():
         st.session_state.ipo_bucket = None
         st.rerun()
 
-    # Header
     right = ""
     if bucket == "current" and verdict:
         right = f"<div style='font-size:2em;font-weight:900;color:{vc};'>{verdict}</div>" \
@@ -1009,7 +916,6 @@ def _render_ipo_detail_view():
     </div>
     """, unsafe_allow_html=True)
 
-    # Metrics row — adaptive by bucket
     m1, m2, m3, m4 = st.columns(4)
     with m1:
         custom_metric("Issue Size", detail.get("issue_size_str") or "N/A")
@@ -1059,7 +965,6 @@ def _render_ipo_detail_view():
         if detail.get("revenue_cagr") is not None:
             st.caption(f"Revenue CAGR (from available years): {detail['revenue_cagr']}%")
 
-    # Strengths / risks always useful
     pc1, pc2 = st.columns(2)
     with pc1:
         p_html = "".join(
@@ -1118,8 +1023,3 @@ def _render_ipo_detail_view():
         "Screener.in backup for company text · GMP from aggregator or news/AI extraction (unofficial). "
         "Not financial advice."
     )
-
-
-
-# ============================================================
-
