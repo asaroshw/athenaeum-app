@@ -399,61 +399,61 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
-    raw_current = []
-    for lst in [scr.get("current"), im_current, [x for x in chitt if x.get("bucket") == "current"]]:
+    master_pool = []
+    for lst in [scr.get("current"), scr.get("upcoming"), scr.get("closed"), chitt, im_current, im_upcoming, im_closed]:
         if lst:
-            raw_current = _merge_ipo_records(raw_current, lst)
+            master_pool = _merge_ipo_records(master_pool, lst)
 
-    raw_upcoming = []
-    for lst in [scr.get("upcoming"), im_upcoming, chitt]:
-        if lst:
-            raw_upcoming = _merge_ipo_records(raw_upcoming, lst)
-
-    raw_closed = []
-    for lst in [scr.get("closed"), im_closed]:
-        if lst:
-            raw_closed = _merge_ipo_records(raw_closed, lst)
-
-    # --- STRICT GATEKEEPER FILTER FOR CURRENT TAB (Untouched logic) ---
     today = datetime.today().date()
-    filtered_current = []
-    for ipo in raw_current:
-        date_str = str(ipo.get("date") or ipo.get("open_date") or "").lower()
-        if "tba" in date_str or not date_str:
-            raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
-            continue
-        
+    final_current, final_upcoming, final_closed = [], [], []
+
+    for ipo in master_pool:
         op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
         cl_d = _parse_date_flex(ipo.get("close_date"))
-        
-        if op_d and cl_d:
-            if op_d <= today <= cl_d:
-                filtered_current.append(ipo)
-            elif op_d > today:
-                raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
-        elif op_d:
-            if op_d == today or abs((op_d - today).days) <= 2:
-                filtered_current.append(ipo)
-            elif op_d > today:
-                raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
-        else:
-            raw_upcoming = _merge_ipo_records(raw_upcoming, [ipo])
+        lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
-    # --- STRICT CLOSED-TAB GUARD ---
-    # Reject any item from closed if its close date is today or in the future (>= August 13, 2026)
-    filtered_closed = []
-    for ipo in raw_closed:
-        cl_d = _parse_date_flex(ipo.get("close_date") or ipo.get("open_date"))
-        if cl_d and cl_d >= today:
-            continue  # Still open or upcoming, do not include in closed
-        filtered_closed.append(ipo)
+        date_str = str(ipo.get("date") or ipo.get("open_date") or "").lower()
+        if "tba" in date_str and not (op_d or cl_d):
+            ipo["bucket"] = "upcoming"
+            final_upcoming.append(ipo)
+            continue
+
+        # STAGE 1: Upcoming -> Opening date is strictly in the future relative to today
+        if op_d and today < op_d:
+            ipo["bucket"] = "upcoming"
+            final_upcoming.append(ipo)
+
+        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
+        elif op_d and cl_d and op_d <= today <= cl_d:
+            ipo["bucket"] = "current"
+            final_current.append(ipo)
+        elif op_d and not cl_d and op_d == today:
+            ipo["bucket"] = "current"
+            final_current.append(ipo)
+
+        # STAGE 3 & 4: Closed -> Closing date has passed
+        else:
+            ipo["bucket"] = "closed"
+            
+            # Check if it has passed closing, but hasn't reached listing date yet
+            if lst_d and today < lst_d:
+                ipo["listing_status_override"] = "NOT YET LISTED"
+            elif cl_d and today < cl_d:
+                # Safety fallback if it's actually current
+                ipo["bucket"] = "current"
+                final_current.append(ipo)
+                continue
+            else:
+                ipo["listing_status_override"] = None
+                
+            final_closed.append(ipo)
 
     return {
-        "current": _deduplicate_list(filtered_current),
-        "closed": _deduplicate_list(filtered_closed)[:40],
-        "upcoming": _deduplicate_list(raw_upcoming),
+        "current": _deduplicate_list(final_current),
+        "closed": _deduplicate_list(final_closed)[:40],
+        "upcoming": _deduplicate_list(final_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strictly filtered hybrid IPO sources.",
+        "sources_note": "Strict 4-stage lifecycle sorted IPO pools.",
     }
 
 
@@ -586,9 +586,19 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
             if bucket == "current" and ipo.get("gmp_str"):
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>GMP</span><br><b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>", unsafe_allow_html=True)
             elif bucket == "closed":
+                override = ipo.get("listing_status_override")
                 gain = ipo.get("listing_gain_pct")
-                gain_str = f"{gain:+.1f}%" if gain is not None else "Listed (Gain N/A)"
-                gain_color = GREEN if (gain or 0) >= 0 else (RED if gain is not None else MUTED)
+                
+                if override == "NOT YET LISTED":
+                    gain_str = "NOT YET LISTED"
+                    gain_color = MUTED
+                elif gain is not None:
+                    gain_str = f"{gain:+.1f}%"
+                    gain_color = GREEN if gain >= 0 else RED  # Negative gains properly colored red!
+                else:
+                    gain_str = "Listed (Gain N/A)"
+                    gain_color = MUTED
+                    
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br><b style='color:{gain_color};'>{html_escape(gain_str)}</b>", unsafe_allow_html=True)
             else:
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br><b>Active</b>", unsafe_allow_html=True)
@@ -627,7 +637,8 @@ def _render_ipo_detail_view():
     elif bucket == "closed":
         gain = detail.get("listing_gain_pct")
         if gain is not None:
-            right = f"<div style='font-size:1.4em;font-weight:800;color:{GREEN if gain>=0 else RED};'>Listing {gain:+.1f}%</div>"
+            gain_color = GREEN if gain >= 0 else RED
+            right = f"<div style='font-size:1.4em;font-weight:800;color:{gain_color};'>Listing {gain:+.1f}%</div>"
         else:
             right = f"<div style='color:{MUTED};'>Listing: {html_escape(str(detail.get('listing_date_str') or 'Pending'))}</div>"
     else:
