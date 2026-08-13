@@ -333,7 +333,8 @@ def fetch_stock_data(resolved_ticker, raw_input):
     
     if mcap and shares_out and current_price:
         calculated_mcap = shares_out * current_price
-        if abs(calculated_mcap - mcap) / mcap > 0.15:
+        # Only override if the discrepancy is >15% (data source inconsistency)
+        if mcap > 0 and abs(calculated_mcap - mcap) / mcap > 0.15:
             mcap = calculated_mcap
     elif current_price and shares_out:
         mcap = current_price * shares_out
@@ -401,7 +402,11 @@ def fetch_stock_data(resolved_ticker, raw_input):
     dte_raw = info.get("debtToEquity")
     if is_valid_metric(dte_raw):
         dte_num = float(dte_raw)
-        if data_source == "yfinance" and dte_num > 5.0:
+        # yfinance sometimes returns D/E as a percentage (e.g. 150 means 1.5x).
+        # Use a high threshold (20) so genuinely leveraged companies (D/E=6-12)
+        # are not incorrectly divided by 100. Financial companies rarely appear here
+        # because their D/E comes from key-metrics-ttm which already gives a ratio.
+        if data_source == "yfinance" and dte_num > 20.0:
             debt_to_equity = round(dte_num / 100.0, 2)
         else:
             debt_to_equity = round(dte_num, 2)
@@ -476,15 +481,21 @@ def fetch_stock_data(resolved_ticker, raw_input):
         sector_profile=sector_profile, order_book_hits=order_book_hits, growth_pct_from_news=growth_pct_from_news,
     )
 
-    promoters = (info.get("heldPercentInsiders") or 0) * 100
-    institutions = (info.get("heldPercentInstitutions") or 0) * 100
-    if promoters == 0 and institutions == 0:
+    promoters_raw = info.get("heldPercentInsiders") or 0
+    institutions_raw = info.get("heldPercentInstitutions") or 0
+    # yfinance returns these as fractions (0.0–1.0); clamp to valid range before scaling
+    promoters = round(min(max(float(promoters_raw), 0.0), 1.0) * 100, 2)
+    institutions = round(min(max(float(institutions_raw), 0.0), 1.0) * 100, 2)
+    total_known = promoters + institutions
+    if total_known == 0:
         shareholding_dict = {"Data Unavailable": 100}
     else:
+        # Cap total to 100% in case of data overlap; public is the remainder
+        public = max(0.0, round(100.0 - min(total_known, 100.0), 2))
         shareholding_dict = {
-            "Promoters": promoters,
-            "Institutions": institutions,
-            "Public": max(0, 100 - (promoters + institutions))
+            "Promoters": min(promoters, 100.0),
+            "Institutions": min(institutions, 100.0 - min(promoters, 100.0)),
+            "Public": public,
         }
 
     try:
@@ -620,16 +631,16 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 p_roe = p_info.get("returnOnEquity")
 
                 pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
-                roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
-                roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw
+                p_roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
+                roe_val = p_roe_raw * 100 if p_roe_raw < 5 else p_roe_raw
 
                 p_dte = p_info.get("debtToEquity")
                 if is_valid_metric(p_dte):
-                    dte_raw = float(p_dte)
-                    if p_source == "yfinance" and dte_raw > 5.0:
-                        dte_val = dte_raw / 100.0
+                    p_dte_num = float(p_dte)
+                    if p_source == "yfinance" and p_dte_num > 20.0:
+                        dte_val = p_dte_num / 100.0
                     else:
-                        dte_val = dte_raw
+                        dte_val = p_dte_num
                 else:
                     p_t_debt = p_info.get("totalDebt")
                     p_t_eq = p_info.get("totalEquity") or p_info.get("totalStockholderEquity")
