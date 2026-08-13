@@ -76,17 +76,10 @@ def fetch_google_news(query_term):
     return []
 
 @st.cache_data(ttl=3600)
-
-
-@st.cache_data(ttl=3600)
-
 def fetch_fmp_data(ticker_clean: str) -> dict:
     """Primary data fetch from Financial Modeling Prep. Returns a flat dict;
     absent keys mean FMP did not have that field — yfinance fills the gap."""
-    try:
-        FMP_KEY = st.secrets.get("FMP_API_KEY", "")
-    except Exception:
-        FMP_KEY = ""
+    FMP_KEY = st.secrets.get("FMP_API_KEY", "")
     if not FMP_KEY:
         return {}
     BASE = "https://financialmodelingprep.com/api/v3"
@@ -166,9 +159,6 @@ def _fmp_ticker(resolved_ticker: str) -> str:
     return resolved_ticker.replace(".NS","").replace(".BO","").upper()
 
 @st.cache_data(ttl=1800)
-
-
-@st.cache_data(ttl=1800)
 def fetch_stock_data(resolved_ticker, raw_input):
     # FMP primary, yfinance fallback — collect data-quality warnings for the UI
     warnings = []
@@ -201,8 +191,12 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     # Merge: FMP wins, yfinance fills gaps. Periods may mix TTM vs annual — flagged below.
     info = {**yf_info, **{k: v for k, v in fmp.items() if v is not None and k != "fmp_history"}}
-    current_price = info.get("currentPrice") or round(float(hist_full['Close'].iloc[-1]), 2)
+    
+    # Fix 1: Runtime Syntax Error Fix
+    fallback_price = round(float(hist_full['Close'].iloc[-1]), 2) if not hist_full.empty else None
+    current_price = info.get("currentPrice") or fallback_price
     currency_symbol = "₹"
+    
     if fmp and yf_info:
         warnings.append(
             "Metrics may mix FMP TTM fields with yfinance annual/quarterly statements — "
@@ -377,19 +371,17 @@ def fetch_stock_data(resolved_ticker, raw_input):
 
     ebitda_margin = round((ebitda_val / revenue_latest) * 100, 2) if (is_valid_metric(ebitda_val) and revenue_latest) else "N/A"
     interest_coverage = round(ebit_latest / interest_exp_latest, 2) if (ebit_latest is not None and interest_exp_latest) else "N/A"
-    dte_raw = info.get("debtToEquity")
-    # yfinance often stores D/E as percent (e.g. 80 for 0.80); FMP may already be ratio
-    if is_valid_metric(dte_raw):
-        dte_num = float(dte_raw)
-        # yfinance debtToEquity is typically percent (e.g. 85.3). True ratio >10 is rare
-        # but possible for distressed firms — prefer source-aware rule when schema known.
-        # Heuristic: values in (5, 30] could be either; treat >15 as percent (common yf range).
-        if dte_num > 15:
-            debt_to_equity = round(dte_num / 100.0, 2)
-        else:
-            debt_to_equity = round(dte_num, 2)
+    
+    # Fix 2: Source-Aware D/E Normalization
+    if fmp.get("debtToEquity") is not None:
+        debt_to_equity = round(float(fmp["debtToEquity"]), 2)
     else:
-        debt_to_equity = "N/A"
+        dte_raw = info.get("debtToEquity")
+        if is_valid_metric(dte_raw):
+            dte_num = float(dte_raw)
+            debt_to_equity = round(dte_num / 100.0, 2) if dte_num > 5.0 else round(dte_num, 2)
+        else:
+            debt_to_equity = "N/A"
 
     temp_metrics = {
         'pe_ratio': pe_raw, 'peg_ratio': peg_raw, 'pb_ratio': pb_raw,
@@ -601,14 +593,18 @@ def fetch_stock_data(resolved_ticker, raw_input):
                 p_pe  = p_info.get("pe_ratio") or p_info.get("trailingPE")
                 p_pb  = p_info.get("priceToBook")
                 p_roe = p_info.get("returnOnEquity")
-                p_dte = p_info.get("debtToEquity")
 
                 pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
-                # FMP returns ROE as a ratio (0.18) when from key-metrics-ttm
                 roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
                 roe_val = roe_raw * 100 if roe_raw < 5 else roe_raw   # normalise fraction→%
-                dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
-                dte_val = (dte_raw / 100.0) if dte_raw > 15 else dte_raw  # yf percent vs ratio
+
+                # Fix 2: Source-Aware D/E Normalization (Peer Loop)
+                if p_fmp.get("debtToEquity") is not None:
+                    dte_val = float(p_fmp["debtToEquity"])
+                else:
+                    p_dte = p_info.get("debtToEquity")
+                    dte_raw = float(p_dte) if p_dte and pd.notna(p_dte) else 999
+                    dte_val = (dte_raw / 100.0) if dte_raw > 5.0 else dte_raw
 
                 closes = p_hist['Close'].dropna()
                 is_uptrend = (closes.iloc[-1] > closes.rolling(50).mean().iloc[-1]
@@ -643,8 +639,3 @@ def fetch_stock_data(resolved_ticker, raw_input):
         metrics['best_alternative'] = best_peer
 
     return metrics
-
-# ============================================================
-# 8. UI PLOTLY CHARTS & NEW ANGEL ONE COMPONENTS
-# ============================================================
-
