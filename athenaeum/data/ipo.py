@@ -412,48 +412,50 @@ def fetch_ipo_list_categorized() -> dict:
         cl_d = _parse_date_flex(ipo.get("close_date"))
         lst_d = _parse_date_flex(ipo.get("listing_date_str") or ipo.get("date"))
 
-        date_str = str(ipo.get("date") or ipo.get("open_date") or "").lower()
-        if "tba" in date_str and not (op_d or cl_d):
+        date_str = str(ipo.get("date") or ipo.get("open_date") or ipo.get("listing_date_str") or "").lower()
+        
+        # Check for future estimate text strings like "Aug-Oct 2026", "Before Dec 2026", "targeted", "est", etc.
+        future_keywords = ["aug", "sep", "oct", "nov", "dec", "before", "targeted", "est", "target", "tba", "upcoming", "jul"]
+        is_future_text = any(k in date_str for k in future_keywords) and ("2026" in date_str or "2027" in date_str)
+
+        if is_future_text or (op_d and today < op_d):
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
             continue
 
-        # STAGE 1: Upcoming -> Opening date is strictly in the future relative to today
-        if op_d and today < op_d:
+        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
+        if op_d and cl_d and op_d <= today <= cl_d:
+            ipo["bucket"] = "current"
+            final_current.append(ipo)
+            continue
+        if op_d and not cl_d and op_d == today:
+            ipo["bucket"] = "current"
+            final_current.append(ipo)
+            continue
+
+        # STAGE 3 & 4: Closed -> Must have verified past closing/listing or come from screener recent
+        if (cl_d and cl_d < today) or (lst_d and lst_d < today) or ipo.get("source") == "screener_recent":
+            if is_future_text:
+                ipo["bucket"] = "upcoming"
+                final_upcoming.append(ipo)
+            else:
+                ipo["bucket"] = "closed"
+                if lst_d and today < lst_d:
+                    ipo["listing_status_override"] = "NOT YET LISTED"
+                else:
+                    ipo["listing_status_override"] = None
+                final_closed.append(ipo)
+        else:
+            # Default unverified future estimates to upcoming, NOT closed!
             ipo["bucket"] = "upcoming"
             final_upcoming.append(ipo)
-
-        # STAGE 2: Current -> Today falls strictly between opening and closing dates (inclusive)
-        elif op_d and cl_d and op_d <= today <= cl_d:
-            ipo["bucket"] = "current"
-            final_current.append(ipo)
-        elif op_d and not cl_d and op_d == today:
-            ipo["bucket"] = "current"
-            final_current.append(ipo)
-
-        # STAGE 3 & 4: Closed -> Closing date has passed
-        else:
-            ipo["bucket"] = "closed"
-            
-            # Check if it has passed closing, but hasn't reached listing date yet
-            if lst_d and today < lst_d:
-                ipo["listing_status_override"] = "NOT YET LISTED"
-            elif cl_d and today < cl_d:
-                # Safety fallback if it's actually current
-                ipo["bucket"] = "current"
-                final_current.append(ipo)
-                continue
-            else:
-                ipo["listing_status_override"] = None
-                
-            final_closed.append(ipo)
 
     return {
         "current": _deduplicate_list(final_current),
         "closed": _deduplicate_list(final_closed)[:40],
         "upcoming": _deduplicate_list(final_upcoming),
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strict 4-stage lifecycle sorted IPO pools.",
+        "sources_note": "Strict lifecycle sorted IPO pools with future-text guard.",
     }
 
 
@@ -594,7 +596,7 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                     gain_color = MUTED
                 elif gain is not None:
                     gain_str = f"{gain:+.1f}%"
-                    gain_color = GREEN if gain >= 0 else RED  # Negative gains properly colored red!
+                    gain_color = GREEN if gain >= 0 else RED
                 else:
                     gain_str = "Listed (Gain N/A)"
                     gain_color = MUTED
