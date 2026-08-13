@@ -161,8 +161,7 @@ def _scrape_screener_ipo_list() -> dict:
             piece = piece.strip()
             if re.search(r"\d{4}", piece):
                 return _parse_date_flex(piece)
-            d0 = _parse_date_flex(f"{piece} {year}")
-            return d0
+            return _parse_date_flex(f"{piece} {year}")
 
         open_d = _with_year(parts[0]) if parts else None
         close_d = _with_year(parts[1]) if len(parts) > 1 else None
@@ -205,10 +204,8 @@ def _scrape_screener_ipo_list() -> dict:
                         "listing_date_str": listing_s,
                         "exchange": "NSE/BSE",
                         "detail_url": "https://www.screener.in" + a["href"],
-                        "screener_url": "https://www.screener.in" + a["href"],
                         "source": "screener",
                     }
-                    # We let master date sorting handle the bucket allocation
                     out["current"].append(rec)
     except Exception:
         pass
@@ -366,7 +363,7 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
         base = by[k]
         for field in ("price_low", "price_high", "price_band_str", "lot_size", "min_investment",
                       "gmp", "gmp_pct", "gmp_str", "subscription_str", "issue_size_cr",
-                      "issue_size_str", "detail_url", "open_date", "close_date", "date", "listing_gain_pct", "listing_price"):
+                      "issue_size_str", "detail_url", "open_date", "close_date", "date", "listing_gain_pct", "listing_price", "listing_date_str"):
             if base.get(field) in (None, "", []) and rec.get(field) not in (None, "", []):
                 base[field] = rec[field]
         by[k] = base
@@ -382,54 +379,21 @@ def fetch_ipo_list_categorized() -> dict:
     im_upcoming = _scrape_ipomarket_list("/ipo/upcoming")
     im_closed = _scrape_ipomarket_list("/ipo/listed")
 
-    master_pool = []
-    for lst in [scr.get("current"), scr.get("upcoming"), scr.get("closed"), chitt, im_current, im_upcoming, im_closed]:
-        if lst:
-            master_pool = _merge_ipo_records(master_pool, lst)
+    # Strictly separate sources to prevent cross-tab bleeding
+    current = _merge_ipo_records(scr.get("current") or [], im_current)
+    current = _merge_ipo_records(current, [x for x in chitt if x.get("bucket") == "current"])
 
-    # --- ABSOLUTE STRICT MASTER DATE SORTING (Today: August 13, 2026) ---
-    today = datetime.today().date()
-    final_current, final_upcoming, final_closed = [], [], []
-
-    for ipo in master_pool:
-        op_d = _parse_date_flex(ipo.get("open_date") or ipo.get("date"))
-        cl_d = _parse_date_flex(ipo.get("close_date"))
-        
-        # 1. Closed: Close date is strictly in the past (< August 13, 2026)
-        if cl_d and cl_d < today:
-            ipo["bucket"] = "closed"
-            final_closed.append(ipo)
-        # 2. Upcoming: Open date is strictly in the future (> August 13, 2026)
-        elif op_d and op_d > today:
-            ipo["bucket"] = "upcoming"
-            final_upcoming.append(ipo)
-        # 3. Current: Today falls actively within open and close range (inclusive)
-        elif op_d and cl_d and op_d <= today <= cl_d:
-            ipo["bucket"] = "current"
-            final_current.append(ipo)
-        elif op_d and op_d == today:
-            ipo["bucket"] = "current"
-            final_current.append(ipo)
-        else:
-            # Fallback text heuristics if dates are missing or partial
-            status_str = str(ipo.get("status", "")).lower()
-            if "listed" in status_str or "closed" in status_str:
-                ipo["bucket"] = "closed"
-                final_closed.append(ipo)
-            elif "upcoming" in status_str or "tba" in str(ipo.get("date","")).lower():
-                ipo["bucket"] = "upcoming"
-                final_upcoming.append(ipo)
-            else:
-                # If we cannot verify, default to upcoming rather than dumping into current
-                ipo["bucket"] = "upcoming"
-                final_upcoming.append(ipo)
+    upcoming = _merge_ipo_records(scr.get("upcoming") or [], im_upcoming)
+    
+    # Explicitly source closed items from screener recent + ipomarket listed
+    closed = _merge_ipo_records(scr.get("closed") or [], im_closed[:40])
 
     return {
-        "current": _merge_ipo_records(final_current, []),
-        "closed": _merge_ipo_records(final_closed, [])[:40],
-        "upcoming": _merge_ipo_records(final_upcoming, []),
+        "current": current,
+        "closed": closed[:40],
+        "upcoming": upcoming,
         "fetched_at": datetime.now().isoformat(timespec="seconds"),
-        "sources_note": "Strict calendar-date sorted IPO pools.",
+        "sources_note": "Clean isolated source buckets.",
     }
 
 
@@ -533,13 +497,28 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
         name = ipo.get("name", "Unknown")
         band = ipo.get("price_band_str") or (f"{currency}{ipo['price_low']} – {currency}{ipo['price_high']}" if ipo.get("price_low") is not None else "Price TBA")
         
+        # Rule 3: Upcoming tab gets a streamlined view with NO "Analyse" button
+        if bucket == "upcoming":
+            cols = st.columns([4, 2])
+            with cols[0]:
+                st.markdown(f"<b>{html_escape(name)}</b><br><span style='color:{MUTED};font-size:0.8em;'>{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','NSE/BSE')))}</span>", unsafe_allow_html=True)
+            with cols[1]:
+                date_val = ipo.get('date') or ipo.get('open_date') or 'TBA'
+                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Opening Date</span><br><b>{html_escape(str(date_val))}</b>", unsafe_allow_html=True)
+            st.markdown(f"<hr style='border:0;border-top:1px solid {BORDER};margin:6px 0;'>", unsafe_allow_html=True)
+            continue
+
+        # Current and Closed views with Analyse buttons
         cols = st.columns([3.2, 1.4, 1.6, 1.2, 1.2])
         with cols[0]:
             st.markdown(f"<b>{html_escape(name)}</b><br><span style='color:{MUTED};font-size:0.8em;'>{html_escape(str(sym))} · {html_escape(str(ipo.get('exchange','')))}</span>", unsafe_allow_html=True)
         with cols[1]:
-            # For closed tab, show listing date instead of open date
-            date_label = "Listing" if bucket == "closed" else "Open"
-            date_val = ipo.get('listing_date_str') if bucket == "closed" else (ipo.get('date') or ipo.get('open_date') or 'TBA')
+            if bucket == "closed":
+                date_label = "Listing Date"
+                date_val = ipo.get('listing_date_str') or ipo.get('date') or 'Closed'
+            else:
+                date_label = "Open"
+                date_val = ipo.get('date') or ipo.get('open_date') or 'TBA'
             st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>{date_label}</span><br><b>{html_escape(str(date_val))}</b>", unsafe_allow_html=True)
         with cols[2]:
             st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Price Band</span><br><b>{html_escape(str(band))}</b>", unsafe_allow_html=True)
@@ -548,11 +527,11 @@ def _render_ipo_list_rows(ipos, bucket, currency="₹"):
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>GMP</span><br><b style='color:{GREEN};'>{html_escape(str(ipo.get('gmp_str')))}</b>", unsafe_allow_html=True)
             elif bucket == "closed":
                 gain = ipo.get("listing_gain_pct")
-                gain_str = f"{gain:+.1f}%" if gain is not None else "Listed"
+                gain_str = f"{gain:+.1f}%" if gain is not None else "N/A"
                 gain_color = GREEN if (gain or 0) >= 0 else RED
                 st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Listing Gain</span><br><b style='color:{gain_color};'>{html_escape(gain_str)}</b>", unsafe_allow_html=True)
             else:
-                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br><b>Upcoming</b>", unsafe_allow_html=True)
+                st.markdown(f"<span style='font-size:0.75em;color:{MUTED};'>Status</span><br><b>Active</b>", unsafe_allow_html=True)
         with cols[4]:
             if st.button("Analyse →", key=f"ipo_{bucket}_{sym}_{idx}", use_container_width=True):
                 with st.spinner(f"Loading {name}..."):
