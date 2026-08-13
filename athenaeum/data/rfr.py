@@ -45,19 +45,5 @@ def get_dynamic_risk_free_rate():
     # Static default approximating recent Indian 10Y G-Sec neighbourhood (not repo rate)
     return 0.065, "fallback_static_6.5pct"
 
-# ============================================================
-# 3. SECTOR DETECTION & NORMALIZATION PROFILES
-# ============================================================
-FINANCIAL_SECTOR_KEYWORDS = [
-    "financial services", "bank", "nbfc", "insurance", "capital markets",
-    "credit services", "diversified financials", "asset management",
-    "mortgage finance", "consumer finance", "shadow banking",
-]
-CAPEX_INTENSIVE_KEYWORDS = [
-    "industrial", "engineering", "infrastructure", "construction", "capital goods",
-    "electrical equipment", "machinery", "railroad", "defense", "aerospace",
-    "building products", "specialty industrial"
-]
-MATERIALS_KEYWORDS = ["steel", "metals", "mining", "materials", "chemicals", "cement", "iron", "pipes", "tubes"]
-CYCLICAL_KEYWORDS = ["auto", "automobile", "tire", "tyre"]
+# Keyword constants are defined in athenaeum.config — do not duplicate here.
 
