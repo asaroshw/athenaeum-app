@@ -12,7 +12,6 @@ from athenaeum.data.rfr import get_dynamic_risk_free_rate
 from athenaeum.utils.helpers import _rfr_value, _rfr_source
 
 logger = logging.getLogger("athenaeum")
-VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 try:
     from statsmodels.tsa.arima.model import ARIMA
     HAS_ARIMA = True
@@ -277,16 +276,11 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
     W_F, W_I, W_T = 0.42, 0.38, 0.20
     q_bonus = max(min(qualitative_bonus or 0, 5), -5)
     if fundamental_score is None:
-        # Insufficient fundamental pillars — do not invent a zero and push DON'T BUY
+        # Insufficient fundamental pillars — cap at OBSERVE regardless of intrinsic/technical scores.
         notes.append("Insufficient fundamental data: investment verdict capped at OBSERVE.")
         composite = round(min(max(
             W_I * intrinsic_score + W_T * tech_score + q_bonus, 0) * 0.85, 100), 1)
-        if composite >= 60:
-            verdict = "OBSERVE"
-        elif composite >= 40:
-            verdict = "OBSERVE"
-        else:
-            verdict = "OBSERVE"
+        verdict = "OBSERVE"  # always OBSERVE when fundamentals are missing
     else:
         composite = round(min(max(
             W_F * fundamental_score + W_I * intrinsic_score + W_T * tech_score + q_bonus, 0), 100), 1)
