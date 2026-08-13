@@ -64,7 +64,7 @@ def render_52week_range(current_price, low_52, high_52, currency="₹"):
     high_52 = to_float(high_52)
     
     if current_price is None or low_52 is None or high_52 is None or high_52 <= low_52: return
-    pct_position = ((current_price - low_52) / (high_52 - low_52)) * 100
+    pct_position = max(0.0, min(100.0, ((current_price - low_52) / (high_52 - low_52)) * 100))
     fig = go.Figure()
     fig.add_trace(go.Bar(x=[100], y=["Range"], orientation="h", marker=dict(color="#1F1F1F"), hoverinfo="none"))
     fig.add_trace(go.Scatter(x=[pct_position], y=["Range"], mode="markers", marker=dict(color="#38BDF8", size=16, symbol="diamond"), name="Current Price"))
@@ -199,10 +199,12 @@ def render_analyst_consensus(target, current, rec, currency="₹"):
 # --- ANGEL ONE COMPONENT: HIGHLIGHTS CARD ---
 def extract_highlights(metrics, cf_df):
     working, not_working = [], []
-    if cf_df is not None and not cf_df.empty and "Operating Cash Flow" in cf_df.index:
-        ocf_series = cf_df.loc["Operating Cash Flow"].dropna()
-        if len(ocf_series) > 0 and ocf_series.iloc[0] == ocf_series.max() and ocf_series.iloc[0] > 0:
-            working.append(f"Operating Cash Flow (Yearly) — Highest at ₹{round(ocf_series.iloc[0] / 10000000, 2):,.2f} Cr")
+    if cf_df is not None and not cf_df.empty and 'Particulars' in cf_df.columns:
+        ocf_rows = cf_df[cf_df['Particulars'] == 'Operating Cash Flow']
+        if not ocf_rows.empty:
+            ocf_val = ocf_rows['Amount (₹ Cr)'].iloc[0]
+            if isinstance(ocf_val, (int, float)) and ocf_val > 0:
+                working.append(f"Operating Cash Flow — Positive at ₹{round(ocf_val, 2):,.2f} Cr")
     
     ic = metrics.get('interest_coverage')
     if is_valid_metric(ic):
