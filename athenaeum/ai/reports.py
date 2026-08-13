@@ -116,7 +116,7 @@ def ipo_ai_narrative(detail: dict, score, verdict, pros, cons, bucket: str = "cu
             f"About: {(detail.get('about') or '')[:400]}. News: {news_txt or 'None'}."
         )
         resp = client.models.generate_content(
-            model="gemini-2.0-flash", contents=prompt,
+            model="gemini-3.5-flash-lite", contents=prompt,
             config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2))
         return resp.text
     except Exception as e:
