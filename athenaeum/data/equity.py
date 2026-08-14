@@ -157,7 +157,7 @@ def _fmp_ticker(resolved_ticker: str) -> str:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
-def fetch_stock_data(resolved_ticker, raw_input):
+def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
     warnings = []
     fmp = fetch_fmp_data(_fmp_ticker(resolved_ticker))
     stock = yf.Ticker(resolved_ticker)
@@ -572,111 +572,48 @@ def fetch_stock_data(resolved_ticker, raw_input):
     }
 
     # --- SECTOR ALTERNATIVE SCANNER ---
+    # Finds a peer that, when independently analysed through this SAME pipeline,
+    # actually comes back STRONG BUY — not just one that looks decent on a few
+    # raw ratios. scan_for_alternative=False (used for the recursive peer calls
+    # below) prevents each peer from launching its own nested scan.
     metrics['best_alternative'] = None
-    if predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
+    if scan_for_alternative and predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
         peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
-        best_peer = None
-
         for peer in peers:
             if peer == resolved_ticker:
                 continue
             try:
-                p_fmp = fetch_fmp_data(_fmp_ticker(peer))
-                p_yf_info = {}
-                p_hist = pd.DataFrame()
-                
-                if p_fmp and p_fmp.get("currentPrice") is not None:
-                    p_info = p_fmp.copy()
-                    p_source = "FMP"
-                    if p_fmp.get("fmp_history") is not None and not p_fmp["fmp_history"].empty:
-                        p_hist = p_fmp["fmp_history"]
-                    else:
-                        try: p_hist = yf.Ticker(peer).history(period="1y")
-                        except Exception: pass
-                else:
-                    try:
-                        p_stock = yf.Ticker(peer)
-                        p_info = p_stock.info or {}
-                        p_hist = p_stock.history(period="1y")
-                    except Exception:
-                        p_info = {}
-                    p_source = "yfinance"
-
-                if p_hist is None or (hasattr(p_hist, 'empty') and p_hist.empty):
-                    continue
-
-                for k, v in list(p_info.items()):
-                    if isinstance(v, (int, float)) and pd.isna(v): p_info[k] = None
-                    elif isinstance(v, str) and v.lower() == "nan": p_info[k] = None
-
-                p_current_price = p_info.get("currentPrice") if p_source == "FMP" else p_info.get("currentPrice") or p_info.get("regularMarketPrice") or p_info.get("previousClose")
-                if p_current_price is None or pd.isna(p_current_price):
-                    valid_closes = p_hist['Close'].dropna()
-                    if not valid_closes.empty:
-                        p_current_price = float(valid_closes.iloc[-1])
-                    else:
-                        continue
-                        
-                # Unify Peer Keys
-                if p_source == "FMP":
-                    p_info["trailingEps"] = p_info.get("eps")
-                    p_info["trailingPE"] = p_info.get("pe_ratio")
-
-                p_sector   = p_info.get("sector", "N/A")
-                p_industry = p_info.get("industry", "N/A")
-                p_is_fin   = is_financial_sector(p_sector, p_industry)
-
-                p_pe  = p_info.get("trailingPE")
-                p_pb  = p_info.get("priceToBook")
-                p_roe = p_info.get("returnOnEquity")
-
-                pe_val  = float(p_pe) if p_pe and float(p_pe) > 0 else 999
-                p_roe_raw = float(p_roe) if p_roe and pd.notna(p_roe) else 0
-                roe_val = p_roe_raw * 100 if p_roe_raw < 5 else p_roe_raw
-
-                p_dte = p_info.get("debtToEquity")
-                if is_valid_metric(p_dte):
-                    p_dte_num = float(p_dte)
-                    if p_source == "yfinance" and p_dte_num > 20.0:
-                        dte_val = p_dte_num / 100.0
-                    else:
-                        dte_val = p_dte_num
-                else:
-                    p_t_debt = p_info.get("totalDebt")
-                    p_t_eq = p_info.get("totalEquity") or p_info.get("totalStockholderEquity")
-                    if is_valid_metric(p_t_debt) and is_valid_metric(p_t_eq) and float(p_t_eq) != 0:
-                        dte_val = float(p_t_debt) / float(p_t_eq)
-                    else:
-                        dte_val = 999
-
-                closes = p_hist['Close'].dropna()
-                is_uptrend = (closes.iloc[-1] > closes.rolling(50).mean().iloc[-1]
-                               if len(closes) > 50 else True)
-
-                qualifies = (0 < pe_val < 30 and
-                              roe_val > 15 and
-                              dte_val < (2.0 if p_is_fin else 0.8) and
-                              is_uptrend)
-
-                if qualifies:
-                    earnings_yield = (100.0 / pe_val) if pe_val > 0 else 0
-                    score = (0.55 * min(roe_val, 40) / 40.0 * 100) + (0.45 * min(earnings_yield, 12) / 12.0 * 100)
-                    candidate = {
-                        "name": p_info.get("longName") or p_info.get("shortName") or peer,
-                        "ticker": peer,
-                        "price": round(float(p_current_price), 2),
-                        "pe":    round(pe_val, 1),
-                        "pb":    round(float(p_pb), 1) if p_pb and pd.notna(p_pb) else "N/A",
-                        "_score": score,
-                        "source": p_source,
-                    }
-                    if best_peer is None or score > best_peer.get("_score", -999):
-                        best_peer = candidate
-
+                p_metrics = fetch_stock_data(peer, peer, scan_for_alternative=False)
             except Exception as e:
-                logger.warning("Peer scan failed for %s: %s", peer, e)
+                logger.warning("Alternative-scan fetch failed for %s: %s", peer, e)
                 continue
+            if not p_metrics:
+                continue
+            p_pred = p_metrics.get("predictive") or {}
+            if p_pred.get("verdict") != "STRONG BUY":
+                continue  # only a REAL, fully-computed STRONG BUY qualifies
 
-        metrics['best_alternative'] = best_peer
+            p_price = p_metrics.get("price")
+            p_target = p_pred.get("target_price")
+            upside_pct = (
+                round((float(p_target) / float(p_price) - 1) * 100, 1)
+                if p_price and p_target and float(p_price) > 0 else None
+            )
+            p_pe_raw = p_metrics.get("pe_ratio")
+            p_pb_raw = p_metrics.get("pb_ratio")
+            metrics['best_alternative'] = {
+                "name": p_metrics.get("name") or peer,
+                "ticker": peer,
+                "price": round(float(p_price), 2) if p_price else None,
+                "pe": round(float(p_pe_raw), 1) if is_valid_metric(p_pe_raw) else "N/A",
+                "pb": round(float(p_pb_raw), 1) if is_valid_metric(p_pb_raw) else "N/A",
+                "verdict": p_pred.get("verdict"),
+                "composite_score": p_pred.get("composite_score"),
+                "target_price": p_target,
+                "upside_pct": upside_pct,
+                "entry_range": p_pred.get("entry_range"),
+                "time_horizon": p_pred.get("time_horizon"),
+            }
+            break  # first verified STRONG BUY wins — no need to scan further peers
 
     return metrics
