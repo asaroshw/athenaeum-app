@@ -72,7 +72,10 @@ def _scrape_ipomarket_list(path: str) -> list:
 
             name_raw = texts[0]
             name = re.sub(r"^[A-Z]{1,3}\s+", "", name_raw)
-            name = re.sub(r"\s+(Agriculture|Others|Mainboard|SME)$", "", name).strip()
+            # These suffix words are sometimes glued with no separating space
+            # (e.g. "ShiprocketOthers") because the sector tag is a sibling
+            # span with no text-node gap in the source markup.
+            name = re.sub(r"\s*(Agriculture|Others|Mainboard|SME)$", "", name).strip()
             # Derive status strictly from the path requested, not from a scraped cell that
             # is often missing or inconsistent across sections of the same page.
             if "open" in path:
@@ -81,6 +84,39 @@ def _scrape_ipomarket_list(path: str) -> list:
                 status = "LISTED"
             else:
                 status = "UPCOMING"
+
+            if "listed" in path:
+                # /ipo/listed uses a completely different column set:
+                # Company | Listed Date | IPO Price | Listing Price | Listing Gain | CMP | Return
+                # None of open/close/price-band/lot/gmp/subscription exist here.
+                listed_s = col(["listed date"])
+                ipo_price_s = col(["ipo price"])
+                listing_price_s = col(["listing price"])
+                listing_gain_s = col(["listing gain"])
+                cmp_s = col(["cmp"])
+                listed_d = _parse_date_flex(listed_s)
+                ipo_price_v = to_float(ipo_price_s)
+                listing_price_v = to_float(listing_price_s)
+                cmp_v = to_float(cmp_s)
+                gain_m = re.search(r"([+-]?[\d.]+)\s*%", listing_gain_s or "")
+                gain_v = float(gain_m.group(1)) if gain_m else None
+                if gain_v is None and ipo_price_v and listing_price_v:
+                    gain_v = round((listing_price_v / ipo_price_v - 1) * 100, 2)
+
+                results.append({
+                    "symbol": slug, "slug": slug, "name": name, "status": status,
+                    "date": listed_s or "", "open_date": None, "close_date": None,
+                    "listing_date_str": listed_s or "",
+                    "price_low": ipo_price_v, "price_high": ipo_price_v,
+                    "price_band_str": f"₹{ipo_price_v:g}" if ipo_price_v else "",
+                    "listing_price": listing_price_v if listing_price_v else cmp_v,
+                    "listing_gain_pct": gain_v,
+                    "exchange": "NSE/BSE",
+                    "detail_url": f"https://www.ipomarket.in/ipo/{slug}",
+                    "source": "ipomarket",
+                })
+                continue
+
             open_s = col(["open", "expected"])
             close_s = col(["close"])
             band_s = col(["price band", "price"])
@@ -120,40 +156,119 @@ def _scrape_ipomarket_list(path: str) -> list:
     return results
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
-def _scrape_chittorgarh_dashboard() -> list:
-    """Chittorgarh only provides a name+link — no dates, no status.
-    We deliberately leave status blank so _classify_bucket uses date evidence
-    rather than blindly trusting a CURRENT hint that covers listed & upcoming too."""
+def _parse_dd_mon_range(text: str):
+    """Parse Chittorgarh's dashboard date-range format, e.g. 'O12 - 14 Aug',
+    'CT11 - 13 Aug', '30 Jul - 03 Aug', '24 - 27 Aug'.
+
+    The site glues a 1-3 letter status badge (O/CT/P/LT/etc, meaning varies and
+    is NOT reliable across rows) directly onto the first digit with no space —
+    we strip that, then parse 'D [Mon] - D Mon' (month on the open side is
+    optional and borrows the close side's month when absent). We deliberately
+    do NOT trust the badge text itself for status — only the dates, which is
+    what every other source in this module also keys bucketing off of.
+    Returns (open_date, close_date) as date objects, or (None, None).
+    """
+    if not text:
+        return None, None
+    t = text.strip()
+    t = re.sub(r"^[A-Z]{1,3}(?=\d)", "", t)  # strip glued status badge e.g. "O12" -> "12"
+    t = re.sub(r"(\d+)(?:st|nd|rd|th)\b", r"\1", t)  # strip ordinal suffixes
+    m = re.match(r"^(\d{1,2})(?:\s+([A-Za-z]{3,9}))?\s*[-–]\s*(\d{1,2})\s+([A-Za-z]{3,9})$", t)
+    if not m:
+        return None, None
+    d1, mon1, d2, mon2 = m.groups()
+    mon1 = mon1 or mon2
+    year = datetime.today().date().year
+
+    def _mk(day, mon, yr):
+        return _parse_date_flex(f"{day} {mon} {yr}")
+
+    open_d = _mk(d1, mon1, year)
+    close_d = _mk(d2, mon2, year)
+    if open_d and close_d and close_d < open_d:
+        # Year-boundary wrap, e.g. "29 Dec - 02 Jan"
+        close_d = _mk(d2, mon2, year + 1)
+    return open_d, close_d
+
+
+def _scrape_chittorgarh_one_dashboard(url: str) -> list:
     out, seen = [], set()
     try:
-        r = requests.get("https://www.chittorgarh.com/ipo/", headers=_IPO_HEADERS, timeout=20)
+        r = requests.get(url, headers=_IPO_HEADERS, timeout=20)
         if r.status_code != 200:
             return out
         soup = BeautifulSoup(r.text, "html.parser")
-        for a in soup.find_all("a", href=True):
-            href = a.get("href", "")
-            t = a.get_text(" ", strip=True)
-            if "/ipo_review/" not in href:
-                continue
-            name = re.sub(r"\s+IPO$", "", t).strip()
-            if not name or name.lower() in ("ipo", "sme ipo"):
-                continue
-            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-            if slug in seen:
-                continue
-            seen.add(slug)
-            full = ("https://www.chittorgarh.com" + href) if href.startswith("/") else href
-            out.append({
-                "symbol": slug, "slug": slug, "name": name,
-                # status intentionally left blank — no date data available from this source
-                "status": "", "date": "", "open_date": None, "close_date": None,
-                "price_low": None, "price_high": None, "price_band_str": "",
-                "exchange": "NSE/BSE", "detail_url": full, "source": "chittorgarh",
-            })
     except Exception:
-        pass
+        return out
+
+    # The real dashboard link pattern is /ipo/{slug}-ipo/{id}/ (WITH a numeric id).
+    # This is deliberately distinct from /ipo_review/{slug}/{id}/, which is a
+    # separate ratings-only table on the same page with no date information.
+    link_re = re.compile(r"^/ipo/[a-z0-9-]+-ipo/\d+/?$")
+    for a in soup.find_all("a", href=True):
+        href = a.get("href", "")
+        if not link_re.match(href):
+            continue
+        # The date range may be a sibling text node within the SAME <td> as the
+        # link, or live in a separate sibling <td> — real-world markup for this
+        # varies, so try the narrower scope first and fall back to the full row.
+        td = a.find_parent("td")
+        cell_text = td.get_text(" ", strip=True) if td is not None else ""
+        link_text = a.get_text(" ", strip=True)
+        name = link_text.strip()
+        if not name or name.lower() in ("ipo", "sme ipo"):
+            continue
+        slug = _slug_from_href(href) or re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+        if slug in seen:
+            continue
+        seen.add(slug)
+
+        date_from_cell = cell_text[len(link_text):].strip() if cell_text.startswith(link_text) else cell_text.replace(link_text, "").strip()
+        open_d, close_d = _parse_dd_mon_range(date_from_cell)
+        date_text = date_from_cell
+
+        if open_d is None:
+            # Fall back to scanning the whole row (link + date in separate <td>s)
+            tr = a.find_parent("tr")
+            if tr is not None:
+                row_text = tr.get_text(" ", strip=True)
+                date_from_row = row_text[len(link_text):].strip() if row_text.startswith(link_text) else row_text.replace(link_text, "").strip()
+                open_d2, close_d2 = _parse_dd_mon_range(date_from_row)
+                if open_d2 is not None:
+                    open_d, close_d = open_d2, close_d2
+                    date_text = date_from_row
+
+        full = ("https://www.chittorgarh.com" + href) if href.startswith("/") else href
+        out.append({
+            "symbol": slug, "slug": slug, "name": name,
+            # status intentionally left blank — bucketing is date-driven for this
+            # source since the site's own status badges are not reliably decodable
+            "status": "", "date": date_text,
+            "open_date": open_d.isoformat() if open_d else None,
+            "close_date": close_d.isoformat() if close_d else None,
+            "price_low": None, "price_high": None, "price_band_str": "",
+            "exchange": "NSE/BSE", "detail_url": full, "source": "chittorgarh",
+        })
     return out
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def _scrape_chittorgarh_dashboard() -> list:
+    """Scrape both the mainboard and SME IPO dashboards. Companies in this app's
+    'current' state (e.g. many SME issues) live only on the SME dashboard, so
+    both must be fetched or those IPOs have no date evidence from this source."""
+    combined = []
+    seen_slugs = set()
+    for url in (
+        "https://www.chittorgarh.com/ipo/ipo_dashboard.asp",
+        "https://www.chittorgarh.com/ipo/ipo_dashboard.asp?a=sme",
+    ):
+        for rec in _scrape_chittorgarh_one_dashboard(url):
+            if rec["slug"] in seen_slugs:
+                continue
+            seen_slugs.add(rec["slug"])
+            combined.append(rec)
+    return combined
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -170,7 +285,7 @@ def _scrape_screener_ipo_list() -> dict:
         today = datetime.today().date()
         year = today.year
 
-        def _with_year(piece):
+        def _with_year(piece, ref_date=None):
             piece = piece.strip()
             if re.search(r"\d{4}", piece):
                 return _parse_date_flex(piece)
@@ -179,10 +294,16 @@ def _scrape_screener_ipo_list() -> dict:
             d = _parse_date_flex(f"{piece} {year}")
             if d is None:
                 d = _parse_date_flex(f"{piece} {year + 1}")
+            if d is not None and ref_date is not None and d < ref_date:
+                # close date rolled before the open date -> actually next year
+                # (e.g. period spans a Dec -> Jan year boundary)
+                d_next = _parse_date_flex(f"{piece} {ref_date.year + 1}")
+                if d_next is not None:
+                    d = d_next
             return d
 
         open_d = _with_year(parts[0]) if parts else None
-        close_d = _with_year(parts[1]) if len(parts) > 1 else None
+        close_d = _with_year(parts[1], ref_date=open_d) if len(parts) > 1 else None
         return open_d, close_d, period
 
     try:
@@ -456,17 +577,22 @@ def _bucket_ipo(ipo: dict) -> str:
     """Determine the correct tab for a single IPO record.
 
     Priority order (most reliable evidence first):
-    1. screener_recent source or listing_gain_pct/listing_price → closed
-    2. status == LISTED → closed
+    1. Real listing_gain_pct/listing_price data, or status == LISTED → closed
+    2. screener_recent source WITHOUT real price data: only closed if its own
+       listing date has passed or is unknown (a recent/pipeline feed can list
+       IPOs with a *future* listing date that haven't actually closed yet)
     3. Parsed close_date in the past → closed
-    4. Parsed listing_date in the past → closed
+    4. Parsed listing_date in the past (and not concurrently in an open window) → closed
     5. status == OPEN and close_date >= today → current
     6. Parsed open_date <= today <= close_date → current
     7. open_date == today and close_date unknown → current
-    8. open_date in the past and close_date unknown but listing_date unknown → current
-       (IPO opened but close/listing date not yet scraped — safer to show as current)
-    9. status == UPCOMING or open_date in future → upcoming
-    10. Default → upcoming
+    8. open_date in the recent past (<=15 days) and close/listing date unknown → current
+       (IPO opened but close/listing date not yet scraped from any source)
+    9. open_date more than 15 days in the past with no close/listing evidence → closed
+       (Indian IPO windows run 3-10 working days; this far out, it has almost certainly closed)
+    10. open_date in the future → upcoming
+    11. status == UPCOMING → upcoming
+    12. Default (no date information at all) → upcoming
     """
     today = datetime.today().date()
     source = str(ipo.get("source") or "").lower()
@@ -475,25 +601,30 @@ def _bucket_ipo(ipo: dict) -> str:
     op_d  = _parse_date_flex(ipo.get("open_date"))
     cl_d  = _parse_date_flex(ipo.get("close_date"))
     lst_d = _parse_date_flex(ipo.get("listing_date_str"))
+    has_price_data = ipo.get("listing_gain_pct") is not None or ipo.get("listing_price") is not None
 
-    # ── 1. Hard closed signals ─────────────────────────────────────────────
-    if (
-        "screener_recent" in source
-        or ipo.get("listing_gain_pct") is not None
-        or ipo.get("listing_price") is not None
-        or status == "LISTED"
-    ):
+    # ── 1. Hard closed signals: real post-listing market data ──────────────
+    if has_price_data or status == "LISTED":
         return "closed"
 
-    # ── 2. close_date in the past ─────────────────────────────────────────
+    # ── 2. screener_recent with NO price data yet: only trust as closed if
+    #        its listing date has passed or is unknown; a future listing date
+    #        here means the IPO is still upcoming/open, not closed yet ───────
+    if "screener_recent" in source:
+        if lst_d is None or lst_d <= today:
+            return "closed"
+        # else: has a real future listing date and no price data — fall
+        # through to ordinary date-based checks below.
+
+    # ── 3. close_date in the past ───────────────────────────────────────────
     if cl_d and cl_d < today:
         return "closed"
 
-    # ── 3. listing_date in the past (and no open subscription signal) ─────
+    # ── 4. listing_date in the past (and no open subscription signal) ──────
     if lst_d and lst_d <= today and not (op_d and op_d <= today <= (cl_d or today)):
         return "closed"
 
-    # ── 4. Explicitly open: status says OPEN and close not yet passed ──────
+    # ── 5. Explicitly open: status says OPEN and close not yet passed ──────
     if status == "OPEN":
         # Trust status=OPEN only if close_date hasn't passed (or is unknown)
         if cl_d is None or cl_d >= today:
@@ -501,29 +632,33 @@ def _bucket_ipo(ipo: dict) -> str:
         # close_date passed → closed, regardless of status string
         return "closed"
 
-    # ── 5. Date-range says currently open ─────────────────────────────────
+    # ── 6. Date-range says currently open ───────────────────────────────────
     if op_d and cl_d and op_d <= today <= cl_d:
         return "current"
 
-    # ── 6. open_date is today but close_date unknown ──────────────────────
+    # ── 7. open_date is today but close_date unknown ────────────────────────
     if op_d and op_d == today and cl_d is None:
         return "current"
 
-    # ── 7. open_date is in the past, close_date unknown, no listing signal
-    #       Most likely still open; show as current rather than misclassifying upcoming
+    # ── 8/9. open_date known, close/listing unknown: recent → current,
+    #         stale (>15 days, beyond any realistic subscription window,
+    #         SEBI ICDR allows 3-10 working days) → closed ────────────────────
     if op_d and op_d < today and cl_d is None and lst_d is None:
-        return "current"
+        if (today - op_d).days <= 15:
+            return "current"
+        return "closed"
 
-    # ── 8. open_date is in the future → upcoming ──────────────────────────
+    # ── 10. open_date is in the future → upcoming ───────────────────────────
     if op_d and op_d > today:
         return "upcoming"
 
-    # ── 9. status hint for upcoming ───────────────────────────────────────
+    # ── 11. status hint for upcoming ────────────────────────────────────────
     if status in ("UPCOMING",):
         return "upcoming"
 
-    # ── 10. Default: no date information → upcoming (TBA) ─────────────────
+    # ── 12. Default: no date information → upcoming (TBA) ──────────────────
     return "upcoming"
+
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -632,6 +767,11 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     detail["listing_date_str"] = g("listing", "listed on")
     detail["open_date_str"]    = g("ipo open", "open")
     detail["close_date_str"]   = g("ipo close", "close")
+    detail["lead_manager"]     = g("lead manager", "book running lead", "brlm")
+    detail["allotment_date_str"]    = g("allotment date", "basis of allotment")
+    detail["refund_date_str"]       = g("refund")
+    detail["demat_credit_date_str"] = g("credit of shares", "demat credit", "credit to demat")
+    detail["anchor_str"]            = g("anchor investor", "anchor allocation", "anchor portion")
 
     fresh = detail.get("fresh_issue_str") or ""
     ofs   = detail.get("ofs_str") or ""
@@ -791,7 +931,52 @@ def score_ipo(detail: dict, bucket: str = "current") -> tuple:
 
 # ── Chart helpers ──────────────────────────────────────────────────────────────
 
-def render_ipo_financials_chart(fin_rows: list) -> None:
+def render_ipo_timeline(detail: dict) -> None:
+    """Horizontal step timeline: Open -> Close -> Allotment -> Refund -> Demat Credit -> Listing.
+    Only renders steps where a date string was actually found; skips entirely
+    if nothing beyond open/close is known (avoids a mostly-empty widget for
+    IPOs where the aggregator hasn't published post-close dates yet)."""
+    steps = [
+        ("Opens",        detail.get("open_date_str") or detail.get("date")),
+        ("Closes",       detail.get("close_date_str")),
+        ("Allotment",    detail.get("allotment_date_str")),
+        ("Refund Init.", detail.get("refund_date_str")),
+        ("Demat Credit", detail.get("demat_credit_date_str")),
+        ("Listing",      detail.get("listing_date_str")),
+    ]
+    known = [(label, val) for label, val in steps if val and str(val).strip() not in ("", "—", "N/A", "TBA")]
+    if len(known) < 3:
+        return  # not enough real data to make a timeline worth showing
+
+    today = datetime.today().date()
+    cells = []
+    for label, val in known:
+        d = _parse_date_flex(val)
+        is_past = bool(d and d < today)
+        is_today = bool(d and d == today)
+        dot_color = GREEN if is_past else (ORANGE if is_today else MUTED)
+        text_color = "#c9d1d9" if (is_past or is_today) else MUTED
+        cells.append(
+            f"<div style='flex:1;min-width:100px;text-align:center;padding:0 4px;'>"
+            f"<div style='width:10px;height:10px;border-radius:50%;background:{dot_color};"
+            f"margin:0 auto 6px auto;'></div>"
+            f"<div style='font-size:0.72em;color:{MUTED};'>{html_escape(label)}</div>"
+            f"<div style='font-size:0.82em;color:{text_color};font-weight:600;'>{html_escape(str(val))}</div>"
+            f"</div>"
+        )
+    line_color = BORDER
+    st.markdown(
+        f"<div class='swf-card' style='margin-bottom:18px;padding:16px 12px;'>"
+        f"<div style='font-size:0.85em;color:{MUTED};margin-bottom:12px;padding-left:4px;'>IPO Timeline</div>"
+        f"<div style='display:flex;align-items:flex-start;position:relative;'>"
+        f"<div style='position:absolute;top:5px;left:5%;right:5%;height:2px;background:{line_color};z-index:0;'></div>"
+        f"<div style='display:flex;width:100%;position:relative;z-index:1;'>{''.join(cells)}</div>"
+        f"</div></div>",
+        unsafe_allow_html=True,
+    )
+
+
+
     """Grouped bar chart: Revenue vs PAT across years."""
     if not fin_rows:
         return
@@ -1114,6 +1299,14 @@ def _render_ipo_detail_view():
         custom_metric("Face Value", detail.get("face_value") or "N/A")
     with extra_cols[2]:
         custom_metric("Registrar", detail.get("registrar") or "N/A")
+    if detail.get("lead_manager"):
+        st.markdown(
+            f"<div style='margin:-4px 0 12px 0;font-size:0.82em;color:{MUTED};'>"
+            f"Lead Manager: <span style='color:#c9d1d9;'>{html_escape(str(detail['lead_manager']))}</span></div>",
+            unsafe_allow_html=True)
+
+    # ── IPO Timeline ────────────────────────────────────────────────────────
+    render_ipo_timeline(detail)
 
     # ── Business overview ──────────────────────────────────────────────────
     card("Business Overview",
