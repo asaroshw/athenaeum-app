@@ -298,18 +298,27 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     # --- RECOMMENDED SECTOR ALTERNATIVE ---
     if current_rating in ["DON'T BUY", "OBSERVE"] and m.get('best_alternative'):
         alt = m['best_alternative']
+        upside_line = (
+            f"<div>Upside to Target: <span style='color:{GREEN};font-weight:700;'>+{alt['upside_pct']}%</span></div>"
+            if alt.get('upside_pct') is not None else ""
+        )
         st.markdown(
             f"""
             <div style="background-color: rgba(56, 189, 248, 0.1); border: 1px solid {BLUE}; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
                 <div style="color: {BLUE}; font-weight: 700; font-size: 1.1em; margin-bottom: 5px;">💡 Recommended Sector Alternative</div>
                 <div style="font-size: 0.9em; color: #E6E6E6; margin-bottom: 8px;">
-                    This stock scored poorly. Based on its sector profile, you might want to look at a fundamental leader in this space:
+                    This stock scored poorly. Run through the same analysis engine, this sector peer independently comes back <span style="color:{GREEN};font-weight:700;">STRONG BUY</span> right now:
                 </div>
-                <div style="display: flex; gap: 20px; font-weight: 600;">
+                <div style="display: flex; gap: 20px; font-weight: 600; flex-wrap: wrap;">
                     <div>Stock: <span style="color: {GOLD};">{alt['name']} ({alt['ticker']})</span></div>
                     <div>Price: {currency}{alt['price']}</div>
-                    <div>P/E: {alt['pe']}x</div>
-                    <div>P/B: {alt['pb']}x</div>
+                    <div>P/E: {f"{alt['pe']}x" if alt['pe'] != "N/A" else "N/A"}</div>
+                    <div>P/B: {f"{alt['pb']}x" if alt['pb'] != "N/A" else "N/A"}</div>
+                    <div>Score: <span style="color:{GREEN};">{alt.get('composite_score')}/100</span></div>
+                    {upside_line}
+                </div>
+                <div style="font-size: 0.78em; color: #8b949e; margin-top: 8px;">
+                    Verdict recomputed live at scan time — search it directly to confirm before acting, as prices and data move.
                 </div>
             </div>
             """, unsafe_allow_html=True
