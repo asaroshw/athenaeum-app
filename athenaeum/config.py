@@ -46,8 +46,7 @@ ORDER_BOOK_KEYWORDS = [
     "order book", "order win", "wins order", "contract win", "crore order",
     "new order", "secures order", "bagged order", "order inflow",
 ]
-GROWTH_PCT_PATTERN = None  # set in analysis.sentiment to avoid circular import of re at load
+# GROWTH_PCT_PATTERN is defined and compiled in athenaeum.analysis.sentiment (avoids circular import)
 
-SECTOR_PEERS = {
-    # populated in data.peers if needed — kept in models.sector for runtime
-}
+# SECTOR_PEERS is defined and populated in athenaeum.data.equity (not here)
+# to keep peer ticker lists close to their usage context.
