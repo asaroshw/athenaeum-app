@@ -8,7 +8,7 @@ import streamlit as st
 
 from athenaeum.config import (
     GOLD, BG, CARD_BG, CARD_BG_HOVER, BORDER, BORDER_STRONG, GREEN, GREEN_SOFT,
-    RED, RED_SOFT, ORANGE, ORANGE_SOFT, MUTED, MUTED_SOFT, BLUE, PURPLE, TEXT,
+    RED, RED_SOFT, ORANGE, ORANGE_SOFT, MUTED, MUTED_SOFT, BLUE, PURPLE, TEXT, TEXT_BODY,
     ACCENT, ACCENT_SOFT,
 )
 from athenaeum.utils.helpers import html_escape_fn as html_escape, style_verdict_text, to_float, compute_risk_reward
