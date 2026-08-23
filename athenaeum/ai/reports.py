@@ -2,6 +2,7 @@
 from __future__ import annotations
 import logging
 import streamlit as st
+from athenaeum.config import GEMINI_MODEL
 from athenaeum.utils.helpers import style_verdict_text
 
 logger = logging.getLogger("athenaeum")
@@ -82,10 +83,23 @@ def _algorithmic_fallback_report(metrics, ticker):
 
 
 def generate_comprehensive_report(metrics, ticker):
+    """
+    Equity AI narrative. Mirrors ipo_ai_narrative's fault tolerance: this function
+    used to have no try/except around the Gemini call, unlike the IPO path — a
+    transient API failure (rate limit, timeout, safety block, or a KeyError from
+    the old metrics['x'] direct-indexing below) would raise all the way up to
+    streamlit_app.py, which wraps fetch_stock_data() and this call in the SAME
+    try/except. That meant a flaky AI-narrative call could discard an already
+    fully-computed, successful quantitative analysis and show the user a bare
+    error instead — directly contradicting the "runs fully without any paid API
+    key, falls back to an algorithmic narrative" guarantee, which previously only
+    held when the key was absent, not when a configured key failed at runtime.
+    """
     if not _gemini_key() or genai is None:
         return _algorithmic_fallback_report(metrics, ticker)
-    client = genai.Client(api_key=_gemini_key())
-    sys = """You are a research narrative synthesis layer over a quantitative screening model.
+    try:
+        client = genai.Client(api_key=_gemini_key())
+        sys = """You are a research narrative synthesis layer over a quantitative screening model.
 You are NOT an independent senior equity analyst with access to filings, auditor notes, or
 segment economics. Explain and stress-test the quantitative outputs only.
 
@@ -109,25 +123,36 @@ REALITY CHECKER MANDATE:
 NO BLIND AGREEMENT MANDATE:
 - Quantitative baseline and forward catalysts can disagree; weigh both and explain.
 - Do not upgrade a weak quantitative case purely because of optimistic language."""
-    pred = metrics.get('predictive', {})
-    news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
-    turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
-    order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
-                        if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
-    
-    target_display = f"{metrics['currency']}{pred.get('target_price')}" if pred.get('verdict') != "DON'T BUY" else "N/A (Model Rejected due to strict veto)"
-    
-    pmt = (f"Target: {metrics['name']} ({ticker}). Sector: {metrics.get('sector')} "
-           f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
-           f"Price: {metrics['price']}. P/E: {metrics['pe_ratio']}. P/B: {metrics['pb_ratio']}. "
-           f"EV/EBITDA: {metrics['ev_ebitda']}. Debt/Eq: {metrics['debt_to_equity']}. "
-           f"Valuation model used: {pred.get('model_used')}. Forward growth assumption used in the model: "
-           f"{pred.get('growth_used')}%. Quantitative Target Price: {target_display}. "
-           f"System Verdict: {pred.get('verdict')} (composite score {pred.get('composite_score')}/100 — "
-           f"fundamental {pred.get('fundamental_score')}, intrinsic {pred.get('intrinsic_score')}, "
-           f"technical {pred.get('technical_score')}). Recent news headlines: {news_titles}")
-    return client.models.generate_content(model='gemini-3.5-flash-lite', contents=pmt,
-                                          config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2)).text
+        pred = metrics.get('predictive', {})
+        news_titles = "; ".join([n['title'] for n in (metrics.get('recent_news') or [])[:5]]) or "No recent headlines found."
+        turnaround_note = " TURNAROUND flagged." if metrics.get('is_turnaround') else ""
+        order_book_note = (f" Forward catalyst signal(s) detected in recent news: {', '.join(metrics.get('order_book_hits', [])[:4])}."
+                            if metrics.get('order_book_hits') else " No explicit order-book/guidance signal detected in recent news.")
+
+        currency = metrics.get('currency', '₹')
+        target_display = f"{currency}{pred.get('target_price')}" if pred.get('verdict') != "DON'T BUY" else "N/A (Model Rejected due to strict veto)"
+
+        pmt = (f"Target: {metrics.get('name', ticker)} ({ticker}). Sector: {metrics.get('sector')} "
+               f"(profile: {metrics.get('sector_profile')}).{turnaround_note}{order_book_note} "
+               f"Price: {metrics.get('price')}. P/E: {metrics.get('pe_ratio')}. P/B: {metrics.get('pb_ratio')}. "
+               f"EV/EBITDA: {metrics.get('ev_ebitda')}. Debt/Eq: {metrics.get('debt_to_equity')}. "
+               f"Valuation model used: {pred.get('model_used')}. Forward growth assumption used in the model: "
+               f"{pred.get('growth_used')}%. Quantitative Target Price: {target_display}. "
+               f"System Verdict: {pred.get('verdict')} (composite score {pred.get('composite_score')}/100 — "
+               f"fundamental {pred.get('fundamental_score')}, intrinsic {pred.get('intrinsic_score')}, "
+               f"technical {pred.get('technical_score')}). Recent news headlines: {news_titles}")
+        resp = client.models.generate_content(
+            model=GEMINI_MODEL, contents=pmt,
+            config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2),
+        )
+        text = getattr(resp, "text", None)
+        if not text or not text.strip():
+            logger.warning("Gemini returned an empty equity narrative for %s; using algorithmic fallback.", ticker)
+            return _algorithmic_fallback_report(metrics, ticker)
+        return text
+    except Exception as e:
+        logger.warning("Gemini equity narrative failed for %s (%s); using algorithmic fallback.", ticker, e)
+        return _algorithmic_fallback_report(metrics, ticker)
 
 
 # ============================================================
@@ -261,7 +286,7 @@ def ipo_ai_narrative(detail: dict, score, verdict, pros, cons, bucket: str = "cu
             f"Recent news headlines: {news_txt}"
         )
         resp = client.models.generate_content(
-            model="gemini-3.5-flash-lite", contents=prompt,
+            model=GEMINI_MODEL, contents=prompt,
             config=types.GenerateContentConfig(system_instruction=sys, temperature=0.2))
         return resp.text
     except Exception as e:
