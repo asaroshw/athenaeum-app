@@ -7,17 +7,20 @@ import pandas as pd
 import streamlit as st
 
 from athenaeum.config import (
-    GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE,
+    GOLD, BG, CARD_BG, CARD_BG_HOVER, BORDER, BORDER_STRONG, GREEN, GREEN_SOFT,
+    RED, RED_SOFT, ORANGE, ORANGE_SOFT, MUTED, MUTED_SOFT, BLUE, PURPLE, TEXT,
+    ACCENT, ACCENT_SOFT,
 )
-from athenaeum.utils.helpers import html_escape_fn as html_escape, rating_color, style_verdict_text, to_float, compute_risk_reward
+from athenaeum.utils.helpers import html_escape_fn as html_escape, style_verdict_text, to_float, compute_risk_reward
 from athenaeum.data.equity import resolve_name_to_ticker, fetch_stock_data, fetch_extended_price_history, fetch_peer_comparison_data
+from athenaeum.data.snapshot_store import save_snapshot, get_snapshot_history
 from athenaeum.data.ipo import (
     fetch_ipo_list_categorized, fetch_ipo_detail, score_ipo,
     _render_ipo_list_rows, _render_ipo_detail_view,
 )
 from athenaeum.models.technical import compute_technical_regime_badges
 from athenaeum.ui.components import (
-    custom_metric, card, render_checks, render_scorecard_badges,
+    custom_metric, card, render_checks, render_scorecard_badges, verdict_pill, status_pill,
     price_history_chart, fair_value_bar, analysis_radar_chart, projection_path_chart,
     render_52week_range, render_price_summary_cards, render_valuation_spectrum, 
     render_analyst_consensus, extract_highlights, render_highlights_card, 
@@ -39,19 +42,113 @@ st.set_page_config(
 
 st.markdown(f"""
 <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap');
-    html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{ font-family: 'Inter', sans-serif !important; }}
-    .stApp {{ background-color: {BG}; color: #E6E6E6; }}
-    .swf-title-container {{ text-align: center; padding: 10px 0 20px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 20px; }}
-    .swf-title {{ font-size: 1.85em; font-weight: 800; color: #FFFFFF; letter-spacing: 0.5px; }}
-    .swf-card {{ background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 18px 20px; margin-bottom: 16px; }}
-    .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.05em; margin-bottom:6px; }}
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap');
+
+    /* ---------- Hide Streamlit chrome — make it read as a native app, not a script ---------- */
+    #MainMenu {{ visibility: hidden; height: 0; }}
+    header[data-testid="stHeader"] {{ display: none; }}
+    div[data-testid="stToolbar"] {{ visibility: hidden; height: 0; position: fixed; }}
+    div[data-testid="stDecoration"] {{ display: none; }}
+    div[data-testid="stStatusWidget"] {{ visibility: hidden; height: 0; }}
+    footer {{ visibility: hidden; height: 0; }}
+    #stDecoration {{ display: none; }}
+    .block-container {{ padding-top: 1.6rem; padding-bottom: 3rem; max-width: 1200px; }}
+
+    /* ---------- Base ---------- */
+    html, body, [class*="st-"], .stApp, div, span, p, table, th, td, label {{
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif !important;
+    }}
+    .stApp {{ background-color: {BG}; color: {TEXT}; }}
+    /* Prices, percentages, scores — tabular figures so digits line up in
+       columns instead of each number claiming a slightly different width. */
+    .swf-num, .swf-card, [data-testid="stMetricValue"], .stDataFrame {{
+        font-variant-numeric: tabular-nums;
+    }}
+
+    /* ---------- Header ---------- */
+    .swf-title-container {{ text-align: center; padding: 4px 0 22px 0; border-bottom: 1px solid {BORDER}; margin-bottom: 22px; }}
+    .swf-title {{ font-size: 1.7em; font-weight: 800; color: {TEXT}; letter-spacing: -0.01em; }}
+    .swf-eyebrow {{ color: {MUTED}; font-size: 0.72em; font-weight: 600; letter-spacing: 0.09em; text-transform: uppercase; }}
+
+    /* ---------- Cards ---------- */
+    .swf-card {{
+        background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 12px;
+        padding: 18px 20px; margin-bottom: 16px; transition: border-color 0.15s ease;
+    }}
+    .swf-card:hover {{ border-color: {BORDER_STRONG}; }}
+    .swf-h {{ color:{BLUE}; font-weight:700; font-size:1.02em; margin-bottom:6px; }}
     .swf-sub {{ color:{MUTED}; font-size:0.85em; margin-left:0px; }}
     .swf-check-pass {{ color: {GREEN}; }}
     .swf-check-fail {{ color: {RED}; }}
     .swf-check-na {{ color: {MUTED}; }}
-    .swf-badge {{ background:{CARD_BG}; border:1px solid {BORDER}; padding:5px 12px; border-radius:6px; font-weight:700; font-size:0.85em; }}
-    .swf-section-title {{ font-size: 1.6em; font-weight: 800; color: #FFFFFF; margin-top: 10px; padding-top: 14px; border-top: 2px solid {BORDER}; }}
+
+    /* Section titles: a small colored eyebrow rule instead of a flat top
+       border — encodes "new section" the same way throughout, and gives
+       the numbered sections (1. Valuation, 2. Future Growth, ...) a
+       consistent structural marker since they genuinely are an ordered
+       walkthrough of the analysis. */
+    .swf-section-title {{
+        font-size: 1.35em; font-weight: 800; color: {TEXT}; margin-top: 8px;
+        padding-top: 16px; border-top: 2px solid {ACCENT}; letter-spacing: -0.01em;
+    }}
+
+    /* ---------- Pill badges ---------- */
+    .swf-badge {{
+        display: inline-flex; align-items: center; gap: 6px;
+        background: {CARD_BG}; border: 1px solid {BORDER}; color: {TEXT};
+        padding: 5px 13px; border-radius: 999px; font-weight: 600; font-size: 0.82em;
+        letter-spacing: 0.01em;
+    }}
+    .swf-pill {{
+        display: inline-flex; align-items: center; gap: 6px;
+        padding: 4px 12px; border-radius: 999px; font-weight: 700; font-size: 0.78em;
+        letter-spacing: 0.03em; text-transform: uppercase; white-space: nowrap;
+    }}
+    .swf-pill-dot {{ width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }}
+    .swf-pill-green  {{ background: {GREEN_SOFT};  color: {GREEN}; }}
+    .swf-pill-red    {{ background: {RED_SOFT};    color: {RED}; }}
+    .swf-pill-orange {{ background: {ORANGE_SOFT}; color: {ORANGE}; }}
+    .swf-pill-blue   {{ background: {BLUE}1F;      color: {BLUE}; }}
+    .swf-pill-muted  {{ background: {MUTED_SOFT};  color: {MUTED}; }}
+    .swf-pill-accent {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
+
+    /* ---------- Metric cards (custom_metric) ---------- */
+    .swf-metric {{
+        background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px;
+        padding: 13px 16px; margin-bottom: 12px; transition: border-color 0.15s ease;
+    }}
+    .swf-metric:hover {{ border-color: {BORDER_STRONG}; }}
+    .swf-metric-label {{
+        font-size: 0.70em; color: {MUTED}; text-transform: uppercase;
+        font-weight: 600; letter-spacing: 0.07em; margin-bottom: 5px;
+    }}
+    .swf-metric-value {{ font-size: 1.28em; font-weight: 700; color: {TEXT}; font-variant-numeric: tabular-nums; }}
+
+    /* ---------- Streamlit native widgets, restyled to match ---------- */
+    .stButton>button[kind="primary"], .stButton>button[kind="primaryFormSubmit"] {{
+        background-color: {ACCENT}; border: 1px solid {ACCENT}; border-radius: 9px;
+        font-weight: 700; color: #0A0B0D; transition: filter 0.15s ease;
+    }}
+    .stButton>button[kind="primary"]:hover {{ filter: brightness(1.08); border-color: {ACCENT}; }}
+    .stButton>button[kind="secondary"] {{
+        background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 9px; color: {TEXT};
+    }}
+    .stTextInput>div>div>input, .stTextArea textarea {{
+        background-color: {CARD_BG} !important; border: 1px solid {BORDER} !important;
+        border-radius: 9px !important; color: {TEXT} !important;
+    }}
+    .stTextInput>div>div>input:focus {{ border-color: {ACCENT} !important; box-shadow: 0 0 0 1px {ACCENT} !important; }}
+    div[data-baseweb="tab-list"] {{ border-bottom: 1px solid {BORDER}; gap: 4px; }}
+    button[data-baseweb="tab"] {{ color: {MUTED}; font-weight: 600; }}
+    button[data-baseweb="tab"][aria-selected="true"] {{ color: {TEXT}; }}
+    div[data-baseweb="tab-highlight"] {{ background-color: {ACCENT} !important; height: 2px; }}
+    .streamlit-expanderHeader {{
+        background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; font-weight: 600;
+    }}
+    div[data-testid="stMetric"] {{
+        background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 12px 16px;
+    }}
+    hr {{ border-color: {BORDER}; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -122,6 +219,12 @@ if generate_clicked and stock_input.strip() and st.session_state.app_mode == 'eq
                 st.error("Error: Could not retrieve valid data for this stock ticker.")
                 st.stop()
 
+            # Point-in-time logging of THIS app's own verdict — see
+            # data/snapshot_store.py's module docstring for exactly what this
+            # does and does not cover. Best-effort: never blocks the page on
+            # a storage failure.
+            save_snapshot(final_ticker, metrics, metrics.get("predictive"))
+
             ai_text = generate_comprehensive_report(metrics, final_ticker)
             raw_ai_text = re.sub(r'DYNAMIC_.*?\n', '', ai_text)
             sections_list = [s.strip() for s in re.split(r'\n+(?=\d+\.\s+(?:VALUATION|FUTURE GROWTH|PAST PERFORMANCE|FINANCIAL HEALTH|DIVIDEND|MANAGEMENT|OWNERSHIP STRUCTURE|NARRATIVE VERDICT))', raw_ai_text, flags=re.IGNORECASE) if s.strip()]
@@ -140,7 +243,6 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
 
     pred = m.get('predictive', {})
     current_rating = pred.get('verdict', 'OBSERVE')
-    rc = rating_color(current_rating)
     currency = m.get('currency', '₹')
 
     val_checks = m.get('valuation_checks') or valuation_checks(m)
@@ -151,10 +253,22 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     # ---------------- Header ----------------
     hcol1, hcol2 = st.columns([2.2, 1])
     with hcol1:
-        turnaround_badge = ' <span class="swf-badge" style="margin-left:6px; color:#F97316;">TURNAROUND</span>' if m.get('is_turnaround') else ''
+        turnaround_badge = f' {status_pill("Turnaround", tone="orange")}' if m.get('is_turnaround') else ''
         price_str = f"{currency}{m['price']}" if m.get('price') is not None else "N/A"
-        st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div style="color:{MUTED}; font-size:0.85em;">Stocks / {m.get("industry","N/A")}</div><div style="font-size:1.4em; font-weight:800;">{html_escape(m.get("name", "N/A"))}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><span class="swf-badge" style="margin-top:8px; display:inline-block;">Verdict: <span style="color:{rc};">{current_rating}</span></span>{turnaround_badge}</div><div style="text-align:right;"><div style="font-size:1.6em; font-weight:800;">{price_str}</div></div></div></div>', unsafe_allow_html=True)
-        
+        st.markdown(f'<div class="swf-card"><div style="display:flex; justify-content:space-between; align-items:flex-start;"><div><div class="swf-eyebrow">Stocks / {html_escape(m.get("industry","N/A"))}</div><div style="font-size:1.4em; font-weight:800; margin-top:2px;">{html_escape(m.get("name", "N/A"))}</div><div style="color:{MUTED}; font-size:0.9em;">{ticker} Stock Report</div><div style="margin-top:10px;">{verdict_pill(current_rating)}{turnaround_badge}</div></div><div style="text-align:right;"><div class="swf-num" style="font-size:1.6em; font-weight:800;">{price_str}</div></div></div></div>', unsafe_allow_html=True)
+
+        past_snapshots = get_snapshot_history(ticker, limit=10)
+        if len(past_snapshots) > 1:
+            with st.expander(f"🕓 Verdict history for {ticker} ({len(past_snapshots)} logged runs)"):
+                st.caption("Logged locally by this app each time it analyses this ticker — its own past "
+                           "outputs, not a restated/point-in-time record of the underlying financial data. "
+                           "Too new to show performance yet; see data/snapshot_store.py for scope.")
+                hist_rows = [{"As of (UTC)": s["as_of_utc"], "Verdict": s["verdict"],
+                              "Composite": s["composite_score"], "Target": s["target_price"],
+                              "Price then": s["current_price"], "Model": s["model_used"]}
+                             for s in past_snapshots]
+                st.dataframe(pd.DataFrame(hist_rows), use_container_width=True, hide_index=True)
+
         try:
             render_scorecard_badges(m.get('q_score'), m.get('v_score'), m.get('f_score'))
         except Exception: pass
@@ -204,7 +318,7 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     
     render_52week_range(m.get('price'), to_float(m.get('fifty_two_low')), to_float(m.get('fifty_two_high')), currency)
     
-    card("Overview", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.5em;'>{html_escape(str(m.get('business_summary', 'Business summary not available.')))}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
+    card("Overview", f"<p style='color:{TEXT_BODY}; font-size:0.9em; line-height:1.5em;'>{html_escape(str(m.get('business_summary', 'Business summary not available.')))}</p><div class='swf-sub'>Sector: {m.get('sector', 'N/A')} | Industry: {m.get('industry', 'N/A')}</div>")
     st.markdown("---")
 
     # ---------------- 1. Valuation ----------------
@@ -224,7 +338,7 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     except Exception: pass
 
     render_analyst_consensus(m.get('target_mean_price'), m.get('price'), m.get('recommendation_mean'), currency)
-    card("Valuation & Fair Value", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(0))}</p>")
+    card("Valuation & Fair Value", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(0))}</p>")
 
     # ---------------- Elite Graphical UI: advanced institutional charts ----------------
     # Wrapped in an expander (closed by default) so the extra fetches these need
@@ -263,13 +377,34 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     with fg1: custom_metric(f"Modeled Target ({pred.get('model_used','DCF')})", target_display)
     with fg2: custom_metric("Est. Time Horizon", pred.get('time_horizon', 'N/A'))
     with fg3: custom_metric("Growth Assumption Used", f"{pred.get('growth_used','N/A')}%")
+
+    # Cost of capital & capital efficiency — previously computed nowhere in
+    # the app (no WACC existed anywhere; Ke itself was used internally but
+    # never shown). The FCF DCF above still discounts at Ke, not WACC — see
+    # the caption below for why — but WACC and the ROIC-WACC spread are
+    # real, independently useful cross-checks in their own right.
+    if pred.get('wacc_pct') is not None or pred.get('roic_pct') is not None:
+        cc1, cc2, cc3 = st.columns(3)
+        with cc1:
+            custom_metric("WACC", f"{pred['wacc_pct']}%" if pred.get('wacc_pct') is not None else "N/A")
+        with cc2:
+            custom_metric("ROIC", f"{pred['roic_pct']}%" if pred.get('roic_pct') is not None else "N/A")
+        with cc3:
+            ep = pred.get('economic_profit_pct')
+            ep_display = f"{'+' if ep is not None and ep >= 0 else ''}{ep} pp" if ep is not None else "N/A"
+            custom_metric("Economic Profit (ROIC − WACC)", ep_display)
+        st.caption(f"Cost of equity (Ke) used in the target-price model above: {pred.get('audit',{}).get('ke','N/A')}%. "
+                   "The DCF model discounts Free Cash Flow (Operating Cash Flow − Capex, a levered/equity-side proxy) "
+                   "at Ke rather than WACC — that pairing is conceptually consistent for this FCF definition. WACC is "
+                   "shown here as an independent capital-cost benchmark and for the ROIC spread, not as this model's "
+                   "discount rate.")
     
     if pred.get('base_value') and m.get('history') is not None:
         try:
             st.plotly_chart(projection_path_chart(m['history'], pred['base_value']), use_container_width=True, config={'displayModeBar': False})
         except Exception: pass
         
-    card("Future Growth & Outlook Narrative", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(1))}</p>")
+    card("Future Growth & Outlook Narrative", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(1))}</p>")
     st.markdown("---")
 
     # ---------------- 3. Past Performance ----------------
@@ -285,7 +420,7 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     
     working, not_working = extract_highlights(m, m.get('cf_df'))
     render_highlights_card(working, not_working)
-    card("Past Performance & Earnings Quality", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(2))}</p>")
+    card("Past Performance & Earnings Quality", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(2))}</p>")
     st.markdown("---")
 
     # ---------------- 4. Financial Health ----------------
@@ -298,20 +433,20 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
         if m.get('bs_df') is not None and not m['bs_df'].empty: st.dataframe(m['bs_df'], use_container_width=True, hide_index=True)
     with tab_cf:
         if m.get('cf_df') is not None and not m['cf_df'].empty: st.dataframe(m['cf_df'], use_container_width=True, hide_index=True)
-    card("Financial Health & Balance Sheet", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(3))}</p>")
+    card("Financial Health & Balance Sheet", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(3))}</p>")
     st.markdown("---")
 
     # ---------------- 5. Dividend ----------------
     st.markdown('<div class="swf-section-title">5. Dividend</div>', unsafe_allow_html=True)
     card("Dividend Checklist", render_checks(div_checks))
-    card("Dividend & Capital Allocation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(4))}</p>")
+    card("Dividend & Capital Allocation", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(4))}</p>")
     st.markdown("---")
 
     # ---------------- 6. Management ----------------
     st.markdown('<div class="swf-section-title">6. Management &amp; Leadership</div>', unsafe_allow_html=True)
     if m.get('company_officers'): 
         st.dataframe(pd.DataFrame([{"Name": o.get('name', 'N/A'), "Position": o.get('title', 'N/A')} for o in m['company_officers']]), use_container_width=True, hide_index=True)
-    card("Management & Compensation", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(5))}</p>")
+    card("Management & Compensation", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(5))}</p>")
     st.markdown("---")
 
     # ---------------- 7. Ownership ----------------
@@ -321,12 +456,12 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
         if "Data Unavailable" not in m['shareholding']:
             st.caption("‘Promoters’ here reflects the data source's insider-holding figure, which approximates but is not identical to official promoter-group disclosure (e.g. does not capture pledging).")
     render_corporate_events_and_mfs(m.get('calendar'), m.get('mutual_funds'))
-    card("Ownership Analysis", f"<p style='color:#c9d1d9; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(6))}</p>")
+    card("Ownership Analysis", f"<p style='color:{TEXT_BODY}; font-size:0.85em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(6))}</p>")
     st.markdown("---")
 
     # ---------------- 8. Verdict ----------------
     st.markdown('<div class="swf-section-title">8. Verdict &amp; Summary</div>', unsafe_allow_html=True)
-    st.markdown(f"<div style='font-size:1.15em; margin-bottom:4px;'><b>Composite System Verdict:</b> <span style='color:{rc}; font-weight:bold;'>{current_rating}</span></div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='font-size:1.05em; margin-bottom:8px; display:flex; align-items:center; gap:10px;'><b>Composite System Verdict:</b> {verdict_pill(current_rating)}</div>", unsafe_allow_html=True)
     _dc = m.get('data_completeness')
     if _dc is not None:
         _dc_pct = round(float(_dc) * 100 if float(_dc) <= 1 else float(_dc), 0)
@@ -356,7 +491,7 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
             f"""
             <div style="background-color: rgba(56, 189, 248, 0.1); border: 1px solid {BLUE}; border-radius: 8px; padding: 15px; margin-bottom: 20px;">
                 <div style="color: {BLUE}; font-weight: 700; font-size: 1.1em; margin-bottom: 5px;">💡 Recommended Sector Alternative</div>
-                <div style="font-size: 0.9em; color: #E6E6E6; margin-bottom: 8px;">
+                <div style="font-size: 0.9em; color: {TEXT}; margin-bottom: 8px;">
                     This stock scored poorly. Run through the same analysis engine, this sector peer independently comes back <span style="color:{GREEN};font-weight:700;">STRONG BUY</span> right now:
                 </div>
                 <div style="display: flex; gap: 20px; font-weight: 600; flex-wrap: wrap;">
@@ -384,9 +519,9 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
         html = "<ul style='padding-left: 20px; margin-bottom: 0; font-size: 0.9em;'>"
         for label, _, desc in items:
             if is_pro:
-                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b>{html_escape(str(label))}</b><br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
+                html += f"<li style='margin-bottom: 8px; color: {TEXT};'><b>{html_escape(str(label))}</b><br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
             else:
-                html += f"<li style='margin-bottom: 8px; color: #E6E6E6;'><b style='color: {RED};'>Failed:</b> {html_escape(str(label))}<br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
+                html += f"<li style='margin-bottom: 8px; color: {TEXT};'><b style='color: {RED};'>Failed:</b> {html_escape(str(label))}<br><span style='color: {MUTED}; font-size: 0.85em;'>{html_escape(str(desc))}</span></li>"
         html += "</ul>"
         return html
 
@@ -394,7 +529,7 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
     with pc1: card("✅ Quantitative Strengths", render_pro_con_list(pros, is_pro=True))
     with pc2: card("⚠️ Quantitative Weaknesses", render_pro_con_list(cons, is_pro=False))
 
-    card("Narrative Summary", f"<p style='color:#c9d1d9; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(7))}</p>")
+    card("Narrative Summary", f"<p style='color:{TEXT_BODY}; font-size:0.9em; line-height:1.6em; white-space:pre-wrap;'>{style_verdict_text(narrative_for(7))}</p>")
     st.caption("This report combines sector-normalized checklists, a sector-aware intrinsic valuation model, an ATR/volume-profile risk model, a trend-based time estimate, and a lightweight news/catalyst scan.")
 
 # ============================================================
