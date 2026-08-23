@@ -12,7 +12,7 @@ import requests
 import streamlit as st
 import yfinance as yf
 from athenaeum.utils.helpers import (
-    to_float, is_valid_metric, make_metric, _rfr_value, _rfr_source,
+    to_float, is_valid_metric, make_metric, _rfr_value, _rfr_source, safe_pct_change,
 )
 from athenaeum.models.sector import is_financial_sector, classify_sector_profile
 from athenaeum.analysis.sentiment import scan_news_sentiment, extract_order_book_signal
@@ -140,12 +140,22 @@ def fetch_fmp_data(ticker_clean: str) -> dict:
             ("totalRevenue","revenue"),("ebit","operatingIncome"),
             ("netIncome","netIncome"),("ebitda","ebitda"),
             ("eps","eps"),("interestExpense","interestExpense")]})
-        if len(inc) >= 2 and inc[1].get("netIncome"):
-            ni_now, ni_p = (l.get("netIncome") or 0), (inc[1].get("netIncome") or 1)
-            out["pat_yoy"] = round(((ni_now - ni_p) / abs(ni_p)) * 100, 2)
-            if len(inc) >= 3:
-                ni_p2 = inc[2].get("netIncome") or 1
-                out["pat_yoy_prior"] = round(((ni_p - ni_p2) / abs(ni_p2)) * 100, 2)
+        if len(inc) >= 2:
+            ni_now = l.get("netIncome")
+            ni_p_raw = inc[1].get("netIncome")
+            pat_yoy = safe_pct_change(ni_now, ni_p_raw)
+            if pat_yoy is not None:
+                out["pat_yoy"] = round(pat_yoy, 2)
+                if len(inc) >= 3:
+                    ni_p2_raw = inc[2].get("netIncome")
+                    # Previously `inc[2].get("netIncome") or 1` with no zero
+                    # guard at all — a genuinely zero two-periods-back net
+                    # income silently substituted a fake ₹1 divisor instead of
+                    # correctly skipping the metric. safe_pct_change() handles
+                    # this the same way pat_yoy above does.
+                    pat_yoy_prior = safe_pct_change(ni_p_raw, ni_p2_raw)
+                    if pat_yoy_prior is not None:
+                        out["pat_yoy_prior"] = round(pat_yoy_prior, 2)
 
     if bs and isinstance(bs, list) and bs:
         b = bs[0]
@@ -157,9 +167,11 @@ def fetch_fmp_data(ticker_clean: str) -> dict:
 
     if ae and isinstance(ae, list) and len(ae) > 0:
         out["forwardEps"] = ae[0].get("estimatedEpsAvg")
-        if len(ae) >= 2 and ae[1].get("estimatedEpsAvg") and ae[0].get("estimatedEpsAvg"):
-            eps_now = ae[0]["estimatedEpsAvg"]; eps_p = ae[1]["estimatedEpsAvg"] or 1
-            out["analyst_growth_pct"] = round(((eps_now - eps_p) / abs(eps_p)) * 100, 2)
+        if len(ae) >= 2:
+            # Was `ae[1]["estimatedEpsAvg"] or 1` — same zero-base fix as pat_yoy above.
+            analyst_growth = safe_pct_change(ae[0].get("estimatedEpsAvg"), ae[1].get("estimatedEpsAvg"))
+            if analyst_growth is not None:
+                out["analyst_growth_pct"] = round(analyst_growth, 2)
 
     if hist and hist.get("historical"):
         hdf = pd.DataFrame(hist["historical"])
@@ -317,6 +329,7 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
     pnl_df, bs_df, cf_df = pd.DataFrame(), pd.DataFrame(), pd.DataFrame()
     net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
     revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
+    effective_tax_rate_pct = None
     fcf_history = None
     pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
     latest_quarter_net_income = None
@@ -330,10 +343,14 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
             if len(ni_series) > 0:
                 net_inc = float(ni_series.iloc[:4].sum())
                 latest_quarter_net_income = float(ni_series.iloc[0])
-            if len(ni_series) >= 2 and ni_series.iloc[1] != 0:
-                pat_qoq = round(((ni_series.iloc[0] - ni_series.iloc[1]) / abs(ni_series.iloc[1])) * 100, 2)
-            if len(ni_series) >= 5 and ni_series.iloc[4] != 0:
-                pat_yoy_pct = round(((ni_series.iloc[0] - ni_series.iloc[4]) / abs(ni_series.iloc[4])) * 100, 2)
+            if len(ni_series) >= 2:
+                pat_qoq = safe_pct_change(ni_series.iloc[0], ni_series.iloc[1])
+                if pat_qoq is not None:
+                    pat_qoq = round(pat_qoq, 2)
+            if len(ni_series) >= 5:
+                pat_yoy_pct = safe_pct_change(ni_series.iloc[0], ni_series.iloc[4])
+                if pat_yoy_pct is not None:
+                    pat_yoy_pct = round(pat_yoy_pct, 2)
             rev_key_found = next((k for k in revenue_keys if k in q_fin.index), None)
             if rev_key_found and len(ni_series) > 0:
                 rev_series = q_fin.loc[rev_key_found].dropna()
@@ -361,6 +378,24 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
                 ii_series = fin.loc[ii_key_found].dropna()
                 if len(ii_series) > 0:
                     interest_income_latest = float(ii_series.iloc[0])
+            # Effective tax rate, for WACC/ROIC (NOPAT) — prefer yfinance's own
+            # pre-computed "Tax Rate For Calcs" row when present (already a
+            # decimal fraction); otherwise derive Tax Provision / Pretax
+            # Income directly. Left as None (caller falls back to the
+            # statutory default) if neither is available or the result is
+            # implausible — this is real company data when present, not a
+            # generic assumption presented as one.
+            if 'Tax Rate For Calcs' in fin.index:
+                tr_series = fin.loc['Tax Rate For Calcs'].dropna()
+                if len(tr_series) > 0 and 0 < float(tr_series.iloc[0]) < 0.60:
+                    effective_tax_rate_pct = float(tr_series.iloc[0]) * 100
+            if effective_tax_rate_pct is None and 'Tax Provision' in fin.index and 'Pretax Income' in fin.index:
+                tp_series = fin.loc['Tax Provision'].dropna()
+                pti_series = fin.loc['Pretax Income'].dropna()
+                if len(tp_series) > 0 and len(pti_series) > 0 and pti_series.iloc[0]:
+                    implied_rate = float(tp_series.iloc[0]) / float(pti_series.iloc[0])
+                    if 0 < implied_rate < 0.60:
+                        effective_tax_rate_pct = implied_rate * 100
 
         bs = bal_future.result()
         if bs is not None and not bs.empty:
@@ -476,7 +511,16 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
         else:
             ev_val = info.get("enterpriseValue")
             if not is_valid_metric(ev_val) and mcap:
-                ev_val = mcap + (info.get('totalDebt') or total_debt_yf or 0) - (info.get('totalCash') or 0)
+                # Was `(info.get('totalDebt') or total_debt_yf or 0)` — if
+                # totalDebt is a genuine 0 (a debt-free company), that falsy 0
+                # would fall through to total_debt_yf instead of being kept,
+                # letting a possibly-stale/differently-classified secondary
+                # figure silently override a correct zero. None-check instead
+                # of truthy-check so a real 0 is respected.
+                debt_for_ev = info.get('totalDebt')
+                if debt_for_ev is None:
+                    debt_for_ev = total_debt_yf if total_debt_yf is not None else 0
+                ev_val = mcap + debt_for_ev - (info.get('totalCash') or 0)
             if is_valid_metric(ebitda_val) and is_valid_metric(ev_val) and float(ebitda_val) != 0:
                 ev_ebitda = round(float(ev_val) / float(ebitda_val), 2)
             elif is_valid_metric(info.get("ev_ebitda")):
@@ -557,6 +601,16 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
         jpb_ratio, jpb_value = justified_pb_fair_value(roe_raw * 100 if roe_is_known else None, ke_preview, growth_preview, bvps)
         ddm_val = ddm_fair_value(div_per_share, ke_preview, growth_preview)
     temp_metrics["justified_pb"] = jpb_ratio
+
+    # Threaded through `info` (rather than new positional params) since
+    # run_predictive_pipeline already receives `info` and reads from it —
+    # these feed compute_wacc/compute_roic inside the pipeline, using the
+    # SAME ke_pct the pipeline already computes rather than a new redundant
+    # CAPM calculation (see the ke_preview/growth_preview divergence noted
+    # elsewhere for why a second, independent Ke is worth avoiding).
+    info['ebit_latest'] = ebit_latest
+    info['interest_exp_latest'] = interest_exp_latest
+    info['effective_tax_rate_pct'] = effective_tax_rate_pct
 
     predictive_data = run_predictive_pipeline(
         info, hist_full, fcf_history, sector, industry, fundamental_score,
@@ -656,6 +710,7 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
         "pnl_df": pnl_df, "bs_df": bs_df, "cf_df": cf_df,
         "predictive": predictive_data, "fair_value": predictive_data['target_price'],
         "currency": currency_symbol, "fundamental_score": fundamental_score,
+        "data_source": data_source,
     }
 
     # --- SECTOR ALTERNATIVE SCANNER ---
