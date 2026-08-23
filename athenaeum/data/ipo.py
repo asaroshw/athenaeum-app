@@ -1,8 +1,11 @@
 """Indian IPO data: Screener primary, Chittorgarh, ipomarket, AI GMP."""
 from __future__ import annotations
+import difflib
 import logging
 import re
 import time
+import urllib.robotparser
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 import requests
@@ -13,15 +16,16 @@ import plotly.express as px
 
 from athenaeum.utils.helpers import (
     html_escape_fn, _parse_date_flex, _parse_money_inr, _parse_gmp, _parse_price_band,
-    _slug_from_href, _classify_bucket, to_float,
+    _slug_from_href, to_float,
 )
 html_escape = html_escape_fn
 
-from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG, BG, GOLD
+from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG, BG, GOLD, TEXT, TEXT_BODY
 from athenaeum.data.equity import fetch_google_news
 from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
 from athenaeum.utils.helpers import style_verdict_text, rating_color
+from athenaeum.ui.components import verdict_pill, status_pill
 
 logger = logging.getLogger("athenaeum")
 _IPO_HEADERS = {
@@ -31,6 +35,43 @@ _IPO_HEADERS = {
     ),
     "Accept-Language": "en-IN,en;q=0.9",
 }
+
+# Per-domain robots.txt cache (process lifetime — robots.txt changes rarely
+# enough that re-fetching before every single request would be wasteful).
+# Added alongside the ipopremium.in scraper specifically because that site's
+# robots.txt could not be manually verified during development (network
+# access for the fetch/search tooling used to build this app could not
+# retrieve it in that session). Rather than ship a scraper resting on an
+# unverified assumption, every _http_get call — for all four sources, not
+# only the new one — now checks robots.txt programmatically at runtime.
+_ROBOTS_CACHE: dict = {}
+
+
+def _robots_allow(url: str) -> bool:
+    """True if robots.txt for `url`'s domain permits fetching it (or if
+    robots.txt can't be retrieved/parsed at all — a missing or unreachable
+    robots.txt is conventionally treated as "no restriction," not as a
+    disallow signal; only an explicit Disallow rule blocks a fetch here)."""
+    try:
+        parsed = urlparse(url)
+        domain_root = f"{parsed.scheme}://{parsed.netloc}"
+    except Exception:
+        return True
+    if domain_root not in _ROBOTS_CACHE:
+        rp = urllib.robotparser.RobotFileParser()
+        rp.set_url(f"{domain_root}/robots.txt")
+        try:
+            rp.read()
+            _ROBOTS_CACHE[domain_root] = rp
+        except Exception:
+            _ROBOTS_CACHE[domain_root] = None  # unreachable -> fail open
+    rp = _ROBOTS_CACHE[domain_root]
+    if rp is None:
+        return True
+    try:
+        return rp.can_fetch(_IPO_HEADERS["User-Agent"], url)
+    except Exception:
+        return True
 
 
 def _http_get(url, headers=None, timeout=20, retries=2):
@@ -42,10 +83,14 @@ def _http_get(url, headers=None, timeout=20, retries=2):
     sees a blank tab for the full cache window even though the source was
     fine a few seconds later. This trades a little latency on the rare
     failing request for materially better reliability on the common case.
-    Returns the Response on a 200, or None if every attempt failed —
-    callers already treat None/non-200 as "source unavailable right now"
-    and degrade gracefully rather than raising.
+    Returns the Response on a 200, or None if every attempt failed, robots.txt
+    disallows the fetch, or the URL couldn't be parsed — callers already
+    treat None as "source unavailable right now" and degrade gracefully
+    rather than raising.
     """
+    if not _robots_allow(url):
+        logger.warning("Skipping fetch — robots.txt disallows: %s", url)
+        return None
     last_err = None
     for attempt in range(retries + 1):
         try:
@@ -308,6 +353,143 @@ def _scrape_chittorgarh_dashboard() -> list:
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def _scrape_ipopremium_list() -> list:
+    """Scrape ipopremium.in's homepage table to cross-reference GMP and dates.
+
+    Deliberately scoped to the single homepage list, not a per-IPO detail
+    crawl — "a fast scraper... to cross-reference GMPs and dates" is a list-
+    level cross-check, and one cached request every 30 minutes stays fast
+    and light regardless of how many IPOs are listed, unlike fetching
+    dozens of individual detail pages would be.
+
+    Two real quirks found while building this, both handled below:
+
+    1. The homepage renders TWO tables. One is header-only in a plain fetch
+       (Company Name / GMP Rumors * / Open / Close / Price / Lot Size /
+       Issue Size (cr) / LM / Allotment Date / Listing Date / Action) — it
+       is populated client-side by JavaScript this scraper does not
+       execute, so it always looks empty here. The actual data lives in a
+       SEPARATE, statically-rendered table with a different header set
+       (Company Name / Type / GMP (₹) / Open / Close / Price Band (₹) /
+       Listing Date). Matched by header signature, not position, so this
+       keeps working if the tables' order on the page changes.
+    2. Company names carry a parenthetical exchange/board suffix baked
+       directly into the name — "Lumino Industries Ltd (MAINBOARD)",
+       "Complete Sports & Management India Ltd (BSE SME)" — with
+       inconsistent casing ("Mainboard" vs "MAINBOARD"). Left in, this
+       would poison the merge engine: a record from this source would
+       normalize differently from the same company's record on any other
+       source, and the two would never merge — the exact class of bug the
+       merge engine above exists to fix. Stripped here at the source, plus
+       _normalize_company_name also strips a bare trailing parenthetical as
+       defense-in-depth for whatever the next new source's convention is.
+    """
+    r = _http_get("https://www.ipopremium.in/")
+    if r is None:
+        return []
+    try:
+        soup = BeautifulSoup(r.text, "html.parser")
+    except Exception as e:
+        logger.warning("Failed to parse ipopremium.in: %s", e)
+        return []
+
+    target_table = None
+    target_headers = []
+    for table in soup.find_all("table"):
+        rows = table.find_all("tr")
+        if not rows:
+            continue
+        headers = [c.get_text(" ", strip=True).lower() for c in rows[0].find_all(["th", "td"])]
+        if any("company" in h for h in headers) and any("gmp" in h for h in headers) \
+                and any("price band" in h for h in headers):
+            target_table = table
+            target_headers = headers
+            break
+    if target_table is None:
+        logger.warning("ipopremium.in: could not find the populated IPO table "
+                        "(page structure may have changed).")
+        return []
+
+    def col_index(*keys):
+        for i, h in enumerate(target_headers):
+            if any(k in h for k in keys):
+                return i
+        return None
+
+    idx_name = col_index("company")
+    idx_gmp = col_index("gmp")
+    idx_open = col_index("open")
+    idx_close = col_index("close")
+    idx_band = col_index("price band")
+    idx_listing = col_index("listing date", "listing")
+    if idx_name is None:
+        return []
+
+    today = datetime.today().date()
+    results = []
+    for row in target_table.find_all("tr")[1:]:
+        cells = row.find_all(["td", "th"])
+        if len(cells) <= idx_name:
+            continue
+        texts = [c.get_text(" ", strip=True) for c in cells]
+
+        a = row.find("a", href=True)
+        detail_url = a["href"] if a and a["href"].startswith("http") else \
+            (f"https://www.ipopremium.in{a['href']}" if a else "")
+        slug = _slug_from_href(detail_url) or None
+        if not slug and detail_url:
+            m = re.search(r"/view/ipo/\d+/([a-z0-9\-]+)", detail_url)
+            slug = m.group(1) if m else None
+
+        name_raw = texts[idx_name]
+        # Strip the glued-on exchange/board suffix — see docstring point 2.
+        name = re.sub(r"\s*\((?:mainboard|bse sme|nse sme|sme)\)\s*$", "", name_raw, flags=re.IGNORECASE).strip()
+        if not name:
+            continue
+        if not slug:
+            slug = re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
+
+        open_d = _parse_date_flex(texts[idx_open]) if idx_open is not None and idx_open < len(texts) else None
+        close_d = _parse_date_flex(texts[idx_close]) if idx_close is not None and idx_close < len(texts) else None
+        listing_s = texts[idx_listing] if idx_listing is not None and idx_listing < len(texts) else ""
+
+        plo, phi = (None, None)
+        if idx_band is not None and idx_band < len(texts):
+            plo, phi = _parse_price_band(texts[idx_band])
+            if plo == 0 and phi == 0:  # "0–0" placeholder for a not-yet-priced IPO
+                plo, phi = None, None
+
+        gmp_v = to_float(texts[idx_gmp]) if idx_gmp is not None and idx_gmp < len(texts) else None
+        gmp_pct_v = round((gmp_v / phi) * 100, 2) if (gmp_v is not None and phi) else None
+
+        # This source has no explicit status column — derive a light hint
+        # from dates so _bucket_ipo has something beyond raw dates alone to
+        # cross-check; the dates themselves remain the authoritative signal.
+        if close_d is not None and close_d < today:
+            status_hint = "CLOSED"
+        elif open_d is not None and open_d > today:
+            status_hint = "UPCOMING"
+        elif open_d is not None:
+            status_hint = "OPEN"
+        else:
+            status_hint = ""
+
+        results.append({
+            "symbol": slug, "slug": slug, "name": name, "status": status_hint,
+            "date": texts[idx_open] if idx_open is not None and idx_open < len(texts) else "",
+            "open_date": open_d.isoformat() if open_d else None,
+            "close_date": close_d.isoformat() if close_d else None,
+            "price_low": plo, "price_high": phi,
+            "price_band_str": f"₹{plo:g}–₹{phi:g}" if (plo and phi) else "",
+            "gmp": gmp_v, "gmp_pct": gmp_pct_v,
+            "gmp_str": f"₹{gmp_v:g} ({gmp_pct_v:+.1f}%)" if (gmp_v is not None and gmp_pct_v is not None) else "",
+            "listing_date_str": listing_s,
+            "exchange": "NSE/BSE", "detail_url": detail_url, "source": "ipopremium",
+        })
+    return results
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def _scrape_screener_ipo_list() -> dict:
     out = {"current": [], "closed": [], "upcoming": []}
     H = _IPO_HEADERS
@@ -564,37 +746,77 @@ def _normalize_company_name(name):
     """Normalize a company name to a short dedup key.
 
     Strips common legal-entity suffixes and generic sector words, then truncates.
-    Uses a MINIMUM length guard (≥4 chars after stripping) so that short names
-    like 'AB Corp' and 'AB Ltd' do not collapse to the same 2-char key and
-    falsely merge two completely different companies.
+    Uses a MINIMUM length guard (≥5 chars after stripping — raised from the
+    original ≥4, see below) so that short names like 'AB Corp' and 'AB Ltd'
+    do not collapse to the same 2-char key and falsely merge two completely
+    different companies.
     """
     if not name:
         return ""
     n = name.lower()
+    # Strip any trailing parenthetical annotation — "(Mainboard)", "(BSE
+    # SME)", "(NSE SME)" (ipopremium.in glues an exchange/board tag directly
+    # onto the company name, inconsistently cased). Defense-in-depth: the
+    # ipopremium.in scraper already strips its own specific known suffixes
+    # at the source, but a bare parenthetical strip here catches whatever
+    # the next new source's equivalent convention turns out to be, without
+    # needing to enumerate it in advance.
+    n = re.sub(r"\s*\([^)]*\)\s*$", "", n).strip()
     # Treat '&' and the word 'and' as the same connector before anything else —
     # otherwise 'Wire & Engineering' and 'Wire and Engineering Limited' (a real
     # duplicate-entry pattern observed on ipomarket.in itself) produce different
     # keys and end up as two separate, non-deduplicated rows.
     n = re.sub(r"\s*&\s*", " and ", n)
     n = re.sub(r"\band\b", "", n)
-    # Strip legal suffixes and very generic sector nouns
+    # Strip legal suffixes and very generic sector nouns. Expanded to include
+    # common ABBREVIATIONS of the same words (Ltd/Ld, Corp/Corpn, Co/Cos) —
+    # aggregators frequently differ only in which abbreviation they use for
+    # the identical legal suffix, and the original list only had the one
+    # spelling of each, so two sources' records for the same company
+    # produced different keys and never merged.
     for term in [
-        "ltd", "limited", "private", "pvt", "co", "company",
-        "corporation", "corp", "enterprises", "holdings", "group",
+        "ltd", "limited", "ld", "private", "pvt", "p", "co", "cos", "company",
+        "corporation", "corp", "corpn", "enterprises", "enterprise",
+        "holdings", "holding", "group", "grp",
     ]:
         n = re.sub(rf"\b{term}\b", "", n)
-    # Strip sector words only when the remaining key would still be ≥4 chars
+    # Strip sector words only when the remaining key would still be ≥5 chars
+    # (raised from ≥4 — see MIN_SECTOR_STRIP_LEN below). Also expanded with
+    # common abbreviations of the same sector words (Inds/Ind for Industries,
+    # Engrs/Engineers alongside Engg/Engineering, Mfg for Manufacturing,
+    # Intl for International, Tech/Technology already covered both ways) —
+    # this is the specific gap behind the "Lumino Inds" vs "Lumino
+    # Industries" duplicate: "Industries" was stripped, "Inds" was not, so
+    # the same company produced two different keys depending on which
+    # source's abbreviation convention was used.
     sector_words = [
-        "food", "foods", "engg", "engineering", "medicare",
-        "industries", "technologies", "tech", "solutions",
-        "infra", "infrastructure", "labs", "pharmaceuticals",
-        "pharma", "dairy",
+        "food", "foods", "engg", "engineering", "engineers", "engineer", "engrs",
+        "medicare", "healthcare",
+        "industries", "industry", "inds", "ind",
+        "technologies", "technology", "tech",
+        "solutions", "soln",
+        "infra", "infrastructure",
+        "labs", "laboratories", "laboratory",
+        "pharmaceuticals", "pharmaceutical", "pharma",
+        "international", "intl",
+        "national", "natl",
+        "manufacturing", "mfg",
+        "dairy",
     ]
+    # MIN_SECTOR_STRIP_LEN=5, not 4: at 4, "Apex Industries" and "Apex Pharma"
+    # BOTH strip down to the generic remainder "apex" and would incorrectly
+    # merge as the same company — a real false-positive risk discovered while
+    # calibrating this fix, and one the original ≥4 guard did not catch since
+    # it was only ever exercised by short-name legal-suffix cases like
+    # 'AB Corp'/'AB Ltd', not by common single-word brand names paired with a
+    # sector word. Verified against every existing normalization test plus
+    # this case in test_ipo_pure_logic.py before changing the constant.
+    MIN_SECTOR_STRIP_LEN = 5
     n_stripped = n
     for term in sector_words:
         candidate = re.sub(rf"\b{term}\b", "", n_stripped)
         cleaned = re.sub(r"[^a-z0-9]", "", candidate)
-        if len(cleaned) >= 4:
+        if len(cleaned) >= MIN_SECTOR_STRIP_LEN:
             n_stripped = candidate
     key = re.sub(r"[^a-z0-9]", "", n_stripped)[:16]
     # If we stripped too much and ended up with <4 chars, fall back to a slug of the raw name
@@ -603,58 +825,129 @@ def _normalize_company_name(name):
     return key
 
 
-def _merge_ipo_records(primary: list, secondary: list) -> list:
-    by = {}
-    for rec in primary:
-        k = _normalize_company_name(rec.get("name") or rec.get("slug"))
-        if k:
-            by[k] = dict(rec)
+def _leading_token(name):
+    """First alphanumeric token of a company name, lowercased — used as a
+    cheap guard on fuzzy matching below. Company names are almost always
+    distinguished by their lead word ('Force Motors' vs 'Force Intermediate
+    Products' are different companies despite both starting with 'Force' and
+    scoring reasonably on raw string similarity), so requiring the lead
+    token to match before trusting a fuzzy match blocks the most likely
+    false-positive shape without needing a much stricter (and more
+    false-negative-prone) similarity threshold."""
+    if not name:
+        return ""
+    words = re.findall(r"[a-z0-9]+", name.lower())
+    return words[0] if words else ""
 
-    for rec in secondary:
-        k = _normalize_company_name(rec.get("name") or rec.get("slug"))
+
+def _fuzzy_key_match(key, first_token, candidate_keys_with_tokens, threshold=0.90):
+    """Find an existing (key, first_token) pair that `key`/`first_token`
+    should be treated as the same company as, when no EXACT key match was
+    found. Returns the matched key, or None.
+
+    Exact-key matching (via the expanded _normalize_company_name above)
+    handles every abbreviation variant this codebase has actually observed.
+    This fuzzy fallback exists for the long tail it can't enumerate in
+    advance — typos, unfamiliar abbreviation styles, and especially new data
+    sources (like ipopremium.in) whose exact naming conventions haven't been
+    seen yet. difflib.SequenceMatcher is stdlib-only, adequate for short
+    company-name strings, and avoids a new dependency for what is a bounded,
+    infrequent comparison (dozens of tracked IPOs at a time, not thousands).
+    """
+    if not key or not first_token:
+        return None
+    best_ratio, best_key = 0.0, None
+    for existing_key, existing_token in candidate_keys_with_tokens:
+        if existing_token != first_token:
+            continue  # leading-token guard — see _leading_token's docstring
+        ratio = difflib.SequenceMatcher(None, key, existing_key).ratio()
+        if ratio > best_ratio:
+            best_ratio, best_key = ratio, existing_key
+    return best_key if best_ratio >= threshold else None
+
+
+def _merge_ipo_field_values(base, rec):
+    """Merge one incoming record's fields into an existing base record,
+    filling any field that's empty in `base` with a non-empty value from
+    `rec` (never overwriting a value `base` already has). Shared by
+    _merge_ipo_records and _deduplicate_list so there is one merge
+    implementation, not two that can quietly drift apart.
+
+    Also tracks a `sources` provenance list — which aggregator(s) actually
+    contributed data to this merged record — the concrete answer to
+    "keeping the best data from each source" once more than two sources can
+    feed the same company (see ipopremium.in below)."""
+    for field, val in rec.items():
+        if field == "sources":
+            continue
+        if base.get(field) in (None, "", []) and val not in (None, "", []):
+            base[field] = val
+    incoming_sources = rec.get("sources") or ([rec["source"]] if rec.get("source") else [])
+    if incoming_sources:
+        existing_sources = base.get("sources") or ([base["source"]] if base.get("source") else [])
+        base["sources"] = sorted(set(existing_sources) | set(incoming_sources))
+    return base
+
+
+def _resolve_ipo_key(raw_name, existing_keys, key_tokens, key_order):
+    """Normalized key for `raw_name`, reusing an existing key if either an
+    EXACT normalized-name match or a fuzzy match (see _fuzzy_key_match)
+    already exists in `existing_keys`. Returns None if raw_name is empty."""
+    k = _normalize_company_name(raw_name)
+    if not k:
+        return None
+    if k in existing_keys:
+        return k
+    tok = _leading_token(raw_name)
+    fuzzy_key = _fuzzy_key_match(k, tok, [(kk, key_tokens[kk]) for kk in key_order])
+    return fuzzy_key if fuzzy_key else k
+
+
+def _merge_ipo_records(primary: list, secondary: list) -> list:
+    """Merge two IPO record lists into one. Two records are treated as the
+    same company if their normalized names match exactly, OR — when no exact
+    match exists — if they pass the difflib fuzzy check (_fuzzy_key_match):
+    same leading word AND ≥90% string similarity on the normalized key. The
+    exact-match path (via _normalize_company_name's expanded abbreviation
+    list) handles every variant this codebase has actually seen; the fuzzy
+    path is the net under it for whatever the next new source's naming
+    convention turns out to be."""
+    by, tokens, key_order = {}, {}, []
+    for rec in list(primary) + list(secondary):
+        raw_name = rec.get("name") or rec.get("slug")
+        k = _resolve_ipo_key(raw_name, by, tokens, key_order)
         if not k:
             continue
-        if k not in by:
+        if k in by:
+            by[k] = _merge_ipo_field_values(by[k], rec)
+        else:
             by[k] = dict(rec)
-            continue
-
-        base = by[k]
-        for field in ("price_low", "price_high", "price_band_str", "lot_size", "min_investment",
-                      "gmp", "gmp_pct", "gmp_str", "subscription_str", "issue_size_cr",
-                      "issue_size_str", "detail_url", "open_date", "close_date", "date",
-                      "listing_gain_pct", "listing_price", "listing_date_str"):
-            if base.get(field) in (None, "", []) and rec.get(field) not in (None, "", []):
-                base[field] = rec[field]
-        # Prefer the source that had actual date information
-        if base.get("open_date") is None and rec.get("open_date"):
-            base["open_date"] = rec["open_date"]
-        if base.get("close_date") is None and rec.get("close_date"):
-            base["close_date"] = rec["close_date"]
-        # Keep the status from whichever source is more trustworthy (non-blank wins)
-        if not base.get("status") and rec.get("status"):
-            base["status"] = rec["status"]
-        by[k] = base
-
+            tokens[k] = _leading_token(raw_name)
+            key_order.append(k)
     return list(by.values())
 
 
 def _deduplicate_list(items: list) -> list:
-    unique = {}
+    """Collapse a single list to one record per company. Uses the same
+    exact-then-fuzzy matching and field-merge logic as _merge_ipo_records —
+    this used to be a separate, purely-exact-match implementation that could
+    (and did) disagree with _merge_ipo_records about whether two records
+    were the same company."""
+    by, tokens, key_order = {}, {}, []
     for item in items:
-        name = item.get("name") or item.get("slug") or ""
-        k = _normalize_company_name(name)
+        raw_name = item.get("name") or item.get("slug") or ""
+        k = _resolve_ipo_key(raw_name, by, tokens, key_order)
         if not k:
-            k = re.sub(r"[^a-z0-9]", "", name.lower())[:16]
+            k = re.sub(r"[^a-z0-9]", "", raw_name.lower())[:16] or None
         if not k:
             continue
-        if k not in unique:
-            unique[k] = dict(item)
+        if k in by:
+            by[k] = _merge_ipo_field_values(by[k], item)
         else:
-            base = unique[k]
-            for field, val in item.items():
-                if base.get(field) in (None, "", []) and val not in (None, "", []):
-                    base[field] = val
-    return list(unique.values())
+            by[k] = dict(item)
+            tokens[k] = _leading_token(raw_name)
+            key_order.append(k)
+    return list(by.values())
 
 
 def _bucket_ipo(ipo: dict) -> str:
@@ -768,20 +1061,27 @@ def _bucket_ipo(ipo: dict) -> str:
 
 @st.cache_data(ttl=900, show_spinner=False)
 def fetch_ipo_list_categorized() -> dict:
-    # PERFORMANCE UPGRADE (Phase 1): these 5 scrapes hit independent external sites —
+    # PERFORMANCE UPGRADE (Phase 1): these scrapes hit independent external sites —
     # dispatch them concurrently instead of one after another. What each scraper
     # returns, and how results are merged/bucketed below, is unchanged.
-    with ThreadPoolExecutor(max_workers=5) as executor:
+    # ipopremium.in added as a 6th concurrent source (Phase: IPO pipeline
+    # fixes) — added AFTER the fuzzy-merge engine above was in place, by
+    # design: it enriches existing merged records (fills GMP/date gaps) via
+    # the same _merge_ipo_records pass every other source already goes
+    # through, rather than creating a new class of unmerged duplicate.
+    with ThreadPoolExecutor(max_workers=6) as executor:
         scr_future = executor.submit(_scrape_screener_ipo_list)
         chitt_future = executor.submit(_scrape_chittorgarh_dashboard)
         open_future = executor.submit(_scrape_ipomarket_list, "/ipo/open")
         upcoming_future = executor.submit(_scrape_ipomarket_list, "/ipo/upcoming")
         listed_future = executor.submit(_scrape_ipomarket_list, "/ipo/listed")
+        ipopremium_future = executor.submit(_scrape_ipopremium_list)
         scr = scr_future.result()
         chitt = chitt_future.result()
         im_current = open_future.result()
         im_upcoming = upcoming_future.result()
         im_closed = listed_future.result()
+        ipopremium = ipopremium_future.result()
 
     # Per-source record counts, purely for diagnostics — if a source that
     # normally returns data comes back with 0, this is how you'd actually see
@@ -793,6 +1093,7 @@ def fetch_ipo_list_categorized() -> dict:
         "ipomarket_open":   len(im_current or []),
         "ipomarket_upcoming": len(im_upcoming or []),
         "ipomarket_listed": len(im_closed or []),
+        "ipopremium":       len(ipopremium or []),
     }
     if sum(source_health.values()) == 0:
         logger.warning("fetch_ipo_list_categorized: ALL sources returned zero records — "
@@ -800,7 +1101,7 @@ def fetch_ipo_list_categorized() -> dict:
 
     master_pool: list = []
     for lst in [scr.get("current"), scr.get("upcoming"), scr.get("closed"),
-                chitt, im_current, im_upcoming, im_closed]:
+                chitt, im_current, im_upcoming, im_closed, ipopremium]:
         if lst:
             master_pool = _merge_ipo_records(master_pool, lst)
 
@@ -1234,7 +1535,7 @@ def render_ipo_timeline(detail: dict) -> None:
         is_past = bool(d and d < today)
         is_today = bool(d and d == today)
         dot_color = GREEN if is_past else (ORANGE if is_today else MUTED)
-        text_color = "#c9d1d9" if (is_past or is_today) else MUTED
+        text_color = TEXT_BODY if (is_past or is_today) else MUTED
         cells.append(
             f"<div style='flex:1;min-width:100px;text-align:center;padding:0 4px;'>"
             f"<div style='width:10px;height:10px;border-radius:50%;background:{dot_color};"
@@ -1488,7 +1789,7 @@ def render_ipo_key_details_table(detail: dict) -> None:
         f"<div style='flex:1 1 220px; padding:10px 14px; border-bottom:1px solid {BORDER};'>"
         f"<div style='color:{MUTED}; font-size:0.72em; font-weight:700; text-transform:uppercase; letter-spacing:0.4px;'>"
         f"{html_escape(label)}</div>"
-        f"<div style='color:#FFFFFF; font-size:1.02em; font-weight:700; margin-top:3px;'>{html_escape(str(val))}</div>"
+        f"<div style='color:{TEXT}; font-size:1.02em; font-weight:700; margin-top:3px;'>{html_escape(str(val))}</div>"
         f"</div>"
         for label, val in rows
     )
@@ -1580,7 +1881,7 @@ def render_ipo_margins_table(detail: dict, fin_rows: list) -> None:
     body_rows = ""
     for label, vals in metric_rows:
         val_cells = "".join(
-            f"<td style='padding:8px 12px; text-align:right; color:#FFFFFF; font-size:0.9em;'>{v if v is not None else '—'}</td>"
+            f"<td style='padding:8px 12px; text-align:right; color:{TEXT}; font-size:0.9em;'>{v if v is not None else '—'}</td>"
             for v in vals
         )
         body_rows += f"<tr style='border-top:1px solid {BORDER};'><td style='padding:8px 12px; color:{MUTED}; font-size:0.85em; font-weight:600;'>{html_escape(label)}</td>{val_cells}</tr>"
@@ -1621,7 +1922,7 @@ def render_ipo_valuation_matrix(detail: dict, currency="₹") -> None:
         body_rows += (
             f"<tr style='border-top:1px solid {BORDER};'>"
             f"<td style='padding:8px 12px; color:{MUTED}; font-size:0.85em; font-weight:600;'>{label}</td>"
-            f"<td style='padding:8px 12px; text-align:right; color:#FFFFFF; font-size:0.9em;'>{pre_s}</td>"
+            f"<td style='padding:8px 12px; text-align:right; color:{TEXT}; font-size:0.9em;'>{pre_s}</td>"
             f"<td style='padding:8px 12px; text-align:right; color:{GOLD}; font-size:0.9em; font-weight:700;'>{post_s}</td>"
             f"</tr>"
         )
@@ -1747,7 +2048,6 @@ def _render_ipo_detail_view():
     sym    = detail.get("slug") or detail.get("symbol") or ""
     name   = detail.get("name", sym)
     score, verdict, pros, cons = score_ipo(detail, bucket=bucket)
-    vc = rating_color(verdict) if verdict else MUTED
 
     if st.button("← Back to IPO List"):
         st.session_state.selected_ipo = None
@@ -1757,19 +2057,18 @@ def _render_ipo_detail_view():
 
     right = ""
     if bucket == "current" and verdict:
-        right = (f"<div style='font-size:2em;font-weight:900;color:{vc};'>{verdict}</div>"
+        right = (f"<div style='margin-bottom:4px;'>{verdict_pill(verdict)}</div>"
                  f"<div style='color:{MUTED};font-size:0.85em;'>Score: {score}/100</div>")
     elif bucket == "closed":
         gain = detail.get("listing_gain_pct")
         if gain is not None:
-            gain_color = GREEN if gain >= 0 else RED
-            right = (f"<div style='font-size:1.4em;font-weight:800;color:{gain_color};'>"
-                     f"Listing {gain:+.1f}%</div>")
+            gain_tone = "green" if gain >= 0 else "red"
+            right = status_pill(f"Listing {gain:+.1f}%", tone=gain_tone)
         else:
             right = (f"<div style='color:{MUTED};'>Listing: "
                      f"{html_escape(str(detail.get('listing_date_str') or 'Pending'))}</div>")
     else:
-        right = f"<div style='color:{ORANGE};font-weight:700;'>UPCOMING</div>"
+        right = status_pill("Upcoming", tone="orange")
 
     st.markdown(f"""
     <div class="swf-card" style="margin-bottom:18px;">
@@ -1826,7 +2125,7 @@ def _render_ipo_detail_view():
 
     # ── Business overview ──────────────────────────────────────────────────
     card("Business Overview",
-         f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;'>"
+         f"<p style='color:{TEXT_BODY};font-size:0.9em;line-height:1.6;'>"
          f"{html_escape(str(detail.get('about') or 'Not available.'))}</p>")
 
     # ══════════════════════════════════════════════════════════════════════
@@ -1930,5 +2229,5 @@ def _render_ipo_detail_view():
     with st.spinner("Generating AI note..."):
         narr = ipo_ai_narrative(detail, score, verdict, pros, cons, bucket=bucket)
     card("Should You Invest? — AI Research Note",
-         f"<p style='color:#c9d1d9;font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>"
+         f"<p style='color:{TEXT_BODY};font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>"
          f"{style_verdict_text(narr)}</p>")
