@@ -6,6 +6,111 @@ from athenaeum.config import TERMINAL_GROWTH_PCT
 
 logger = logging.getLogger("athenaeum")
 
+# India's effective statutory corporate tax rate under the concessional regime
+# (22% base + 10% surcharge + 4% cess = 25.168%, commonly quoted as ~25.17%).
+# Used only as a fallback when an effective rate can't be derived from the
+# company's own tax expense / pretax income — i.e. this is a floor for
+# plausibility, not a substitute for the real figure when it's available.
+DEFAULT_STATUTORY_TAX_RATE_PCT = 25.17
+
+
+def compute_wacc(market_cap, total_debt, total_cash, ke_pct, interest_expense=None,
+                 effective_tax_rate_pct=None):
+    """Weighted Average Cost of Capital.
+
+    WACC = (E/V)*Ke + (D/V)*Kd*(1 - tax)
+
+    - E = market cap (market value of equity — standard practice; book value
+      of equity is not used here).
+    - D = total debt (book value — market value of debt is rarely observable
+      for non-traded corporate debt, so book value is the conventional proxy).
+    - Kd (pre-tax cost of debt) is derived from the company's OWN actual
+      interest burden: interest_expense / total_debt. This is a real,
+      company-specific borrowing cost, not a generic assumption. Falls back
+      to Ke - 2pp (a common rule-of-thumb spread when interest expense isn't
+      available) only when the real figure can't be computed — flagged via
+      the returned `kd_is_estimated` flag so a consumer can distinguish
+      "measured" from "assumed."
+    - Net debt (total_debt - total_cash) is NOT used for the D/V weighting —
+      WACC weights are conventionally based on gross financing (how the
+      business is actually funded), not the net-of-cash position; net debt
+      is the right adjustment for enterprise value bridges, not for capital
+      weights here.
+
+    Returns a dict: {wacc_pct, ke_pct, kd_pct, kd_is_estimated, tax_rate_pct,
+    weight_equity, weight_debt}, or None if market_cap is missing/non-positive
+    (WACC is undefined without a value for E).
+    """
+    if not market_cap or market_cap <= 0:
+        return None
+    total_debt = total_debt or 0
+    total_cash = total_cash or 0
+    tax_rate_pct = effective_tax_rate_pct if (effective_tax_rate_pct and 0 < effective_tax_rate_pct < 60) \
+        else DEFAULT_STATUTORY_TAX_RATE_PCT
+
+    kd_is_estimated = True
+    kd_pct = max(ke_pct - 2.0, 3.0)  # rule-of-thumb spread fallback, floored at a plausible minimum
+    if interest_expense and total_debt > 0:
+        implied_kd = (interest_expense / total_debt) * 100
+        if 0 < implied_kd < 30:  # sanity band — outside this, the inputs are likely inconsistent/stale
+            kd_pct = implied_kd
+            kd_is_estimated = False
+
+    v = market_cap + total_debt
+    weight_equity = market_cap / v
+    weight_debt = total_debt / v
+    wacc_pct = (weight_equity * ke_pct) + (weight_debt * kd_pct * (1 - tax_rate_pct / 100))
+
+    return {
+        "wacc_pct": round(wacc_pct, 2),
+        "ke_pct": round(ke_pct, 2),
+        "kd_pct": round(kd_pct, 2),
+        "kd_is_estimated": kd_is_estimated,
+        "tax_rate_pct": round(tax_rate_pct, 2),
+        "weight_equity": round(weight_equity, 3),
+        "weight_debt": round(weight_debt, 3),
+    }
+
+
+def compute_roic(ebit, total_debt, total_equity, total_cash, effective_tax_rate_pct=None):
+    """Return on Invested Capital, and its spread over WACC (economic profit).
+
+    ROIC = NOPAT / Invested Capital
+         = [EBIT * (1 - tax rate)] / (Total Debt + Total Equity - Cash)
+
+    Invested capital nets out cash here (unlike the WACC weighting above) —
+    cash is a non-operating asset earning close to the risk-free rate, and
+    netting it out is standard practice for measuring the return the
+    operating business itself generates on the capital actually deployed
+    into it. Returns None if invested capital is non-positive (e.g. a
+    company with more cash than debt+equity, or missing balance-sheet data)
+    since ROIC is not meaningful in that case.
+    """
+    if ebit is None:
+        return None
+    total_debt = total_debt or 0
+    total_cash = total_cash or 0
+    if total_equity is None:
+        return None
+    invested_capital = total_debt + total_equity - total_cash
+    if invested_capital <= 0:
+        return None
+    tax_rate_pct = effective_tax_rate_pct if (effective_tax_rate_pct and 0 < effective_tax_rate_pct < 60) \
+        else DEFAULT_STATUTORY_TAX_RATE_PCT
+    nopat = ebit * (1 - tax_rate_pct / 100)
+    roic_pct = (nopat / invested_capital) * 100
+    return round(roic_pct, 2)
+
+
+def economic_profit_spread(roic_pct, wacc_pct):
+    """ROIC - WACC, in percentage points. Positive means the business is
+    creating economic value on the capital invested in it; negative means it
+    is earning less than its cost of capital despite possibly being
+    accounting-profitable. Returns None if either input is missing."""
+    if roic_pct is None or wacc_pct is None:
+        return None
+    return round(roic_pct - wacc_pct, 2)
+
 def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=None):
     """Fix 12: pb_cap is dynamic — high-ROE institutions (ROE>20%) justify >8x P/B."""
     if pb_cap is None:
