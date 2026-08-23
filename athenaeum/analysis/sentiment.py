@@ -3,12 +3,17 @@ from __future__ import annotations
 import logging
 import re
 import streamlit as st
-from athenaeum.config import CATALYST_KEYWORDS, RISK_KEYWORDS, ORDER_BOOK_KEYWORDS
+from athenaeum.config import CATALYST_KEYWORDS, RISK_KEYWORDS, ORDER_BOOK_KEYWORDS, GEMINI_MODEL
 from athenaeum.utils.helpers import to_float
 
 logger = logging.getLogger("athenaeum")
 GROWTH_PCT_PATTERN = re.compile(
-    r'(\d{1,2})\s*%\s*(?:growth|guidance)|(?:growth|guidance).{0,25}?(\d{1,2})\s*%',
+    # \d{1,3} (not \d{1,2}): a 2-digit cap silently mis-parses 3-digit headline
+    # percentages by matching only their last two digits — "125% growth" would
+    # capture "25" instead of being read correctly or rejected. Capturing the
+    # full number and leaning on the >40 rejection below (v <= 40) is what
+    # actually filters out implausible headline growth rates.
+    r'(\d{1,3})\s*%\s*(?:growth|guidance)|(?:growth|guidance).{0,25}?(\d{1,3})\s*%',
     re.IGNORECASE,
 )
 try:
@@ -31,11 +36,22 @@ def scan_news_sentiment(recent_news, business_summary):
     NEGATION = ['denies', 'deny', 'clears', 'cleared', 'no evidence', 'exonerated',
                 'completed successfully', 'dismissed', 'baseless', 'unfounded',
                 'false report', 'not involved', 'refutes', 'rejects claims']
+    # Words that flip a nominally-positive catalyst keyword negative, e.g. "profit"
+    # in "Q3 profit falls 30%" or "surge" in "input costs surge on weak rupee".
+    # RISK_KEYWORDS already got a symmetric negation check (has_neg, below); catalyst
+    # keywords previously had no equivalent, so generic words like "profit" and
+    # "surge" scored as bullish regardless of the modifier attached to them.
+    DECLINE_WORDS = ['falls', 'fall', 'falling', 'declines', 'declined', 'decline',
+                      'drops', 'dropped', 'slumps', 'slumped', 'plunges', 'plunged',
+                      'misses', 'missed', 'cut', 'cuts', 'lowered', 'lowers',
+                      'disappoints', 'disappointing', 'shrinks', 'shrank', 'slips',
+                      'slipped', 'tumbles', 'tumbled', 'warns', 'warning']
     titles = [n.get('title', '') for n in (recent_news or [])]
     catalyst_hits, risk_hits, confirmed_risks = [], [], []
     for t in titles:
         tl = t.lower()
-        cats = [kw.strip() for kw in CATALYST_KEYWORDS if kw in tl]
+        has_decline = any(dw in tl for dw in DECLINE_WORDS)
+        cats = [] if has_decline else [kw.strip() for kw in CATALYST_KEYWORDS if kw in tl]
         risks = [kw.strip() for kw in RISK_KEYWORDS if kw in tl]
         catalyst_hits.extend(cats)
         risk_hits.extend(risks)
@@ -83,7 +99,7 @@ def _llm_news_score(titles):
             + "\n".join(f"- {t}" for t in titles)
         )
         resp = client.models.generate_content(
-            model="gemini-2.0-flash",
+            model=GEMINI_MODEL,
             contents=prompt,
             config=types.GenerateContentConfig(temperature=0.1),
         )
