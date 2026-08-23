@@ -5,7 +5,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import timedelta
 from athenaeum.config import (
-    GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE,
+    GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE, TEXT, GREEN_SOFT, RED_SOFT,
 )
 from athenaeum.utils.helpers import html_escape_fn, to_float, is_valid_metric, rating_color
 
@@ -45,7 +45,17 @@ def projection_path_chart(hist_df, target_price):
 
 def analysis_radar_chart(m, pred):
     categories = ['Fundamentals', 'Valuation', 'Momentum']
-    values = [m.get('fundamental_score', 50), pred.get('intrinsic_score', 50), pred.get('technical_score', 50)]
+    # .get(key, 50) only substitutes the neutral default when the key is
+    # entirely ABSENT — it does nothing when the key is present but explicitly
+    # None, which compute_fundamental_score legitimately returns for
+    # data-sparse companies. That None was going straight into Plotly's
+    # numeric polar-axis trace (silently swallowed by the try/except around
+    # this call upstream, so the radar chart just vanished). Explicit
+    # None-checks apply the neutral-midpoint fallback in that case too.
+    fund = m.get('fundamental_score')
+    intrinsic = pred.get('intrinsic_score')
+    tech = pred.get('technical_score')
+    values = [50 if fund is None else fund, 50 if intrinsic is None else intrinsic, 50 if tech is None else tech]
     fig = go.Figure()
     fig.add_trace(go.Scatterpolar(r=values + [values[0]], theta=categories + [categories[0]], fill='toself', fillcolor='rgba(234,179,8,0.35)', line=dict(color=GOLD, width=2)))
     fig.update_layout(polar=dict(bgcolor=BG, radialaxis=dict(visible=False, range=[0, 100]), angularaxis=dict(color=MUTED, gridcolor=BORDER)), showlegend=False, paper_bgcolor=BG, margin=dict(t=10, b=10, l=30, r=30), height=230)
@@ -66,10 +76,10 @@ def render_52week_range(current_price, low_52, high_52, currency="₹"):
     if current_price is None or low_52 is None or high_52 is None or high_52 <= low_52: return
     pct_position = max(0.0, min(100.0, ((current_price - low_52) / (high_52 - low_52)) * 100))
     fig = go.Figure()
-    fig.add_trace(go.Bar(x=[100], y=["Range"], orientation="h", marker=dict(color="#1F1F1F"), hoverinfo="none"))
-    fig.add_trace(go.Scatter(x=[pct_position], y=["Range"], mode="markers", marker=dict(color="#38BDF8", size=16, symbol="diamond"), name="Current Price"))
+    fig.add_trace(go.Bar(x=[100], y=["Range"], orientation="h", marker=dict(color=BORDER), hoverinfo="none"))
+    fig.add_trace(go.Scatter(x=[pct_position], y=["Range"], mode="markers", marker=dict(color=BLUE, size=16, symbol="diamond"), name="Current Price"))
     fig.update_layout(height=50, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 100]), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), showlegend=False)
-    st.markdown(f"<div style='color:{MUTED}; font-size:0.85em; text-align:center;'><b>52W Low:</b> {currency}{low_52:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Current:</b> <span style='color:#E6E6E6;'>{currency}{current_price:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; <b>52W High:</b> {currency}{high_52:,.2f}</div>", unsafe_allow_html=True)
+    st.markdown(f"<div style='color:{MUTED}; font-size:0.85em; text-align:center;'><b>52W Low:</b> {currency}{low_52:,.2f} &nbsp;&nbsp;|&nbsp;&nbsp; <b>Current:</b> <span style='color:{TEXT};'>{currency}{current_price:,.2f}</span> &nbsp;&nbsp;|&nbsp;&nbsp; <b>52W High:</b> {currency}{high_52:,.2f}</div>", unsafe_allow_html=True)
     st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
 
 # --- ANGEL ONE COMPONENT: SMART SUMMARY CARDS ---
@@ -130,7 +140,7 @@ def render_technical_regime_badges(signals):
             f"{html_escape(str(title))}</div>"
             f"<div style='display:flex; align-items:center; gap:6px; margin-top:4px;'>"
             f"<span style='width:8px; height:8px; border-radius:50%; background:{clr}; display:inline-block;'></span>"
-            f"<span style='color:#FFFFFF; font-weight:800; font-size:1.05em;'>{html_escape(str(sig.get('label', 'N/A')))}</span>"
+            f"<span style='color:{TEXT}; font-weight:800; font-size:1.05em;'>{html_escape(str(sig.get('label', 'N/A')))}</span>"
             f"</div>"
             f"<div style='color:{MUTED}; font-size:0.75em; margin-top:2px;'>{html_escape(str(sig.get('detail', '')))}</div>"
             f"</div>"
@@ -165,21 +175,21 @@ def render_scorecard_badges(q_score, v_score, f_score):
             <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Quality</div>
             <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
                 <span style="color:{q_clr}; border:1px solid {q_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{q_lbl}</span>
-                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{q_rat}/5</span>
+                <span style="color:{TEXT}; font-weight:700; font-size:1em;">{q_rat}/5</span>
             </div>
         </div>
         <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:12px 18px; flex:1;">
             <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Valuation</div>
             <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
                 <span style="color:{v_clr}; border:1px solid {v_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{v_lbl}</span>
-                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{v_rat}/5</span>
+                <span style="color:{TEXT}; font-weight:700; font-size:1em;">{v_rat}/5</span>
             </div>
         </div>
         <div style="background:{CARD_BG}; border:1px solid {BORDER}; border-radius:8px; padding:12px 18px; flex:1;">
             <div style="color:{MUTED}; font-size:0.8em; font-weight:600; text-transform:uppercase;">Financial Health</div>
             <div style="margin-top:5px; display:flex; align-items:center; gap:10px;">
                 <span style="color:{f_clr}; border:1px solid {f_clr}; padding:2px 8px; border-radius:4px; font-weight:700; font-size:0.85em;">{f_lbl}</span>
-                <span style="color:#E6E6E6; font-weight:700; font-size:1em;">{f_rat}/5</span>
+                <span style="color:{TEXT}; font-weight:700; font-size:1em;">{f_rat}/5</span>
             </div>
         </div>
     </div>
@@ -198,7 +208,7 @@ def render_valuation_spectrum(current_price, fair_value, currency="₹"):
 
     fig = go.Figure()
     fig.add_trace(go.Bar(x=[100], y=["Valuation"], orientation="h", marker=dict(color=[pos], colorscale=[[0.0, GREEN], [0.4, GOLD], [1.0, RED]], showscale=False), hoverinfo="none"))
-    fig.add_trace(go.Scatter(x=[pos], y=["Valuation"], mode="markers", marker=dict(color="#FFFFFF", size=18, symbol="triangle-up"), name="Current Price"))
+    fig.add_trace(go.Scatter(x=[pos], y=["Valuation"], mode="markers", marker=dict(color=TEXT, size=18, symbol="triangle-up"), name="Current Price"))
     fig.update_layout(height=80, margin=dict(l=10, r=10, t=10, b=10), paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)", xaxis=dict(showgrid=False, zeroline=False, showticklabels=False, range=[0, 100]), yaxis=dict(showgrid=False, zeroline=False, showticklabels=False), showlegend=False)
 
     st.markdown(f"##### Valuation Zone — Current Price: **{currency}{current_price:,.2f}**")
@@ -233,7 +243,7 @@ def render_scenario_matrix(bear_value, base_value, bull_value, current_price, cu
         cells += (
             f"<div style='flex:1; text-align:center; padding:12px 8px; {border}'>"
             f"<div style='color:{clr}; font-size:0.75em; font-weight:700; letter-spacing:0.5px;'>{label}</div>"
-            f"<div style='color:#FFFFFF; font-size:1.25em; font-weight:800; margin-top:4px;'>{currency}{val:,.2f}</div>"
+            f"<div style='color:{TEXT}; font-size:1.25em; font-weight:800; margin-top:4px;'>{currency}{val:,.2f}</div>"
             f"<div style='color:{clr}; font-size:0.8em; margin-top:2px;'>{upside_str}</div>"
             f"</div>"
         )
@@ -298,8 +308,8 @@ def render_highlights_card(working, not_working):
         if working:
             for w in working:
                 st.markdown(
-                    f"<div style='background:rgba(63,185,80,0.1); border-left:3px solid {GREEN}; "
-                    f"padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>"
+                    f"<div style='background:{GREEN_SOFT}; border-left:3px solid {GREEN}; "
+                    f"padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:{TEXT};'>"
                     f"• {html_escape(str(w))}</div>",
                     unsafe_allow_html=True)
         else:
@@ -309,8 +319,8 @@ def render_highlights_card(working, not_working):
         if not_working:
             for nw in not_working:
                 st.markdown(
-                    f"<div style='background:rgba(248,81,73,0.1); border-left:3px solid {RED}; "
-                    f"padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:#E6E6E6;'>"
+                    f"<div style='background:{RED_SOFT}; border-left:3px solid {RED}; "
+                    f"padding:8px 12px; margin-bottom:8px; border-radius:4px; font-size:0.9em; color:{TEXT};'>"
                     f"• {html_escape(str(nw))}</div>",
                     unsafe_allow_html=True)
         else:
@@ -338,12 +348,26 @@ def render_corporate_events_and_mfs(cal_df, mf_df):
 
 def custom_metric(label, value):
     st.markdown(
-        f'<div style="background-color: {CARD_BG}; border: 1px solid {BORDER}; padding: 12px 15px; '
-        f'border-radius: 8px; margin-bottom: 12px;">'
-        f'<div style="font-size: 11px; color: {MUTED}; text-transform: uppercase; font-weight: 600; margin-bottom: 4px;">'
-        f'{html_escape(str(label))}</div>'
-        f'<div style="font-size: 20px; font-weight: 700; color: #FFFFFF;">{html_escape(str(value))}</div></div>',
+        f'<div class="swf-metric">'
+        f'<div class="swf-metric-label">{html_escape(str(label))}</div>'
+        f'<div class="swf-metric-value">{html_escape(str(value))}</div></div>',
         unsafe_allow_html=True)
+
+def verdict_pill(verdict):
+    """Pill-shaped verdict badge — the one recurring element every screen in
+    the app shares, since the verdict is the product's actual output.
+    Reuses rating_color's classification (DON'T BUY -> red, OBSERVE ->
+    amber, BUY/STRONG BUY -> green) so the pill color always agrees with
+    whatever rating_color would say elsewhere for the same verdict string."""
+    color = rating_color(verdict)
+    cls = {GREEN: "swf-pill-green", RED: "swf-pill-red", ORANGE: "swf-pill-orange"}.get(color, "swf-pill-muted")
+    return f'<span class="swf-pill {cls}"><span class="swf-pill-dot"></span>{html_escape(str(verdict))}</span>'
+
+def status_pill(text, tone="muted"):
+    """Generic pill for non-verdict status text (IPO bucket, data-source tag,
+    turnaround flag, etc). tone: green | red | orange | blue | accent | muted."""
+    cls = f"swf-pill-{tone}" if tone in ("green", "red", "orange", "blue", "accent") else "swf-pill-muted"
+    return f'<span class="swf-pill {cls}">{html_escape(str(text))}</span>'
 
 def card(title, body_html):
     st.markdown(
@@ -458,7 +482,7 @@ def render_peer_scatter_chart(peer_data, current_name, current_roe, current_pe, 
         fig.add_trace(go.Scatter(
             x=[p["roe"]], y=[p["pe"]], mode="markers+text",
             marker=dict(size=size, color=GOLD if is_self else BLUE,
-                        line=dict(width=2 if is_self else 1, color="#FFFFFF" if is_self else BORDER),
+                        line=dict(width=2 if is_self else 1, color=TEXT if is_self else BORDER),
                         opacity=0.95 if is_self else 0.65),
             text=[str(p.get("name", p.get("ticker", "")))[:14]], textposition="top center",
             textfont=dict(size=9, color=MUTED), name=str(p.get("name", p.get("ticker", ""))), showlegend=False,
