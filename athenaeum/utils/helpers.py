@@ -28,6 +28,34 @@ def is_valid_metric(val):
     return to_float(val) is not None
 
 
+def safe_pct_change(new_val, old_val):
+    """Percent change from old_val to new_val: (new - old) / |old| * 100.
+
+    Dividing by abs(old_val) rather than old_val handles a loss-to-profit
+    turnaround correctly (old=-100, new=50 -> +150%, not the sign-flipped
+    -150% that a plain (new-old)/old would give).
+
+    Returns None when old_val is missing, NaN, or exactly 0 — a zero or absent
+    base makes percent change mathematically undefined, so this returns None
+    (letting the caller skip the metric) instead of silently substituting a
+    placeholder divisor. Several call sites in data/equity.py used to write
+    `value_that_could_be_zero or 1` to dodge a ZeroDivisionError, which
+    computes a wrong (sometimes wildly wrong, e.g. thousands of percent)
+    number instead of correctly declining to answer when the base is
+    genuinely zero. This is the one place that logic should live.
+    """
+    if new_val is None or old_val is None:
+        return None
+    try:
+        new_val = float(new_val)
+        old_val = float(old_val)
+    except (TypeError, ValueError):
+        return None
+    if pd.isna(new_val) or pd.isna(old_val) or old_val == 0:
+        return None
+    return ((new_val - old_val) / abs(old_val)) * 100
+
+
 def fmt_indian_currency(val, currency="₹"):
     if not is_valid_metric(val):
         return "N/A"
@@ -119,13 +147,66 @@ def _piecewise_score(value, good, excellent, higher_is_better=True):
 
 
 def _parse_date_flex(s):
+    """Parse a messy IPO date string into a date, or None if it can't be
+    read with reasonable confidence.
+
+    Hardened after a live bug report: an already-closed/listed IPO (Milky
+    Mist Dairy Food — closed 13 Aug 2026, listed 18 Aug 2026) was still
+    showing under "Upcoming". Investigation traced the actual live-app
+    mechanism to the merge/dedup gap fixed separately in this file (a
+    stale, unmerged fragment from one source with no closing evidence could
+    sit alongside a correctly-closed record from another source without
+    ever combining) — _bucket_ipo's own classification logic already
+    handles a past listing/close date correctly once it receives one.
+    But while investigating, two real, independent date-format gaps were
+    found in the sources this app already scrapes and are hardened here
+    regardless, since they will otherwise silently produce unparseable
+    (None) dates for other IPOs even now that the merge issue is fixed:
+      - Chittorgarh's individual IPO detail page renders Open/Close/
+        Allotment/Listing dates almost exclusively with a leading
+        day-of-week: "Tue, Aug 11, 2026" — no format below matched that.
+      - A combined open-close range in one string ("11 to 13 Aug, 2026"),
+        which some cells on Chittorgarh's site use for the "IPO Date" field.
+    Also centralizes ordinal-suffix stripping ("10th", "3rd") here — this
+    was previously done locally inside _scrape_screener_ipo_list only,
+    meaning any OTHER caller passing an ordinal-suffixed string had no
+    protection at all.
+    """
     if not s:
         return None
-    s = re.sub(r"[⏱⏰].*$", "", str(s)).strip()
+    s = str(s)
+    # BeautifulSoup commonly turns &nbsp; into \xa0, not a plain space — left
+    # alone, that silently breaks an otherwise-correct strptime match since
+    # \xa0 isn't treated as equivalent to the literal space in the format
+    # string.
+    s = s.replace("\xa0", " ")
+    s = re.sub(r"[⏱⏰].*$", "", s).strip()
     s = re.sub(r"\s+\d+h.*$", "", s).strip()
-    for fmt in ("%d %b %Y", "%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d %B %Y", "%b %d, %Y"):
+    # Strip a leading day-of-week ("Tue, Aug 11, 2026" -> "Aug 11, 2026") —
+    # see the docstring above; this is Chittorgarh's dominant format for
+    # exactly the fields IPO bucketing depends on most.
+    s = re.sub(r"^(mon|tue|tues|wed|weds|thu|thurs|fri|sat|sun)[a-z]*\.?,?\s+",
+                "", s, flags=re.IGNORECASE)
+    # A combined range in one string ("11 to 13 Aug, 2026", "11-13 Aug 2026",
+    # "11 Aug - 13 Aug, 2026") — take the LATER date. Callers that need both
+    # ends of a range already have their own dedicated parsers
+    # (_parse_dd_mon_range, _scrape_screener_ipo_list's _parse_period); a
+    # single date fed to THIS function from a range-shaped cell is far more
+    # often used as a close/listing/allotment date than an open date, and a
+    # too-early date is what actually causes an IPO to misclassify as still
+    # open/upcoming rather than closed.
+    range_match = re.search(
+        r"\d{1,2}\s*(?:to|-|–)\s*(\d{1,2})\s+([A-Za-z]{3,9})[,.]?\s+(\d{4})", s)
+    if range_match:
+        d2, mon, yr = range_match.group(1), range_match.group(2), range_match.group(3)
+        s = f"{d2} {mon} {yr}"
+    # Strip ordinal suffixes ("10th", "3rd", "1st", "22nd") — see docstring.
+    s = re.sub(r"\b(\d{1,2})(st|nd|rd|th)\b", r"\1", s, flags=re.IGNORECASE)
+    s = re.sub(r"\s+", " ", s).strip()
+    for fmt in ("%d %b %Y", "%d-%b-%Y", "%d/%m/%Y", "%Y-%m-%d", "%d %B %Y",
+                "%b %d, %Y", "%b %d %Y", "%d-%m-%Y", "%d.%m.%Y", "%d %b, %Y"):
         try:
-            return datetime.strptime(s[:20].strip(), fmt).date()
+            return datetime.strptime(s[:24].strip(), fmt).date()
         except ValueError:
             continue
     return None
@@ -188,26 +269,6 @@ def _slug_from_href(href):
     return m.group(1) if m else None
 
 
-def _classify_bucket(open_d, close_d, listing_d, status_hint=None):
-    today = datetime.today().date()
-    st = (status_hint or "").upper()
-    if st in ("OPEN", "CURRENT"):
-        return "current"
-    if st in ("LISTED", "CLOSED") and listing_d and listing_d <= today:
-        return "closed"
-    if open_d and open_d > today:
-        return "upcoming"
-    if open_d and close_d and open_d <= today <= close_d:
-        return "current"
-    if close_d and close_d < today:
-        return "closed"
-    if listing_d and listing_d <= today:
-        return "closed"
-    if open_d and open_d > today:
-        return "upcoming"
-    return "upcoming"
-
-
 
 def _rfr_value(rfr):
     """Normalize get_dynamic_risk_free_rate() to a float (handles tuple or scalar)."""
@@ -243,6 +304,28 @@ def compute_risk_reward(entry_low, entry_high, target_price, stop_loss):
     if risk <= 0:
         return None, entry_mid
     return round(reward / risk, 2), entry_mid
+
+
+def compute_entry_stop_range(support, current_price, atr):
+    """Suggested entry-price range and stop-loss from a support proxy, current
+    price, and ATR (volatility). Returns (entry_low, entry_high, stop_loss),
+    each rounded to 2dp, with entry_high guaranteed >= entry_low.
+
+    Extracted out of run_predictive_pipeline so it's unit-testable on its own —
+    a prior inline version derived entry_high from `support` directly instead
+    of from entry_low, which silently inverted the range (entry_low >
+    entry_high) whenever current_price*0.85 sat above support — common once a
+    stock has rallied away from its historical high-volume zone. See
+    test_entry_range_never_inverts for the regression coverage.
+    """
+    entry_low = round(max(support, current_price * 0.85), 2)
+    offset = 0.5 * atr if atr else current_price * 0.02
+    entry_high = round(max(entry_low + offset, entry_low), 2)
+    if entry_low > current_price:
+        entry_low, entry_high = round(current_price * 0.95, 2), round(current_price, 2)
+    raw_stop_loss = entry_low - (1.5 * atr if atr else entry_low * 0.05)
+    stop_loss = round(max(entry_low * 0.80, raw_stop_loss), 2)
+    return entry_low, entry_high, stop_loss
 
 
 html_escape_fn = html_escape  # re-export
