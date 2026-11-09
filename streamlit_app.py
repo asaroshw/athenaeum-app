@@ -77,6 +77,13 @@ st.markdown(f"""
        class rather than globally, since numbers/tables should stay in the
        tabular sans-serif face. */
     .swf-serif, .swf-serif * {{ font-family: 'Lora', Georgia, serif !important; }}
+    /* The blanket font rule above also hit Streamlit's own icon glyphs
+       (expander arrows, the sidebar collapse button), which are text
+       ligatures in the Material Symbols font — forcing Inter on them
+       printed the raw word ("keyboard_arrow_right") over the label. */
+    [data-testid="stIconMaterial"], span[class*="material-symbols"], .material-icons {{
+        font-family: 'Material Symbols Rounded', 'Material Symbols Outlined', 'Material Icons' !important;
+    }}
     .stApp {{ background-color: {BG}; color: {TEXT}; }}
     /* Prices, percentages, scores — tabular figures so digits line up in
        columns instead of each number claiming a slightly different width. */
@@ -195,13 +202,26 @@ st.markdown(f"""
         letter-spacing: 0.06em; font-weight: 600; margin-top: 2px;
     }}
     .swf-navlist {{ list-style: none; margin: 18px 0 0 0; padding: 0; }}
-    .swf-navlink {{
+    .swf-navlink, .swf-navlink:visited {{
         display: block; padding: 9px 12px; margin-bottom: 2px; border-radius: 8px;
-        color: {MUTED}; font-size: 0.88em; font-weight: 600; text-decoration: none !important;
+        color: {MUTED} !important; font-size: 0.88em; font-weight: 600; text-decoration: none !important;
         transition: background-color 0.15s ease, color 0.15s ease;
     }}
-    .swf-navlink:hover {{ background: {CARD_BG_HOVER}; color: {TEXT}; }}
-    .swf-navlink.active {{ background: {ACCENT_SOFT}; color: {ACCENT}; }}
+    .swf-navlink:hover {{ background: {CARD_BG_HOVER}; color: {TEXT} !important; }}
+    .swf-navlink.active {{ background: {ACCENT_SOFT}; color: {ACCENT} !important; }}
+
+    /* Cards built with st.container(border=True) — a real box around real
+       Streamlit widgets (charts), unlike an HTML <div> opened in one
+       st.markdown call and "closed" in another, which Streamlit never
+       actually joins into one box. */
+    div[data-testid="stVerticalBlockBorderWrapper"] {{
+        background-color: {CARD_BG} !important; border: 1px solid {BORDER} !important;
+        border-radius: 12px !important;
+    }}
+    .swf-card-title {{
+        font-family: 'Lora', Georgia, serif; font-weight: 600; font-size: 1.05em;
+        color: {TEXT}; margin: 2px 0 4px 0;
+    }}
 
     /* ---------- Streamlit native widgets, restyled to match ---------- */
     .stButton>button[kind="primary"], .stButton>button[kind="primaryFormSubmit"] {{
@@ -227,7 +247,7 @@ st.markdown(f"""
     div[data-testid="stMetric"] {{
         background-color: {CARD_BG}; border: 1px solid {BORDER}; border-radius: 10px; padding: 12px 16px;
     }}
-    hr {{ border-color: {BORDER}; }}
+    hr {{ border: none !important; border-top: 1px solid {BORDER} !important; background: transparent !important; }}
 </style>
 """, unsafe_allow_html=True)
 
@@ -246,12 +266,49 @@ def get_base64_image(image_path):
     except Exception:
         return None
 
-logo_b64 = get_base64_image("Logo.png")
+@st.cache_resource(show_spinner=False)
+def get_transparent_logo_b64(image_path, tint_hex):
+    """Logo.png is black artwork on an opaque white square. The old header
+    just CSS-inverted it, which turned the white square into a solid black
+    box sitting on the charcoal page — the logo looked pasted on rather
+    than part of the title. Here the darkness of each pixel becomes its
+    opacity (black -> fully visible, white -> fully transparent, so edges
+    stay smooth), the artwork is recoloured to match the title text, and
+    the empty margin around it is cropped so it lines up with the title.
+    Returns None on any failure so the caller can fall back.
+    """
+    try:
+        import io
+        from PIL import Image
+        gray = Image.open(image_path).convert("L")
+        alpha = gray.point(lambda v: 255 - v)
+        tint = tuple(int(tint_hex.lstrip('#')[i:i + 2], 16) for i in (0, 2, 4))
+        out = Image.new("RGBA", gray.size, tint + (0,))
+        out.putalpha(alpha)
+        bbox = alpha.point(lambda v: 255 if v > 24 else 0).getbbox()
+        if bbox:
+            out = out.crop(bbox)
+        out.thumbnail((220, 220))
+        buf = io.BytesIO()
+        out.save(buf, format="PNG", optimize=True)
+        return base64.b64encode(buf.getvalue()).decode('utf-8')
+    except Exception:
+        return None
+
+
+logo_b64 = get_transparent_logo_b64("Logo.png", TEXT)
+logo_is_transparent = logo_b64 is not None
+if not logo_is_transparent:
+    logo_b64 = get_base64_image("Logo.png")
 
 if logo_b64:
+    # Fallback (Pillow missing / unreadable image) keeps the old invert trick
+    # but uses mix-blend-mode so the black box at least drops out visually.
+    logo_style = ("height: 52px; vertical-align: middle;" if logo_is_transparent
+                  else "height: 48px; filter: invert(1); mix-blend-mode: screen; vertical-align: middle;")
     st.markdown(f'''
-    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 14px; padding: 10px 0 20px 0;">
-        <img src="data:image/png;base64,{logo_b64}" style="height: 48px; filter: invert(1); vertical-align: middle;">
+    <div class="swf-title-container" style="display: flex; align-items: center; justify-content: center; gap: 16px; padding: 10px 0 20px 0;">
+        <img src="data:image/png;base64,{logo_b64}" style="{logo_style}">
         <div class="swf-title" style="letter-spacing: 1.5px;">ATHENAEUM FINANCIAL INTELLIGENCE</div>
     </div>
     ''', unsafe_allow_html=True)
@@ -408,25 +465,25 @@ if st.session_state.report_data and st.session_state.app_mode == 'equity':
         hist_df = m.get('history')
         if hist_df is not None and not hist_df.empty: st.plotly_chart(price_history_chart(hist_df, currency), use_container_width=True, config={'displayModeBar': False})
     with hcol2:
-        st.markdown('<div class="swf-card"><div class="swf-h swf-serif">Snowflake Score</div>', unsafe_allow_html=True)
-        try:
-            st.plotly_chart(snowflake_chart(snowflake_scores, size="large"), use_container_width=True, config={'displayModeBar': False})
-        except Exception: pass
-        st.markdown(
-            "<div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px 14px; font-size:0.78em; color:{m};'>".format(m=MUTED)
-            + "".join(
-                f"<span>{axis}: <b style='color:{TEXT};'>{int(score) if score is not None else '—'}</b></span>"
-                for axis, score in snowflake_scores.items()
-            ) + "</div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('<div class="swf-card-title">Snowflake Score</div>', unsafe_allow_html=True)
+            try:
+                st.plotly_chart(snowflake_chart(snowflake_scores, size="large"), use_container_width=True, config={'displayModeBar': False})
+            except Exception: pass
+            st.markdown(
+                "<div style='display:flex; justify-content:space-between; flex-wrap:wrap; gap:6px 14px; font-size:0.78em; color:{m};'>".format(m=MUTED)
+                + "".join(
+                    f"<span>{axis}: <b style='color:{TEXT};'>{int(score) if score is not None else '—'}</b></span>"
+                    for axis, score in snowflake_scores.items()
+                ) + "</div>",
+                unsafe_allow_html=True,
+            )
 
-        st.markdown('<div class="swf-card"><div class="swf-h">Composite Score Radar</div>', unsafe_allow_html=True)
-        try:
-            st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
-        except Exception: pass
-        st.markdown('</div>', unsafe_allow_html=True)
+        with st.container(border=True):
+            st.markdown('<div class="swf-card-title">Composite Score Radar</div>', unsafe_allow_html=True)
+            try:
+                st.plotly_chart(analysis_radar_chart(m, pred), use_container_width=True, config={'displayModeBar': False})
+            except Exception: pass
 
     # ---------------- Recent News & Catalysts ----------------
     news_items = m.get('recent_news', [])

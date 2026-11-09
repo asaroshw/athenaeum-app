@@ -1,0 +1,15 @@
+# Forces Streamlit's own theme to the Athenaeum dark palette. Without this,
+# Streamlit follows the viewer's OS/browser setting, so on a computer set to
+# light mode the built-in pieces (data tables, info/success callout boxes,
+# text boxes, chart gridlines, dividers) render light-themed on top of the
+# charcoal page. Colours mirror athenaeum/config.py.
+[theme]
+base = "dark"
+primaryColor = "#D9A521"
+backgroundColor = "#1A1A1D"
+secondaryBackgroundColor = "#222226"
+textColor = "#F2F4F7"
+font = "sans serif"
+
+[browser]
+gatherUsageStats = false
