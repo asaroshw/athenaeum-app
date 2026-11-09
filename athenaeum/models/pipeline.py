@@ -68,22 +68,38 @@ VERDICT_RANK = {"DON'T BUY": 0, "OBSERVE": 1, "BUY": 2, "STRONG BUY": 3}
 
 
 def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth_pct=None):
+    """Data-anomaly safety net for the modeled target price — NOT a
+    mechanism for demoting a verdict based on where the current price sits
+    relative to that target.
+
+    Previously this ALSO forced a downgrade whenever current_price exceeded
+    target_price: more than 15% above target hard-forced OBSERVE or DON'T
+    BUY regardless of fundamental strength, and ANY amount above target
+    downgraded a BUY/STRONG BUY straight to OBSERVE. That conflated two
+    questions this app now deliberately keeps separate — useful for swing
+    traders placing GTT/limit orders in particular:
+      1. Is this a fundamentally good company? (the composite verdict,
+         driven by fundamental_score / intrinsic value / technical score)
+      2. Is right now, at today's live price, a good MOMENT to enter?
+         (the Entry / Target / Stop-Loss levels, which already exist and
+         are displayed for exactly this purpose)
+    A stock with strong fundamentals and genuine modeled upside no longer
+    loses its BUY/STRONG BUY verdict just because intraday price ticked up
+    past the model's target — the verdict reflects the company; the
+    Entry/Target/Stop-Loss levels tell you where to place the order.
+
+    What remains: a ceiling on implausible UPSIDE, unrelated to where price
+    sits relative to target. If the model's upside is far beyond what
+    verified growth could plausibly justify, that is far more likely a
+    data/model error than genuine opportunity, and still gets flagged for
+    human review — this is a check on the model's OUTPUT quality, not a
+    reaction to normal price movement.
+    """
     if target_price is None or not current_price:
         return verdict
-        
-    downside_pct = (current_price - target_price) / current_price
+
     upside_pct = (target_price - current_price) / current_price
-    
-    if downside_pct > 0.15:
-        if verdict != "DON'T BUY":
-            notes.append(f"Model indicates {round(downside_pct*100,1)}% downside. Treated as OBSERVE or DON'T BUY based on fundamental strength.")
-        return "DON'T BUY" if downside_pct > 0.40 else "OBSERVE"
-        
-    elif downside_pct > 0:
-        if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
-            notes.append(f"Downgraded to OBSERVE: the modeled target price is {round(downside_pct*100,1)}% below the current price.")
-            return "OBSERVE"
-            
+
     # Fix 2: ceiling scales with verified growth_pct instead of a static 150%
     g = growth_pct if (growth_pct and growth_pct > 0) else 0
     max_upside = 2.50 if g >= 25 else (2.00 if g >= 15 else 1.50)
@@ -95,14 +111,13 @@ def apply_tiered_sanity_veto(verdict, target_price, current_price, notes, growth
         )
         if VERDICT_RANK.get(verdict, 1) > VERDICT_RANK["OBSERVE"]:
             return "OBSERVE"   # OBSERVE not DON'T BUY: surfaces signal, doesn't bury it
-            
+
     return verdict
 
 
 def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundamental_score,
                               book_value_per_share, dividend_per_share, roe_pct,
                               pat_yoy_pct, analyst_growth_pct,
-                              precomputed_jpb=None, precomputed_ddm=None,
                               resolved_pe=None, is_turnaround=False, latest_quarter_net_income=None,
                               shares_outstanding=None, qualitative_bonus=0, qualitative_notes=None,
                               sector_profile="standard", order_book_hits=None, growth_pct_from_news=None):
@@ -117,6 +132,7 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
         "intrinsic_score": None, "technical_score": None, "margin_of_safety": None,
         "discount_rate": None, "growth_used": None, "is_turnaround": is_turnaround,
         "wacc_pct": None, "roic_pct": None, "economic_profit_pct": None,
+        "justified_pb_ratio": None,
     }
     if not current_price:
         return result
@@ -235,11 +251,16 @@ def run_predictive_pipeline(info, hist, fcf_history, sector, industry, fundament
                 "high seasonality risk; treat as scenario input."
             )
 
+    net_debt = (info.get('totalDebt') or 0) - (info.get('totalCash') or 0)
     multi = compute_multi_model_values(
         current_price, ke_pct, growth_pct, financial, book_value_per_share, dividend_per_share,
-        roe_pct, effective_eps, resolved_pe, fcf_history, shares, precomputed_jpb, precomputed_ddm,
+        roe_pct, effective_eps, resolved_pe, fcf_history, shares, None, None,
         sector_profile, pat_yoy_pct,
+        wacc_pct=(wacc_info['wacc_pct'] if wacc_info else None), ebit=info.get('ebit_latest'),
+        effective_tax_rate_pct=info.get('effective_tax_rate_pct'), da=info.get('da_latest'),
+        capex=info.get('capex_latest'), nwc_change=info.get('nwc_change_latest'), net_debt=net_debt,
     )
+    result["justified_pb_ratio"] = multi.get("jpb_ratio")
     # Prefer sector-weighted blend when ≥2 core models; else primary
     if multi["n_models"] >= 2 and multi.get("blended_value"):
         intrinsic_value = multi["blended_value"]

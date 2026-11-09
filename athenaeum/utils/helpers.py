@@ -96,16 +96,97 @@ def rating_color(rating):
     return MUTED
 
 
-def style_verdict_text(text):
-    """Escape AI/user text first, then highlight known verdict tokens only."""
+def render_ai_markdown(text):
+    """Convert the small, common markdown subset AI narratives actually use
+    (bold, bullet-list markers) into real HTML, then run style_verdict_text's
+    verdict-word highlighting on the result.
+
+    Streamlit's markdown parser only fires for content passed directly to
+    st.markdown() as markdown source — it does NOT re-parse markdown syntax
+    found INSIDE HTML you've written yourself once unsafe_allow_html=True is
+    active (as every card() call wrapping AI narrative text in a hand-written
+    <p>/<div> does). AI text was rendering literally, asterisks and all, e.g.
+    "* **Robust Top-Line Growth:**" instead of a bolded bullet point.
+
+    Escapes first (so this can never become an HTML/script injection vector
+    for AI-generated or scraped text), converts bold and bullets, THEN
+    highlights verdict words — in that order, so verdict-highlighting's
+    <span> tags land around already-converted text rather than the other
+    way around. Call sites that used to call style_verdict_text(narrative)
+    directly should call this instead; style_verdict_text itself is
+    unchanged for callers that only need verdict-word coloring on
+    non-markdown text (e.g. a bare "DON'T BUY" verdict label).
+    """
     if not text:
         return text
     safe = html_escape(str(text))
+
+    # Bold: **text** (non-greedy, paired only — an unpaired stray ** is left
+    # as literal text rather than guessed at, same principle as any
+    # regex-based converter without a full parser).
+    safe = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", safe)
+
+    # Leading bullet marker on its own line ("* item" or "- item") -> a real
+    # bullet glyph. Deliberately not building actual <ul>/<li> structure —
+    # every call site already renders this text inside a
+    # white-space:pre-wrap <p>, which already preserves line breaks
+    # correctly, so swapping just the marker character is enough to fix the
+    # visible "raw asterisk" bug without needing multi-line list-state
+    # tracking that would be more code for the same visual result.
+    #
+    # Runs BEFORE italic, not after: a bullet line whose text ALSO contains
+    # genuine italic emphasis later on the same line (e.g.
+    # "* **Robust Growth:** Revenue grew at a *very* strong clip.") would
+    # otherwise leave the leading bullet "*" as the only asterisk before the
+    # italic pair — the non-greedy italic regex would then pair the BULLET
+    # marker with the italic phrase's OPENING "*", swallowing everything
+    # between them as "italic" and leaving the phrase's closing "*"
+    # dangling. Converting the bullet marker first removes that leftover
+    # asterisk before italic pairing ever runs, so it can't happen.
+    safe = re.sub(r"(?m)^(\s*)[-*]\s+", r"\1• ", safe)
+
+    # Italic: *text* — runs after bold AND the bullet-marker conversion
+    # above, so every ** pair and every leading bullet "*" is already
+    # consumed; any "*" remaining at this point can only be a genuine
+    # single-asterisk emphasis pair (or a stray unpaired one, left as
+    # literal text same as an unpaired ** would be).
+    safe = re.sub(r"\*(.+?)\*", r"<em>\1</em>", safe)
+
+    return style_verdict_text_from_escaped(safe)
+
+
+def style_verdict_text_from_escaped(safe):
+    """The verdict-word-highlighting half of style_verdict_text, factored out
+    so render_ai_markdown can run it AFTER markdown conversion on text that's
+    already been through html_escape, without escaping twice."""
     return re.sub(
-        r"(?i)\bDON.?T\s+BUY\b|\bOBSERVE\b|\bSTRONG\s+BUY\b|\bBUY\b|\bABSTAIN\b",
+        r"(?i)\bDON(?:'|&#x27;|&#39;|&apos;)?T\s+BUY\b|\bOBSERVE\b|\bSTRONG\s+BUY\b|\bBUY\b|\bABSTAIN\b",
         lambda m: f'<span style="color:{rating_color(m.group(0))}; font-weight:bold;">{m.group(0)}</span>',
         safe,
     )
+
+
+def style_verdict_text(text):
+    """Escape AI/user text first, then highlight known verdict tokens only.
+    For text that may also contain AI-generated markdown (bold, bullets),
+    use render_ai_markdown instead — see its docstring.
+
+    The whole-phrase "DON'T BUY" pattern used `.?` (0-or-1 characters) to
+    span the apostrophe — correct for the RAW apostrophe ('), but
+    html_escape runs first and turns it into the 6-character entity
+    "&#x27;" (Python's html.escape default). `.?` can't span 6 characters,
+    so the whole-phrase match silently failed, and the regex engine fell
+    through to the standalone \bBUY\b alternative later in the string —
+    "DON'T" stayed unstyled while "BUY" alone got wrapped in a GREEN span,
+    exactly backwards for a DON'T BUY verdict. Explicitly enumerating the
+    realistic apostrophe forms (raw, and the common HTML entity spellings)
+    fixes the match without weakening it to "any character(s)", which would
+    risk swallowing real text between DON and T.
+    """
+    if not text:
+        return text
+    safe = html_escape(str(text))
+    return style_verdict_text_from_escaped(safe)
 
 
 def _clamp01(x):

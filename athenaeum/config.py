@@ -1,20 +1,19 @@
 """Shared constants and theme tokens."""
-# Refined dark palette (Angel One–inspired structural cues — clean cards,
-# pill status indicators, a warm brand accent — adapted to a dark
-# professional-terminal surface rather than Angel One's own light retail
-# theme; the existing app was already dark, and dark suits the "Tier-1
-# institutional terminal" positioning better than a wholesale light-theme
-# rewrite would). BG and the old CARD_BG used to sit within a few RGB values
-# of each other (#000000 vs #0D0D0D) — cards had almost no visual presence
-# against the page. The gap between BG and CARD_BG below is the fix; the
-# rest is refinement of the same names so every existing call site (equity.py,
-# ipo.py, ui/components.py) picks up the new look with no code changes.
+# Simply Wall St-inspired palette: warm dark charcoal (not blue-black),
+# gold as the single primary accent, serif section headings paired with
+# sans-serif body/data (see the font-face setup in streamlit_app.py's CSS
+# block). This supersedes the earlier Angel One-inspired cool-dark palette:
+# BG/CARD_BG/BORDER are warmed from near-black/cool-gray toward a charcoal
+# with a hint of warmth, and ACCENT moves from orange-red to gold to match
+# the SWF reference. Every existing call site (equity.py, ipo.py,
+# ui/components.py) picks up the new look with no code changes, since the
+# token names are unchanged.
 GOLD = "#EAB308"
-BG = "#0A0B0D"
-CARD_BG = "#14161B"
-CARD_BG_HOVER = "#1B1E25"
-BORDER = "#262A33"
-BORDER_STRONG = "#363B47"
+BG = "#1A1A1D"
+CARD_BG = "#222226"
+CARD_BG_HOVER = "#2A2A2F"
+BORDER = "#333338"
+BORDER_STRONG = "#45454C"
 GREEN = "#22C55E"
 GREEN_SOFT = "rgba(34, 197, 94, 0.13)"
 RED = "#EF4444"
@@ -26,6 +25,7 @@ MUTED_SOFT = "rgba(141, 148, 163, 0.13)"
 BLUE = "#38BDF8"
 BLUE_SOFT = "rgba(56, 189, 248, 0.13)"
 PURPLE = "#A855F7"
+PURPLE_SOFT = "rgba(168, 85, 247, 0.13)"
 TEXT = "#F2F4F7"
 # Narrative/body-copy text — the AI-generated prose sections use a slightly
 # dimmer register than headline numbers/labels, which is a real, deliberate
@@ -36,11 +36,12 @@ TEXT = "#F2F4F7"
 # three different near-white shades with no distinction in intent. Now one
 # token (TEXT) for UI text/numbers, one (TEXT_BODY) for narrative prose.
 TEXT_BODY = "#C9D1D9"
-# Warm orange-red brand accent for primary actions / active states — the one
-# place this design spends its "boldness" (buttons, active tabs, the verdict
-# pill's accent dot), used sparingly everywhere else.
-ACCENT = "#FF6B35"
-ACCENT_SOFT = "rgba(255, 107, 53, 0.14)"
+# Gold brand accent for primary actions / active states / the Snowflake and
+# fair-value-bar highlight color — the one place this design spends its
+# "boldness" (buttons, active tabs, the verdict pill's accent dot), used
+# sparingly everywhere else.
+ACCENT = "#D9A521"
+ACCENT_SOFT = "rgba(217, 165, 33, 0.14)"
 
 EQUITY_RISK_PREMIUM = 0.055
 TERMINAL_GROWTH_PCT = 5.0

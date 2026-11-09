@@ -21,7 +21,6 @@ from athenaeum.models.fundamentals import (
     continuous_valuation_score, continuous_past_score, continuous_health_score,
     score_from_checks, compute_fundamental_score,
 )
-from athenaeum.models.valuation import justified_pb_fair_value, ddm_fair_value
 from athenaeum.models.pipeline import run_predictive_pipeline
 from athenaeum.data.rfr import get_dynamic_risk_free_rate
 from athenaeum.config import (
@@ -186,6 +185,57 @@ def _fmp_ticker(resolved_ticker: str) -> str:
     return resolved_ticker.replace(".NS","").replace(".BO","").upper()
 
 
+def select_best_sector_alternative(peer_results, threshold=60):
+    """Given already-fetched peer results — a list of (ticker, metrics,
+    predictive, composite_score) tuples — pick the best_alternative dict
+    for the highest-scoring peer if it clears `threshold`, or (None, a
+    human-readable summary) otherwise.
+
+    Extracted out of the Sector Alternative Scanner block in
+    fetch_stock_data for unit-testability: the surrounding fetch/dispatch
+    needs live network calls to test end-to-end, but this selection
+    decision — which peer, does it clear the bar — is pure and doesn't.
+    Returns (best_alternative_dict_or_None, summary_str_or_None); the
+    caller supplies its own message for the "couldn't fetch any peer at
+    all" case, since that's a fetch-layer concern, not a selection one.
+
+    Deliberately NOT @st.cache_data — this is a cheap, pure, in-memory
+    selection over data the caller already fetched (and already cached at
+    the fetch layer); caching the selection itself would add nothing and,
+    since peer_results contains dicts, risks Streamlit's cache-key hashing
+    behaving surprisingly on mutable nested data for no benefit.
+    """
+    if not peer_results:
+        return None, None
+    best_peer, best_p_metrics, best_p_pred, best_score = max(peer_results, key=lambda t: t[3])
+    if best_score > threshold:
+        p_price = best_p_metrics.get("price")
+        p_target = best_p_pred.get("target_price")
+        upside_pct = (
+            round((float(p_target) / float(p_price) - 1) * 100, 1)
+            if p_price and p_target and float(p_price) > 0 else None
+        )
+        p_pe_raw = best_p_metrics.get("pe_ratio")
+        p_pb_raw = best_p_metrics.get("pb_ratio")
+        alt = {
+            "name": best_p_metrics.get("name") or best_peer,
+            "ticker": best_peer,
+            "price": round(float(p_price), 2) if p_price else None,
+            "pe": round(float(p_pe_raw), 1) if is_valid_metric(p_pe_raw) else "N/A",
+            "pb": round(float(p_pb_raw), 1) if is_valid_metric(p_pb_raw) else "N/A",
+            "verdict": best_p_pred.get("verdict"),
+            "composite_score": best_score,
+            "target_price": p_target,
+            "upside_pct": upside_pct,
+            "entry_range": best_p_pred.get("entry_range"),
+            "time_horizon": best_p_pred.get("time_horizon"),
+        }
+        return alt, None
+    n = len(peer_results)
+    summary = f"Scanned {n} sector peer{'s' if n != 1 else ''} — none currently meet our BUY threshold."
+    return None, summary
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
     warnings = []
@@ -330,6 +380,7 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
     net_inc, total_eq, total_assets_latest, ebitda_val = None, None, None, info.get('ebitda')
     revenue_latest, ebit_latest, interest_exp_latest, interest_income_latest = None, None, None, None
     effective_tax_rate_pct = None
+    da_latest = capex_latest = nwc_change_latest = None
     fcf_history = None
     pat_qoq, pat_yoy_pct, net_margin_final = None, None, None
     latest_quarter_net_income = None
@@ -417,6 +468,37 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
         cf = cf_future.result()
         if cf is not None and not cf.empty and 'Free Cash Flow' in cf.index:
             fcf_history = cf.loc['Free Cash Flow'].dropna()
+
+        # D&A / CapEx / Change in Working Capital — needed to build a genuine
+        # unlevered FCFF (EBIT(1-tax)+D&A-CapEx-ΔNWC), discounted at WACC.
+        # Previously WACC was computed and displayed but never actually fed
+        # a valuation model: the existing "Simplified FCF DCF" uses
+        # yfinance's pre-bundled "Free Cash Flow" (≈ OCF-Capex, a levered,
+        # equity-side proxy), for which Ke remains the conceptually correct
+        # discount rate — swapping in WACC there would have paired an
+        # unlevered discount rate with a levered cash flow, a mismatch, not
+        # a fix. This is a genuinely separate, additional model instead.
+        if cf is not None and not cf.empty:
+            for k in ['Depreciation And Amortization', 'Depreciation Amortization Depletion',
+                      'Depreciation', 'Reconciled Depreciation']:
+                if k in cf.index:
+                    da_series = cf.loc[k].dropna()
+                    if len(da_series) > 0:
+                        da_latest = abs(float(da_series.iloc[0]))  # always a positive add-back
+                        break
+            for k in ['Capital Expenditure', 'Capital Expenditures', 'Purchase Of PPE',
+                      'Purchase Of Property Plant And Equipment']:
+                if k in cf.index:
+                    capex_series = cf.loc[k].dropna()
+                    if len(capex_series) > 0:
+                        capex_latest = abs(float(capex_series.iloc[0]))  # magnitude; sign applied in the FCFF formula
+                        break
+            for k in ['Change In Working Capital', 'Changes In Working Capital']:
+                if k in cf.index:
+                    nwc_series = cf.loc[k].dropna()
+                    if len(nwc_series) > 0:
+                        nwc_change_latest = float(nwc_series.iloc[0])  # keep sign — a source or a use of cash
+                        break
 
         if fin is not None and not fin.empty:
             col = fin.columns[0]
@@ -585,42 +667,50 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
 
     analyst_growth_pct = info.get("analyst_growth_pct")
 
-    jpb_ratio = jpb_value = ddm_val = None
-    if is_fin:
-        beta_preview = info.get('beta') if info.get('beta') and pd.notna(info.get('beta')) and info.get('beta') > 0 else 1.0
-        current_rfr = _rfr_value(get_dynamic_risk_free_rate())
-        ke_preview = min(max((current_rfr + beta_preview * EQUITY_RISK_PREMIUM) * 100, 9), 20)
-        
-        if analyst_growth_pct and float(analyst_growth_pct) > 0:
-            growth_preview = min(max(float(analyst_growth_pct), 5), 30)
-        elif pat_yoy_pct and pat_yoy_pct > 0:
-            growth_preview = pat_yoy_pct
-        else:
-            growth_preview = 8.0
-            
-        jpb_ratio, jpb_value = justified_pb_fair_value(roe_raw * 100 if roe_is_known else None, ke_preview, growth_preview, bvps)
-        ddm_val = ddm_fair_value(div_per_share, ke_preview, growth_preview)
-    temp_metrics["justified_pb"] = jpb_ratio
+    # Justified P/B and DDM used to be precomputed HERE for financial-sector
+    # stocks, using a "preview" Ke and growth assumption — which required a
+    # SECOND, uncached call to get_dynamic_risk_free_rate() (the pipeline
+    # below fetches it too) and, worse, used pat_yoy_pct UNCLAMPED here
+    # while the pipeline clamps it to a max of 22% for every other model in
+    # the SAME blended valuation. A bank with e.g. 45% trailing PAT growth
+    # would get its Justified P/B / DDM built on a materially different
+    # growth assumption than its FCF DCF and EPS-multiple models — an
+    # internal inconsistency inside one "multi-model blend." The pipeline's
+    # own compute_multi_model_values already self-computes JPB/DDM from
+    # its OWN canonical ke_pct/growth_pct whenever it isn't handed a
+    # precomputed override (this is exactly how the Bear/Bull scenario
+    # calls a few lines below it already worked — only the base case still
+    # used this separate preview). Removing the preview here makes the base
+    # case consistent with Bear/Bull, and the ratio is now read back FROM
+    # the pipeline's result below instead of being computed twice.
 
     # Threaded through `info` (rather than new positional params) since
     # run_predictive_pipeline already receives `info` and reads from it —
     # these feed compute_wacc/compute_roic inside the pipeline, using the
-    # SAME ke_pct the pipeline already computes rather than a new redundant
-    # CAPM calculation (see the ke_preview/growth_preview divergence noted
-    # elsewhere for why a second, independent Ke is worth avoiding).
+    # SAME ke_pct the pipeline already computes.
     info['ebit_latest'] = ebit_latest
     info['interest_exp_latest'] = interest_exp_latest
     info['effective_tax_rate_pct'] = effective_tax_rate_pct
+    info['da_latest'] = da_latest
+    info['capex_latest'] = capex_latest
+    info['nwc_change_latest'] = nwc_change_latest
 
     predictive_data = run_predictive_pipeline(
         info, hist_full, fcf_history, sector, industry, fundamental_score,
         bvps, div_per_share, roe_raw * 100 if roe_is_known else None, pat_yoy_pct, analyst_growth_pct,
-        precomputed_jpb=(jpb_ratio, jpb_value), precomputed_ddm=ddm_val,
         resolved_pe=to_float(pe_raw), is_turnaround=is_turnaround,
         latest_quarter_net_income=latest_quarter_net_income, shares_outstanding=shares_out,
         qualitative_bonus=qualitative_bonus, qualitative_notes=qualitative_notes,
         sector_profile=sector_profile, order_book_hits=order_book_hits, growth_pct_from_news=growth_pct_from_news,
     )
+    # Read back from the pipeline's own canonical computation (see the note
+    # above run_predictive_pipeline's call) rather than precomputing it here
+    # a second time with a separately-fetched Ke. Same timing as before:
+    # set after fundamental_score's checks already ran, before the display
+    # -purposes valuation_checks(temp_metrics) call below.
+    temp_metrics["justified_pb"] = predictive_data.get("justified_pb_ratio")
+    temp_metrics["growth_used"] = predictive_data.get("growth_used")
+    temp_metrics["economic_profit_pct"] = predictive_data.get("economic_profit_pct")
 
     promoters_raw = info.get("heldPercentInsiders") or 0
     institutions_raw = info.get("heldPercentInstitutions") or 0
@@ -664,14 +754,17 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
         "roe": f"{round(roe_raw*100, 2)}%" if roe_is_known else "N/A",
         "ebitda_margin": f"{ebitda_margin}%" if ebitda_margin != "N/A" else "N/A",
         "operating_margin": operating_margin, "revenue_cagr": revenue_cagr_pct, "nim_proxy": nim_proxy,
+        "analyst_growth_pct": analyst_growth_pct,
+        "growth_used": predictive_data.get("growth_used"),
+        "economic_profit_pct": predictive_data.get("economic_profit_pct"),
         "debt_to_equity": debt_to_equity,
         "interest_coverage": interest_coverage,
         "net_margin": f"{net_margin_final}%" if net_margin_final is not None else "N/A",
-        "dividend_yield": f"{round(info.get('dividendYield',0)*100,2)}%" if is_valid_metric(info.get('dividendYield')) else "N/A",
+        "dividend_yield": round(info.get('dividendYield') * 100, 2) if is_valid_metric(info.get('dividendYield')) else None,
         "pat_yoy": f"{pat_yoy_pct}%" if pat_yoy_pct is not None else "N/A",
         "pat_qoq": f"{pat_qoq}%" if pat_qoq is not None else "N/A",
         "market_cap": mcap, "sector": sector, "industry": industry,
-        "is_financial_sector": is_fin, "justified_pb": jpb_ratio, "is_turnaround": is_turnaround,
+        "is_financial_sector": is_fin, "justified_pb": predictive_data.get("justified_pb_ratio"), "is_turnaround": is_turnaround,
         "sector_profile": sector_profile, "order_book_hits": order_book_hits,
         "growth_pct_from_news": growth_pct_from_news,
         "data_completeness": data_completeness,
@@ -714,49 +807,60 @@ def fetch_stock_data(resolved_ticker, raw_input, scan_for_alternative=True):
     }
 
     # --- SECTOR ALTERNATIVE SCANNER ---
-    # Finds a peer that, when independently analysed through this SAME pipeline,
-    # actually comes back STRONG BUY — not just one that looks decent on a few
-    # raw ratios. scan_for_alternative=False (used for the recursive peer calls
-    # below) prevents each peer from launching its own nested scan.
+    # Finds the best-scoring peer, analysed independently through this SAME
+    # pipeline. scan_for_alternative=False (used for the peer calls below)
+    # prevents each peer from launching its own nested scan.
+    #
+    # Previously: (1) sequential — up to 6 full-pipeline peer fetches
+    # stacked one after another on top of the primary lookup's own latency,
+    # a real, unbounded-feeling latency cliff triggered on every weak
+    # verdict; (2) required a literal "STRONG BUY" verdict and stopped at
+    # the first one found, so if every peer landed at BUY/OBSERVE — a very
+    # plausible outcome, e.g. during a sector-wide selloff — best_alternative
+    # stayed silently None and the UI showed nothing at all, giving no
+    # indication a scan even ran.
+    #
+    # Now: all peers are fetched CONCURRENTLY (bounded by the peer list's
+    # own small, fixed size), every peer that returns a score is considered,
+    # and the highest-scoring one is suggested if it clears a BUY-level bar
+    # (>60, matching the composite-score tier boundary for "BUY" and above)
+    # — not gated on the STRONG BUY tier specifically. If none clear the
+    # bar (or none could be fetched), alternative_scan_summary carries an
+    # explicit, honest message instead of the UI showing nothing.
     metrics['best_alternative'] = None
+    metrics['alternative_scan_summary'] = None
     if scan_for_alternative and predictive_data['verdict'] in ["DON'T BUY", "OBSERVE"]:
-        peers = SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"])
-        for peer in peers:
-            if peer == resolved_ticker:
-                continue
-            try:
-                p_metrics = fetch_stock_data(peer, peer, scan_for_alternative=False)
-            except Exception as e:
-                logger.warning("Alternative-scan fetch failed for %s: %s", peer, e)
-                continue
-            if not p_metrics:
-                continue
-            p_pred = p_metrics.get("predictive") or {}
-            if p_pred.get("verdict") != "STRONG BUY":
-                continue  # only a REAL, fully-computed STRONG BUY qualifies
+        peers = [p for p in SECTOR_PEERS.get(sector_profile, SECTOR_PEERS["standard"]) if p != resolved_ticker]
+        peer_results = []
+        if peers:
+            with ThreadPoolExecutor(max_workers=len(peers)) as executor:
+                future_to_peer = {
+                    executor.submit(fetch_stock_data, peer, peer, scan_for_alternative=False): peer
+                    for peer in peers
+                }
+                for future in future_to_peer:
+                    peer = future_to_peer[future]
+                    try:
+                        p_metrics = future.result()
+                    except Exception as e:
+                        logger.warning("Alternative-scan fetch failed for %s: %s", peer, e)
+                        continue
+                    if not p_metrics:
+                        continue
+                    p_pred = p_metrics.get("predictive") or {}
+                    p_score = p_pred.get("composite_score")
+                    if p_score is None:
+                        continue
+                    peer_results.append((peer, p_metrics, p_pred, p_score))
 
-            p_price = p_metrics.get("price")
-            p_target = p_pred.get("target_price")
-            upside_pct = (
-                round((float(p_target) / float(p_price) - 1) * 100, 1)
-                if p_price and p_target and float(p_price) > 0 else None
+        if not peer_results:
+            metrics['alternative_scan_summary'] = (
+                "Could not retrieve data for sector peers right now."
+                if peers else "No sector peers configured for this sector."
             )
-            p_pe_raw = p_metrics.get("pe_ratio")
-            p_pb_raw = p_metrics.get("pb_ratio")
-            metrics['best_alternative'] = {
-                "name": p_metrics.get("name") or peer,
-                "ticker": peer,
-                "price": round(float(p_price), 2) if p_price else None,
-                "pe": round(float(p_pe_raw), 1) if is_valid_metric(p_pe_raw) else "N/A",
-                "pb": round(float(p_pb_raw), 1) if is_valid_metric(p_pb_raw) else "N/A",
-                "verdict": p_pred.get("verdict"),
-                "composite_score": p_pred.get("composite_score"),
-                "target_price": p_target,
-                "upside_pct": upside_pct,
-                "entry_range": p_pred.get("entry_range"),
-                "time_horizon": p_pred.get("time_horizon"),
-            }
-            break  # first verified STRONG BUY wins — no need to scan further peers
+        else:
+            metrics['best_alternative'], metrics['alternative_scan_summary'] = \
+                select_best_sector_alternative(peer_results)
 
     return metrics
 

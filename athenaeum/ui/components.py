@@ -5,19 +5,218 @@ import pandas as pd
 import plotly.graph_objects as go
 from datetime import timedelta
 from athenaeum.config import (
-    GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE, TEXT, GREEN_SOFT, RED_SOFT,
+    GOLD, BG, CARD_BG, BORDER, GREEN, RED, ORANGE, MUTED, BLUE, PURPLE, TEXT, GREEN_SOFT, RED_SOFT, ACCENT,
 )
 from athenaeum.utils.helpers import html_escape_fn, to_float, is_valid_metric, rating_color
 
 # alias used in templates
 html_escape = html_escape_fn
 
+
+def _snowflake_fill_color(avg_score):
+    """Interpolates red -> gold -> green as the average of the five
+    Snowflake axis scores rises, matching the Simply Wall St reference
+    where a weak snowflake reads visually red and a strong one reads green,
+    with gold as the midpoint rather than a hard three-way color switch.
+    """
+    avg_score = max(0.0, min(100.0, avg_score or 0.0))
+
+    def hex_to_rgb(h):
+        h = h.lstrip('#')
+        return tuple(int(h[i:i + 2], 16) for i in (0, 2, 4))
+
+    def lerp(a, b, t):
+        return tuple(round(a[i] + (b[i] - a[i]) * t) for i in range(3))
+
+    red, gold, green = hex_to_rgb(RED), hex_to_rgb(GOLD), hex_to_rgb(GREEN)
+    if avg_score <= 50:
+        rgb = lerp(red, gold, avg_score / 50.0)
+    else:
+        rgb = lerp(gold, green, (avg_score - 50) / 50.0)
+    return f"rgb({rgb[0]},{rgb[1]},{rgb[2]})"
+
+
+def snowflake_chart(scores, size="large"):
+    """The 5-axis 'Snowflake' — Value / Future / Past / Health / Dividend —
+    the signature Simply Wall St visual. `scores` is a dict mapping those
+    five axis names to a 0-100 score (or None where not computable, treated
+    as 0 for the plotted shape so a missing axis doesn't break the chart).
+    `size="small"` renders a compact, label-free version for the sidebar.
+    """
+    axes = ["Value", "Future", "Past", "Health", "Dividend"]
+    vals = [scores.get(a) or 0 for a in axes]
+    avg = sum(v for v in vals if v is not None) / max(len([v for v in vals if v is not None]), 1)
+    fill_color = _snowflake_fill_color(avg)
+
+    fig = go.Figure()
+    fig.add_trace(go.Scatterpolar(
+        r=vals + [vals[0]], theta=axes + [axes[0]],
+        fill='toself', fillcolor=fill_color.replace("rgb", "rgba").rstrip(")") + ",0.55)",
+        line=dict(color=fill_color, width=2),
+        hovertemplate="%{theta}: %{r:.0f}/100<extra></extra>",
+    ))
+    is_small = size == "small"
+    fig.update_layout(
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(visible=False, range=[0, 100]),
+            angularaxis=dict(
+                visible=not is_small, showticklabels=not is_small,
+                tickfont=dict(size=10, color=MUTED), gridcolor=BORDER, linecolor=BORDER,
+            ),
+        ),
+        showlegend=False, paper_bgcolor="rgba(0,0,0,0)",
+        margin=dict(l=30, r=30, t=30, b=30) if is_small else dict(l=60, r=60, t=40, b=40),
+        height=180 if is_small else 340,
+    )
+    if is_small:
+        fig.update_polars(angularaxis=dict(visible=True, showticklabels=True,
+                                            tickfont=dict(size=8, color=MUTED),
+                                            gridcolor=BORDER, linecolor=BORDER))
+    return fig
+
+
+def score_bar_header(label, score, max_score=6):
+    """'Valuation Score 2/6'-style header used atop each SWF-style section."""
+    return (f'<div class="swf-score-bar">{html_escape(str(label))} '
+            f'<span class="score">{int(score)}/{int(max_score)}</span></div>')
+
+
+def narrative_checklist(checks):
+    """Renders a checklist as narrative callouts — "✅ Bold Label:
+    explanation" — rather than a bare table row, matching the SWF report's
+    prose-style checklist presentation. Reuses the same tri-state
+    True/False/None handling as render_checks (None = data unavailable,
+    rendered as a neutral dash rather than a false negative).
+    """
+    if not checks:
+        return "<div class='swf-check-na'>&#8213; Not enough data to run this checklist.</div>"
+    html = ""
+    for label, status, desc in checks:
+        if status is None:
+            icon, cls = "&#8213;", "swf-check-na"
+        elif status:
+            icon, cls = "&#9989;", "swf-check-pass"
+        else:
+            icon, cls = "&#10060;", "swf-check-fail"
+        html += (f'<div class="swf-narrative-check"><span class="icon">{icon}</span>'
+                 f'<span class="{cls} label">{html_escape(str(label))}:</span> '
+                 f'<span class="detail">{html_escape(str(desc))}</span></div>')
+    return html
+
+
+def fair_value_bar_chart(current_price, fair_value, currency="₹"):
+    """'Share Price vs Fair Value' horizontal comparison bar, the SWF
+    report's signature valuation visual. Returns None when either input is
+    missing/non-positive so callers can skip rendering cleanly.
+    """
+    if not current_price or not fair_value or current_price <= 0 or fair_value <= 0:
+        return None
+    pct_diff = ((current_price - fair_value) / fair_value) * 100  # +ve = overvalued
+    axis_max = max(current_price, fair_value) * 1.35
+
+    fig = go.Figure()
+    bar_color = GREEN if pct_diff <= -10 else (RED if pct_diff >= 10 else GOLD)
+    fig.add_trace(go.Bar(
+        y=["Current Price"], x=[current_price], orientation='h',
+        marker=dict(color=bar_color), name="Current Price",
+        text=[f"{currency}{current_price:,.2f}"], textposition="outside",
+        textfont=dict(color=TEXT, size=13), hovertemplate="Current Price: %{x:,.2f}<extra></extra>",
+    ))
+    fig.add_trace(go.Bar(
+        y=["Fair Value"], x=[fair_value], orientation='h',
+        marker=dict(color=GREEN), name="Fair Value",
+        text=[f"{currency}{fair_value:,.2f}"], textposition="outside",
+        textfont=dict(color=TEXT, size=13), hovertemplate="Fair Value: %{x:,.2f}<extra></extra>",
+    ))
+    verdict = f"{abs(pct_diff):.1f}% {'Overvalued' if pct_diff > 0 else 'Undervalued'}" if abs(pct_diff) >= 1 else "About Right"
+    verdict_color = RED if pct_diff >= 10 else (GREEN if pct_diff <= -10 else GOLD)
+    fig.update_layout(
+        showlegend=False, barmode='overlay', height=200,
+        margin=dict(l=10, r=90, t=36, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(range=[0, axis_max], showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, tickfont=dict(color=MUTED, size=12)),
+        title=dict(text=f"<b style='color:{verdict_color};'>{verdict}</b>", x=0.01, font=dict(size=15)),
+    )
+    return fig
+
+
+def ownership_stacked_bar(shareholding_dict, currency="₹"):
+    """Ownership breakdown as a single horizontal stacked bar, matching the
+    SWF "Ownership" section. Takes whatever buckets the caller actually has
+    — this app's own data only distinguishes Promoters/Institutions/Public
+    (from yfinance's heldPercentInsiders/heldPercentInstitutions), not the
+    richer Promoters/FII/DII/Public/Others split a bought data feed might
+    offer — so this maps keys by name by whichever is present, rather than
+    assuming a fixed 5-bucket shape, and will pick up a finer breakdown too
+    if one is ever supplied. Returns None when no shareholding data is
+    available at all (including the literal "Data Unavailable" sentinel
+    dict equity.py produces when both source fields are zero).
+    """
+    if not shareholding_dict or "Data Unavailable" in shareholding_dict:
+        return None
+    # Known bucket names (case-insensitive) get a fixed, meaningful color;
+    # anything else (a bucket name this app doesn't anticipate) still
+    # renders, cycling through the remaining palette, rather than being
+    # silently dropped.
+    color_map = {
+        "promoters": GOLD, "promoter": GOLD,
+        "fii": BLUE, "foreign institutions": BLUE,
+        "dii": PURPLE, "domestic institutions": PURPLE,
+        "institutions": BLUE,
+        "public": GREEN, "retail": GREEN,
+        "others": MUTED, "other": MUTED,
+    }
+    fallback_palette = [GOLD, BLUE, PURPLE, GREEN, MUTED, RED, ORANGE]
+    segments = []
+    for i, (name, val) in enumerate(shareholding_dict.items()):
+        val = to_float(val)
+        if not val or val <= 0:
+            continue
+        color = color_map.get(str(name).strip().lower(), fallback_palette[i % len(fallback_palette)])
+        segments.append((name, val, color))
+    if not segments:
+        return None
+
+    fig = go.Figure()
+    for name, val, color in segments:
+        fig.add_trace(go.Bar(
+            x=[val], y=["Ownership"], orientation='h', name=f"{name} {val:.1f}%",
+            marker=dict(color=color), hovertemplate=f"{name}: {val:.1f}%<extra></extra>",
+        ))
+    fig.update_layout(
+        barmode='stack', height=110, showlegend=True,
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0, font=dict(size=11, color=TEXT)),
+        margin=dict(l=10, r=10, t=40, b=10),
+        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+        xaxis=dict(range=[0, 100], showgrid=False, zeroline=False, showticklabels=False),
+        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
+    )
+    return fig
+
+
 def render_checks(checks):
     if not checks:
         return "<div class='swf-check-na'>&#8213; Not enough data to run this checklist.</div>"
     html = ""
     for label, status, desc in checks:
-        icon, cls = ("&#9989;", "swf-check-pass") if status else ("&#10060;", "swf-check-fail")
+        # status is True (pass), False (confirmed fail), or None (checked,
+        # but the underlying data isn't available). Previously `if status`
+        # treated None the same as False — a genuine data gap (e.g. an
+        # illiquid micro-cap FMP/yfinance simply doesn't cover) rendered as
+        # an identical hard red FAIL to a real, confirmed negative, visually
+        # undoing the point of returning None instead of False in the first
+        # place (see dividend_checks and the other check functions in
+        # fundamentals.py). swf-check-na already existed for the
+        # "insufficient data" no-checks-at-all case above; reused here for
+        # the equivalent per-check case.
+        if status is None:
+            icon, cls = "&#8213;", "swf-check-na"
+        elif status:
+            icon, cls = "&#9989;", "swf-check-pass"
+        else:
+            icon, cls = "&#10060;", "swf-check-fail"
         html += f'<div style="padding:5px 0;"><span class="{cls}">{icon} <b>{html_escape(str(label))}</b></span><div class="swf-sub">{html_escape(str(desc))}</div></div>'
     return html
 

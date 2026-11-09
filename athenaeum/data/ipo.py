@@ -24,7 +24,7 @@ from athenaeum.config import GREEN, RED, MUTED, BLUE, BORDER, ORANGE, CARD_BG, B
 from athenaeum.data.equity import fetch_google_news
 from athenaeum.ui.components import custom_metric, card
 from athenaeum.ai.reports import ipo_ai_narrative
-from athenaeum.utils.helpers import style_verdict_text, rating_color
+from athenaeum.utils.helpers import style_verdict_text, rating_color, render_ai_markdown
 from athenaeum.ui.components import verdict_pill, status_pill
 
 logger = logging.getLogger("athenaeum")
@@ -889,9 +889,54 @@ def _merge_ipo_field_values(base, rec):
     return base
 
 
-def _resolve_ipo_key(raw_name, existing_keys, key_tokens, key_order):
-    """Normalized key for `raw_name`, reusing an existing key if either an
-    EXACT normalized-name match or a fuzzy match (see _fuzzy_key_match)
+def _raw_alnum(name):
+    """Lowercased, alphanumeric-only form of a name — deliberately NOT run
+    through _normalize_company_name's suffix/sector-word stripping. Used
+    only by the truncation-prefix check below."""
+    if not name:
+        return ""
+    return re.sub(r"[^a-z0-9]", "", name.lower())
+
+
+def _is_truncation_prefix_match(raw_name_a, raw_name_b, min_prefix_len=10):
+    """True if the RAW, un-stripped alphanumeric forms of two names have a
+    literal, character-for-character prefix relationship and the shorter
+    one is at least min_prefix_len characters — catches a name a source
+    truncated mid-word (e.g. "Augmont Enterpri" vs "Augmont Enterprises")
+    that neither the abbreviation list nor _fuzzy_key_match reliably
+    catches (a mid-word cut can land inside the first word itself, where
+    _fuzzy_key_match's leading-token guard doesn't apply cleanly).
+
+    Deliberately operates on RAW names, not on _normalize_company_name's
+    output — sector-word stripping is asymmetric per name (it only fires
+    when a recognized sector word is actually present), which can make two
+    UNRELATED companies' fully-stripped keys coincidentally satisfy a
+    prefix relationship even though neither raw name ever did. Concretely:
+    "Reliance Industries" strips to "reliance" (8 chars, "industries" is a
+    recognized sector word), while "Reliance Retail" does not strip at all
+    ("retail" isn't in the list) and stays "reliancere tail" -> "reliance"
+    IS a literal prefix of that — a false positive on the stripped keys
+    that does not exist on the raw ones ("relianceindustries" vs
+    "reliancer etail" diverge after "relianc"). Checking raw names avoids
+    this whole class of false positive. min_prefix_len is higher here
+    (10, vs 6 when this was tried against stripped keys) since raw names
+    still carry legal/sector words and so are naturally longer — a short
+    raw-name prefix match is a weaker signal than the same length would be
+    on an already-stripped key.
+    """
+    a, b = _raw_alnum(raw_name_a), _raw_alnum(raw_name_b)
+    if not a or not b or a == b:
+        return False
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) < min_prefix_len:
+        return False
+    return longer.startswith(shorter)
+
+
+def _resolve_ipo_key(raw_name, existing_keys, key_tokens, key_raw_names, key_order):
+    """Normalized key for `raw_name`, reusing an existing key if an EXACT
+    normalized-name match, a fuzzy match (_fuzzy_key_match), or a
+    truncation/prefix match (_is_truncation_prefix_match, on raw names)
     already exists in `existing_keys`. Returns None if raw_name is empty."""
     k = _normalize_company_name(raw_name)
     if not k:
@@ -900,22 +945,28 @@ def _resolve_ipo_key(raw_name, existing_keys, key_tokens, key_order):
         return k
     tok = _leading_token(raw_name)
     fuzzy_key = _fuzzy_key_match(k, tok, [(kk, key_tokens[kk]) for kk in key_order])
-    return fuzzy_key if fuzzy_key else k
+    if fuzzy_key:
+        return fuzzy_key
+    for existing_key in key_order:
+        if _is_truncation_prefix_match(raw_name, key_raw_names[existing_key]):
+            return existing_key
+    return k
 
 
 def _merge_ipo_records(primary: list, secondary: list) -> list:
     """Merge two IPO record lists into one. Two records are treated as the
     same company if their normalized names match exactly, OR — when no exact
     match exists — if they pass the difflib fuzzy check (_fuzzy_key_match):
-    same leading word AND ≥90% string similarity on the normalized key. The
+    same leading word AND ≥90% string similarity on the normalized key, OR
+    a raw-name truncation/prefix match (_is_truncation_prefix_match). The
     exact-match path (via _normalize_company_name's expanded abbreviation
     list) handles every variant this codebase has actually seen; the fuzzy
-    path is the net under it for whatever the next new source's naming
-    convention turns out to be."""
-    by, tokens, key_order = {}, {}, []
+    and prefix paths are the net under it for whatever the next new
+    source's naming convention (or truncation quirk) turns out to be."""
+    by, tokens, raw_names, key_order = {}, {}, {}, []
     for rec in list(primary) + list(secondary):
         raw_name = rec.get("name") or rec.get("slug")
-        k = _resolve_ipo_key(raw_name, by, tokens, key_order)
+        k = _resolve_ipo_key(raw_name, by, tokens, raw_names, key_order)
         if not k:
             continue
         if k in by:
@@ -923,20 +974,21 @@ def _merge_ipo_records(primary: list, secondary: list) -> list:
         else:
             by[k] = dict(rec)
             tokens[k] = _leading_token(raw_name)
+            raw_names[k] = raw_name
             key_order.append(k)
     return list(by.values())
 
 
 def _deduplicate_list(items: list) -> list:
     """Collapse a single list to one record per company. Uses the same
-    exact-then-fuzzy matching and field-merge logic as _merge_ipo_records —
-    this used to be a separate, purely-exact-match implementation that could
-    (and did) disagree with _merge_ipo_records about whether two records
-    were the same company."""
-    by, tokens, key_order = {}, {}, []
+    exact-then-fuzzy-then-prefix matching and field-merge logic as
+    _merge_ipo_records — this used to be a separate, purely-exact-match
+    implementation that could (and did) disagree with _merge_ipo_records
+    about whether two records were the same company."""
+    by, tokens, raw_names, key_order = {}, {}, {}, []
     for item in items:
         raw_name = item.get("name") or item.get("slug") or ""
-        k = _resolve_ipo_key(raw_name, by, tokens, key_order)
+        k = _resolve_ipo_key(raw_name, by, tokens, raw_names, key_order)
         if not k:
             k = re.sub(r"[^a-z0-9]", "", raw_name.lower())[:16] or None
         if not k:
@@ -946,6 +998,7 @@ def _deduplicate_list(items: list) -> list:
         else:
             by[k] = dict(item)
             tokens[k] = _leading_token(raw_name)
+            raw_names[k] = raw_name
             key_order.append(k)
     return list(by.values())
 
@@ -1132,6 +1185,81 @@ def fetch_ipo_list_categorized() -> dict:
     }
 
 
+# Boilerplate/UI-chrome phrases that can appear even WITHIN a correctly
+# section-scoped chunk (e.g. a disclaimer footer directly following a risks
+# list, with no clean heading of its own to stop the scope at) — an
+# independent second filter layer, not a replacement for section-scoping.
+BOILERPLATE_MARKERS = (
+    "educational purposes", "does not constitute investment advice",
+    "subject to market risks", "not endorsed by sebi", "sebi-registered advisor",
+    "past performance is not indicative", "read all scheme-related documents",
+    "read the rhp", "algorithmic score measures", "demand analysis measures",
+    "based on market demand signals", "demand & risk analysis", "demand and risk analysis",
+    "mainboard ipo", "sme ipo", "higher regulatory standards",
+)
+
+
+def extract_scoped_section(full_text, start_markers, stop_markers, max_len=2500):
+    """Text between the first occurrence of any start_marker and whichever
+    comes first: the nearest following stop_marker, or max_len characters.
+    Returns "" if none of start_markers is found.
+
+    Used to scope strengths/risks extraction to the ACTUAL Strengths/Risk(s)
+    section of a scraped IPO page, rather than scanning the page's entire
+    text — see extract_bullet_lines's docstring for why that mattered.
+    """
+    for marker in start_markers:
+        idx = full_text.find(marker)
+        if idx < 0:
+            continue
+        chunk = full_text[idx + len(marker): idx + len(marker) + max_len]
+        cut = len(chunk)
+        for stop in stop_markers:
+            stop_idx = chunk.find(stop)
+            if stop_idx >= 0:
+                cut = min(cut, stop_idx)
+        return chunk[:cut]
+    return ""
+
+
+def extract_bullet_lines(section_text, max_items=8):
+    """Individual bullet/line items from an already section-scoped chunk of
+    text — length-filtered, de-duplicated, and boilerplate-excluded.
+
+    Strengths/Risks extraction used to be an UNSCOPED scan of an IPO page's
+    ENTIRE text (soup.get_text() over the whole document) for any line
+    containing one of a dozen or so generic keywords ("risk", "regulatory",
+    "dependent", etc). That caught far more than genuine strengths/risks: a
+    disclaimer mentioning "IPO investments are subject to market risks"
+    matched on "risk"; a UI tooltip explaining what "Demand Analysis"
+    measures matched because it happened to say "(subscription, GMP,
+    risks)"; the "Risk Analysis" section HEADING itself matched; an
+    exchange badge like "Mainboard IPO (higher regulatory standards)"
+    matched on "regulatory" — none of these are IPO-specific risk factors,
+    but the old unscoped scan couldn't tell the difference, and all of them
+    ended up in the "Key Risks" card verbatim.
+
+    Fixed by calling this ONLY on a chunk already isolated by
+    extract_scoped_section (the same marker-based technique the "about"
+    extraction elsewhere in this file already used), so lines are only
+    ever pulled from the actual Strengths/Risk(s) part of the page — plus
+    the BOILERPLATE_MARKERS filter below as a second, independent layer.
+    A section that can't be located returns no lines at all rather than
+    falling back to an unscoped whole-page scan: an honest "No material
+    risks extracted" (which the UI already renders gracefully) is strictly
+    better than confident boilerplate.
+    """
+    out = []
+    for line in section_text.split("\n"):
+        item = line.strip().lstrip("•- *").strip()
+        if len(item) <= 15 or item in out or len(out) >= max_items:
+            continue
+        if any(marker in item.lower() for marker in BOILERPLATE_MARKERS):
+            continue
+        out.append(item)
+    return out
+
+
 @st.cache_data(ttl=1800, show_spinner=False)
 def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
     detail = {
@@ -1269,18 +1397,16 @@ def fetch_ipo_detail(slug: str, company_name: str = "") -> dict:
             break
     detail["about"] = about or detail.get("longBusinessSummary") or "Business description not available from aggregator."
 
-    strengths, risks = [], []
-    for line in full_text.split("\n"):
-        line = line.strip()
-        if not line:
-            continue
-        low = line.lower()
-        if any(x in low for x in ["risk", "threat", "litigation", "contingent", "adversely", "dependent", "concentration", "competition", "regulatory", "cyclical", "debt", "loss"]):
-            if len(item := line.lstrip("•- *").strip()) > 15 and item not in risks and len(risks) < 8:
-                risks.append(item)
-        elif any(x in low for x in ["strong", "leading", "leader", "profitable", "scalable", "growth", "brand", "network", "advantage"]):
-            if len(item := line.lstrip("•- *").strip()) > 15 and item not in strengths and len(strengths) < 8:
-                strengths.append(item)
+    strengths_section = extract_scoped_section(
+        full_text, ("Strengths\n", "Key Strengths\n"),
+        ("Risk\n", "Risks\n", "Key Risk", "Weakness", "Peer comparison", "Financials", "Shareholding"),
+    )
+    risks_section = extract_scoped_section(
+        full_text, ("Risk\n", "Risks\n", "Key Risk"),
+        ("Peer comparison", "Financials", "Shareholding", "About", "Strengths\n"),
+    )
+    strengths = extract_bullet_lines(strengths_section)
+    risks = extract_bullet_lines(risks_section)
     detail["strengths"] = strengths
     detail["risks"]     = risks
 
@@ -2230,4 +2356,4 @@ def _render_ipo_detail_view():
         narr = ipo_ai_narrative(detail, score, verdict, pros, cons, bucket=bucket)
     card("Should You Invest? — AI Research Note",
          f"<p style='color:{TEXT_BODY};font-size:0.9em;line-height:1.6;white-space:pre-wrap;'>"
-         f"{style_verdict_text(narr)}</p>")
+         f"{render_ai_markdown(narr)}</p>")

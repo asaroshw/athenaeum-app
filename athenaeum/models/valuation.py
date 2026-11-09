@@ -111,6 +111,76 @@ def economic_profit_spread(roic_pct, wacc_pct):
         return None
     return round(roic_pct - wacc_pct, 2)
 
+
+def unlevered_fcff_dcf_fair_value(ebit, effective_tax_rate_pct, da, capex, nwc_change,
+                                  wacc_pct, near_term_growth_pct, terminal_growth_pct,
+                                  net_debt, shares_outstanding):
+    """Genuine unlevered Free Cash Flow to the Firm DCF — the model WACC was
+    added for but never wired into.
+
+    FCFF = EBIT*(1 - tax) + D&A - CapEx - ΔNWC, using the latest available
+    annual figures as a steady-state base year (a screening-level
+    simplification, like the existing "Simplified FCF DCF" — this is not a
+    full multi-year revenue/margin build), discounted at WACC over an
+    explicit 5-year fade from near-term to terminal growth plus a Gordon-
+    growth terminal value, to reach Enterprise Value. Net debt is then
+    subtracted to reach Equity Value per share.
+
+    Deliberately a SEPARATE model from "Simplified FCF DCF", not a
+    replacement for it: that model discounts yfinance's pre-bundled "Free
+    Cash Flow" (≈ Operating Cash Flow - Capex) at Ke, and that pairing is
+    conceptually correct as-is — that FCF figure is a levered, equity-side
+    proxy (it embeds after-interest net income), so Ke remains the right
+    discount rate for it. Swapping WACC into that existing model would have
+    paired an unlevered discount rate with a levered cash flow — a genuine
+    mismatch, not a fix. This model builds the actually-unlevered cash flow
+    from first principles instead, so WACC is discounting what it's meant
+    to discount.
+
+    Returns (enterprise_value, equity_value_per_share), or (None, None) if
+    a required input is missing, WACC isn't above terminal growth (can't
+    discount a perpetuity that grows as fast as or faster than the rate
+    discounting it), or FCFF comes out non-positive (same graceful-skip
+    philosophy as the existing FCF DCF for negative cash flow — a company
+    with genuinely negative unlevered FCF doesn't get a fabricated value
+    out of this model, it simply doesn't produce one).
+    """
+    if ebit is None or wacc_pct is None or not shares_outstanding or shares_outstanding <= 0:
+        return None, None
+    tax_rate = effective_tax_rate_pct if (effective_tax_rate_pct and 0 < effective_tax_rate_pct < 60) \
+        else DEFAULT_STATUTORY_TAX_RATE_PCT
+    nopat = ebit * (1 - tax_rate / 100)
+    fcff = nopat + (da or 0) - (capex or 0) - (nwc_change or 0)
+    if fcff <= 0:
+        return None, None
+
+    wacc = wacc_pct / 100
+    g_near = min(max(near_term_growth_pct / 100.0, 0.0), 0.30)
+    # Same 2-point minimum spread already used elsewhere in this file for
+    # capping terminal growth below Ke — matched here for WACC rather than
+    # inventing a different margin. A thinner spread (tried initially at
+    # 1 point) makes the Gordon-growth terminal value extremely sensitive
+    # to small WACC changes for low-WACC inputs, producing an oversized,
+    # unstable valuation rather than a genuinely wrong one — the 2-point
+    # floor keeps it in the same well-behaved range as every other model
+    # in this file.
+    tg = min(terminal_growth_pct / 100.0, max(wacc - 0.02, 0.01))
+    if wacc <= tg:
+        return None, None
+
+    pv_sum = 0.0
+    cash_flow = fcff
+    for year in range(1, 6):
+        g_year = g_near - (g_near - tg) * (year / 5.0)  # linear fade, near-term -> terminal
+        cash_flow *= (1 + g_year)
+        pv_sum += cash_flow / ((1 + wacc) ** year)
+    terminal_value = (cash_flow * (1 + tg)) / (wacc - tg)
+    enterprise_value = pv_sum + terminal_value / ((1 + wacc) ** 5)
+
+    equity_value = enterprise_value - (net_debt or 0)
+    equity_value_per_share = equity_value / shares_outstanding
+    return round(enterprise_value, 2), round(equity_value_per_share, 2)
+
 def justified_pb_fair_value(roe_pct, ke_pct, growth_pct, book_value_per_share, pb_floor=0.4, pb_cap=None):
     """Fix 12: pb_cap is dynamic — high-ROE institutions (ROE>20%) justify >8x P/B."""
     if pb_cap is None:
@@ -138,10 +208,20 @@ def compute_multi_model_values(
     current_price, ke_pct, growth_pct, financial, book_value_per_share, dividend_per_share,
     roe_pct, effective_eps, resolved_pe, fcf_history, shares, precomputed_jpb, precomputed_ddm,
     sector_profile, pat_yoy_pct,
+    wacc_pct=None, ebit=None, effective_tax_rate_pct=None, da=None, capex=None,
+    nwc_change=None, net_debt=None,
 ):
     """Multi-model valuation with one explicit forecast growth and non-overlapping model families.
     Near-term growth may exceed Ke; only terminal growth is constrained below Ke.
     DCF is a simplified FCF extrapolation (not a full operating DCF).
+
+    The WACC-adjacent keyword args (wacc_pct, ebit, effective_tax_rate_pct,
+    da, capex, nwc_change, net_debt) feed the "Unlevered FCFF DCF" model
+    below — kept as a genuinely separate model from "Simplified FCF DCF"
+    (which correctly stays on Ke; see unlevered_fcff_dcf_fair_value's
+    docstring for why), not a replacement for it. All default to None, so
+    a caller that doesn't supply them simply doesn't get this model added —
+    everything else here is unaffected.
     """
     models = {}
     ke = ke_pct / 100.0
@@ -157,6 +237,7 @@ def compute_multi_model_values(
             return 0.65 * near_term_g + 0.35 * tg
         return 0.35 * near_term_g + 0.65 * tg
 
+    jpb_ratio = None
     if financial:
         # Prefer independent family members — do NOT also emit Blended + JPB + DDM
         jpb_ratio, jpb_value = (precomputed_jpb if precomputed_jpb is not None
@@ -201,6 +282,28 @@ def compute_multi_model_values(
             except Exception as e:
                 logger.warning("Multi-model DCF failed: %s", e)
 
+        # Unlevered FCFF DCF — the model WACC was added for but never wired
+        # into. Genuinely separate from "Simplified FCF DCF" above (see
+        # unlevered_fcff_dcf_fair_value's docstring for why they coexist
+        # rather than one replacing the other). Only attempted when a
+        # caller actually supplies the WACC-adjacent inputs — a caller that
+        # doesn't (wacc_pct/ebit default to None) simply doesn't get this
+        # model added, same graceful-absence behavior as every other model
+        # here when its own required inputs are missing.
+        if wacc_pct is not None and ebit is not None and shares and shares > 0:
+            try:
+                _, fcff_eq_ps = unlevered_fcff_dcf_fair_value(
+                    ebit=ebit, effective_tax_rate_pct=effective_tax_rate_pct,
+                    da=da, capex=capex, nwc_change=nwc_change,
+                    wacc_pct=wacc_pct, near_term_growth_pct=growth_pct,
+                    terminal_growth_pct=TERMINAL_GROWTH_PCT,
+                    net_debt=net_debt, shares_outstanding=shares,
+                )
+                if fcff_eq_ps and fcff_eq_ps > 0:
+                    models["Unlevered FCFF DCF"] = fcff_eq_ps
+            except Exception as e:
+                logger.warning("Unlevered FCFF DCF failed: %s", e)
+
         if book_value_per_share and book_value_per_share > 0:
             models["Book × 0.8"] = book_value_per_share * 0.80
 
@@ -223,22 +326,32 @@ def compute_multi_model_values(
         }
         preference = ["Justified P/B", "DDM", "Simplified Residual Income", "Book × 0.8"]
     elif sector_profile in ("capex_intensive", "materials", "cyclical"):
+        # Unlevered FCFF DCF given EQUAL weight to Simplified FCF DCF here —
+        # this is exactly the sector bucket where capital-structure effects
+        # (leverage, heavy capex) matter most, so the levered-Ke and
+        # unlevered-WACC views are both genuinely informative cross-checks,
+        # not redundant. Previously Simplified FCF DCF alone carried 0.45;
+        # that weight is now split between the two DCF variants.
         weight_map = {
-            "Simplified FCF DCF": 0.45, "3Y Forward EPS": 0.30,
+            "Simplified FCF DCF": 0.25, "Unlevered FCFF DCF": 0.25, "3Y Forward EPS": 0.25,
             "Trailing EPS × Target P/E": 0.15, "Simplified Residual Income": 0.10,
             "Book × 0.8": 0.05, "Defensive Haircut 25%": 0.05,
         }
-        preference = ["Simplified FCF DCF", "3Y Forward EPS", "Trailing EPS × Target P/E",
-                      "Simplified Residual Income", "Book × 0.8"]
+        preference = ["Simplified FCF DCF", "Unlevered FCFF DCF", "3Y Forward EPS",
+                      "Trailing EPS × Target P/E", "Simplified Residual Income", "Book × 0.8"]
     else:
+        # Justified P/B and DDM removed from this branch: they can never
+        # actually be populated for a non-financial company (only the
+        # `if financial:` branch above ever computes them), so they were
+        # dead weight-map entries carrying a weight that could never apply
+        # to anything — clutter, not a live behavior.
         weight_map = {
-            "Simplified FCF DCF": 0.35, "3Y Forward EPS": 0.30,
+            "Simplified FCF DCF": 0.25, "Unlevered FCFF DCF": 0.15, "3Y Forward EPS": 0.25,
             "Trailing EPS × Target P/E": 0.20, "Simplified Residual Income": 0.15,
             "Book × 0.8": 0.05, "Defensive Haircut 25%": 0.05,
-            "Justified P/B": 0.20, "DDM": 0.15,
         }
-        preference = ["Simplified FCF DCF", "3Y Forward EPS", "Trailing EPS × Target P/E",
-                      "Simplified Residual Income", "Justified P/B", "DDM", "Book × 0.8"]
+        preference = ["Simplified FCF DCF", "Unlevered FCFF DCF", "3Y Forward EPS",
+                      "Trailing EPS × Target P/E", "Simplified Residual Income", "Book × 0.8"]
 
     primary_name, primary_val = None, None
     for name in preference:
@@ -293,5 +406,12 @@ def compute_multi_model_values(
         "valuation_cv": round(valuation_cv, 3) if valuation_cv is not None else None,
         "near_term_growth_used": round(near_term_g * 100, 2),
         "terminal_growth_used": round(tg * 100, 2),
+        # Exposed so the caller can display "actual P/B vs justified P/B"
+        # without needing to precompute JPB itself (see this function's
+        # jpb_ratio/jpb_value fallback above — it's computed here, using
+        # the SAME ke_pct/growth_pct this whole call already uses, once,
+        # for every model family, not a second time with a separately
+        # fetched Ke).
+        "jpb_ratio": jpb_ratio,
     }
 
